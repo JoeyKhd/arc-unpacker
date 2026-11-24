@@ -176,7 +176,12 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
         // Codecs that report errors with a MessageBox would otherwise block until someone
         // clicks OK. Record the text and close the dialog, so their error path continues.
         s.spawn(|| {
+            let mut tuned = std::collections::HashSet::new();
+            let tune = opts.tune && std::env::var_os("ARC_UNPACK_NO_DESCENDANT_TUNE").is_none();
             while !all_done.load(Ordering::Relaxed) {
+                if tune {
+                    crate::guard::tune_descendants(&mut tuned);
+                }
                 for m in crate::guard::dismiss_codec_dialogs() {
                     sink(Event::Message { level: Level::Warn, text: format!("codec error dialog (closed automatically): {m}") });
                     dialogs.lock().unwrap().push(m);

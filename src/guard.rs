@@ -101,6 +101,42 @@ mod imp {
         }
     }
 
+    /// Codec helpers are often started by codec DLLs/programs, not by us (e.g. a CLS proxy's
+    /// 64-bit helper), so they miss the tuning applied at spawn. Apply it to every process in
+    /// our job that hasn't had it yet: above-normal priority and no EcoQoS power throttling.
+    pub fn tune_descendants(done: &mut HashSet<u32>) {
+        use windows_sys::Win32::System::Threading::{
+            ABOVE_NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, ProcessPowerThrottling,
+            SetPriorityClass, SetProcessInformation,
+        };
+        for pid in job_pids() {
+            if !done.insert(pid) {
+                continue;
+            }
+            unsafe {
+                let h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if h.is_null() {
+                    continue;
+                }
+                SetPriorityClass(h, ABOVE_NORMAL_PRIORITY_CLASS);
+                let state = PROCESS_POWER_THROTTLING_STATE {
+                    Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                    ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                    StateMask: 0,
+                };
+                SetProcessInformation(
+                    h,
+                    ProcessPowerThrottling,
+                    &state as *const _ as *const core::ffi::c_void,
+                    size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+                );
+                windows_sys::Win32::Foundation::CloseHandle(h);
+            }
+        }
+    }
+
     fn job_pids() -> HashSet<u32> {
         let job = *JOB.lock().unwrap() as HANDLE;
         if job.is_null() {
@@ -363,6 +399,7 @@ mod imp {
     pub fn system_usage() -> (f64, u64, u64) {
         (0.0, 0, 0)
     }
+    pub fn tune_descendants(_: &mut std::collections::HashSet<u32>) {}
     pub fn kill_descendants_on_exit() -> bool {
         false
     }
