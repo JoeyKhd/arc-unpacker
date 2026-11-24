@@ -1,4 +1,6 @@
-# Builds arc-unpack plus the 32-bit and 64-bit CLS hosts into .\dist
+# Builds release binaries into .\dist
+#   arc-unpack.exe, arc-unpack-gui.exe   self-contained: the helpers below are embedded
+#   cls-host-x64.exe, cls-host-x86.exe, unarc-host-x86.exe   the helpers on their own (for development)
 # Exit codes are checked explicitly: under Windows PowerShell 5.1, ErrorActionPreference=Stop
 # would turn cargo's progress messages on stderr into terminating errors.
 Set-Location $PSScriptRoot
@@ -13,13 +15,23 @@ if (-not (rustup target list --installed | Select-String -SimpleMatch 'i686-pc-w
     if ($LASTEXITCODE -ne 0) { throw "rustup target add failed" }
 }
 
-Invoke-Cargo build --release --bin arc-unpack --bin arc-unpack-gui --bin cls-host
+# 1. Helpers (32-bit hosts for 32-bit codec DLLs, 64-bit host for 64-bit ones).
+Invoke-Cargo build --release --bin cls-host
 Invoke-Cargo build --release --target i686-pc-windows-msvc --bin cls-host --bin unarc-host
+
+$embed = Join-Path $PSScriptRoot 'target\embed'
+New-Item -ItemType Directory -Force $embed -ErrorAction Stop | Out-Null
+Copy-Item target\release\cls-host.exe "$embed\cls-host-x64.exe" -Force -ErrorAction Stop
+Copy-Item target\i686-pc-windows-msvc\release\cls-host.exe "$embed\cls-host-x86.exe" -Force -ErrorAction Stop
+Copy-Item target\i686-pc-windows-msvc\release\unarc-host.exe "$embed\unarc-host-x86.exe" -Force -ErrorAction Stop
+
+# 2. Main programs with the helpers embedded.
+$env:ARC_UNPACK_EMBED_DIR = $embed.Replace('\', '/')
+Invoke-Cargo build --release --features embed-helpers --bin arc-unpack --bin arc-unpack-gui
+Remove-Item Env:ARC_UNPACK_EMBED_DIR
 
 New-Item -ItemType Directory -Force dist -ErrorAction Stop | Out-Null
 Copy-Item target\release\arc-unpack.exe dist\ -Force -ErrorAction Stop
 Copy-Item target\release\arc-unpack-gui.exe dist\ -Force -ErrorAction Stop
-Copy-Item target\release\cls-host.exe dist\cls-host-x64.exe -Force -ErrorAction Stop
-Copy-Item target\i686-pc-windows-msvc\release\cls-host.exe dist\cls-host-x86.exe -Force -ErrorAction Stop
-Copy-Item target\i686-pc-windows-msvc\release\unarc-host.exe dist\unarc-host-x86.exe -Force -ErrorAction Stop
+Copy-Item "$embed\*.exe" dist\ -Force -ErrorAction Stop
 Write-Host "Built into $PSScriptRoot\dist"

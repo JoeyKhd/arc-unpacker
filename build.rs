@@ -8,4 +8,5 @@ fn main() {
         println!("cargo:rustc-link-arg-bin=arc-unpack-gui=/MANIFESTUAC:level='requireAdministrator' uiAccess='false'");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=ARC_UNPACK_EMBED_DIR");
 }

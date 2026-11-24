@@ -171,12 +171,7 @@ fn cls_host_for(dll: &Path, host_dir: &Path) -> Result<PathBuf> {
 /// Finds a helper program (cls-host-*, unarc-host-*) next to arc-unpack.exe, or in
 /// ARC_UNPACK_HOST_DIR when set.
 pub fn helper_exe(names: &[&str], host_dir: &Path) -> Result<PathBuf> {
-    let dir = std::env::var_os("ARC_UNPACK_HOST_DIR").map(PathBuf::from).unwrap_or_else(|| host_dir.to_path_buf());
-    names
-        .iter()
-        .map(|n| dir.join(n))
-        .find(|p| p.is_file())
-        .with_context(|| format!("{} isn't next to arc-unpack.exe (build with build.ps1)", names[0]))
+    crate::helpers::find(names, host_dir)
 }
 
 pub fn pe_machine(path: &Path) -> Result<u16> {

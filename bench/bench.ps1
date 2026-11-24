@@ -1,0 +1,103 @@
+<#
+Benchmark: the installer's own engine vs arc-unpack, on the same archives and codecs.
+
+  Baseline   - every archive extracted one after another through unarc.dll's FreeArcExtract,
+               which is what repack installers (Inno Setup + ISDone) call internally.
+  arc-unpack - the same archives in one `arc-unpack extract` run, at --heavy-jobs 1 and 2.
+
+Archives are read once beforehand so every run starts from a warm file cache. CPU and RAM are
+sampled every second. Each run's output is counted (files, bytes) to check the results agree.
+Run from an elevated PowerShell (the repack codecs need administrator rights).
+
+  .\bench.ps1 -Repack D:\repack -Archives data-02.bin,data-03.bin -Codecs D:\codecs -Work D:\benchwork
+#>
+param(
+    [Parameter(Mandatory)] [string]$Repack,
+    [Parameter(Mandatory)] [string[]]$Archives,
+    [Parameter(Mandatory)] [string]$Codecs,          # codec folder with codecs.toml, unarc.dll, arc.ini
+    [Parameter(Mandatory)] [string]$Work,            # scratch folder for outputs (emptied between runs)
+    [string]$Dist = (Join-Path $PSScriptRoot '..\dist'),
+    [string]$Results = (Join-Path $PSScriptRoot 'results.json')
+)
+$ErrorActionPreference = 'Continue'
+$Dist = (Resolve-Path $Dist).Path
+$paths = $Archives | ForEach-Object { Join-Path $Repack $_ }
+
+function Read-Warm([string[]]$files) {
+    $buf = New-Object byte[] (16MB)
+    foreach ($f in $files) { $s = [IO.File]::OpenRead($f); while ($s.Read($buf, 0, $buf.Length) -gt 0) {}; $s.Close() }
+}
+
+function Measure-Output([string]$dir) {
+    $m = Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum
+    [pscustomobject]@{ files = [int]$m.Count; bytes = [int64]$m.Sum }
+}
+
+function Invoke-Measured([string]$name, [scriptblock]$body) {
+    $out = Join-Path $Work $name
+    if (Test-Path $out) { Remove-Item -LiteralPath $out -Recurse -Force }
+    New-Item -ItemType Directory -Force $out | Out-Null
+    Read-Warm $paths
+    $csv = Join-Path $Work "$name.samples.csv"
+    Remove-Item $csv -ErrorAction SilentlyContinue
+    $sampler = Start-Job -ArgumentList $csv -ScriptBlock {
+        param($f)
+        while ($true) {
+            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
+            $os = Get-CimInstance Win32_OperatingSystem
+            $usedMB = [int](($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1024)
+            "$cpu,$usedMB" | Add-Content -Path $f
+        }
+    }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    & $body $out
+    $secs = $sw.Elapsed.TotalSeconds
+    Stop-Job $sampler; Remove-Job $sampler -Force
+    $samples = @(Get-Content $csv -ErrorAction SilentlyContinue | ForEach-Object { $c, $m = $_ -split ','; [pscustomobject]@{ cpu = [double]$c; ram = [int]$m } })
+    $result = Measure-Output $out
+    $row = [pscustomobject]@{
+        name        = $name
+        seconds     = [math]::Round($secs, 1)
+        files       = $result.files
+        bytes       = $result.bytes
+        avg_cpu_pct = if ($samples) { [math]::Round(($samples | Measure-Object cpu -Average).Average, 1) } else { $null }
+        peak_ram_mb = if ($samples) { ($samples | Measure-Object ram -Maximum).Maximum } else { $null }
+    }
+    Write-Host ("{0,-28} {1,8:N1}s  files={2}  bytes={3:N0}  cpu~{4}%  peakRAM={5} MB" -f $row.name, $row.seconds, $row.files, $row.bytes, $row.avg_cpu_pct, $row.peak_ram_mb)
+    Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
+    $row
+}
+
+New-Item -ItemType Directory -Force $Work | Out-Null
+$temp = Join-Path $Work 'tmp'; New-Item -ItemType Directory -Force $temp | Out-Null
+$rows = @()
+
+$rows += Invoke-Measured 'baseline-unarc-sequential' {
+    param($out)
+    Push-Location $Codecs   # unarc finds its external codecs relative to the current folder
+    foreach ($a in $paths) {
+        & "$Dist\unarc-host-x86.exe" "$Codecs\unarc.dll" x $a -o+ "-cfg$Codecs\arc.ini" "-dp$out" "-w$temp" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warning "unarc failed on $a ($LASTEXITCODE)" }
+    }
+    Pop-Location
+}
+
+foreach ($heavy in 1, 2) {
+    $rows += Invoke-Measured "arc-unpack-heavy$heavy" {
+        param($out)
+        & "$Dist\arc-unpack.exe" extract @paths -c "$Codecs\codecs.toml" -o $out -j 3 --heavy-jobs $heavy --temp-dir $temp 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warning "arc-unpack exited with $LASTEXITCODE" }
+    }
+}
+
+$cpuInfo = Get-CimInstance Win32_Processor | Select-Object -First 1
+$machine = [pscustomobject]@{
+    cpu      = $cpuInfo.Name.Trim()
+    threads  = $cpuInfo.NumberOfLogicalProcessors
+    ram_gb   = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    os       = (Get-CimInstance Win32_OperatingSystem).Caption
+    archives = $Archives
+    packed_bytes = ($paths | ForEach-Object { (Get-Item $_).Length } | Measure-Object -Sum).Sum
+}
+[pscustomobject]@{ machine = $machine; runs = $rows; date = (Get-Date -Format s) } | ConvertTo-Json -Depth 4 | Set-Content -Path $Results -Encoding UTF8
+Write-Host "results written to $Results"

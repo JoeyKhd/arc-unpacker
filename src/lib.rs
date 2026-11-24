@@ -5,6 +5,7 @@ pub mod events;
 pub mod extract;
 pub mod format;
 pub mod guard;
+pub mod helpers;
 pub mod inno;
 pub mod install;
 pub mod lzma;
