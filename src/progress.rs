@@ -53,7 +53,8 @@ impl Terminal {
                     pb.inc_length(compressed);
                 }
             }
-            Event::Total { compressed } => {
+            Event::JobOutput { .. } => {}
+            Event::Total { compressed, .. } => {
                 if let Some(o) = st.overall.take() {
                     o.finish_and_clear();
                 }

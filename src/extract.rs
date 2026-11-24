@@ -418,15 +418,23 @@ struct BlockResult {
     codecs: Vec<CodecCpu>,
 }
 
-/// Counts decoded bytes coming out of the last stage (for the stall watchdog).
+/// Counts decoded bytes coming out of the last stage (for the stall watchdog), and reports
+/// them as output progress every few MB.
 struct CountOut {
     inner: Stream,
     n: Arc<AtomicU64>,
+    id: usize,
+    sink: Sink,
+    reported: u64,
 }
 impl Read for CountOut {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let k = self.inner.read(buf)?;
-        self.n.fetch_add(k as u64, Ordering::Relaxed);
+        let n = self.n.fetch_add(k as u64, Ordering::Relaxed) + k as u64;
+        if n >= self.reported + (4 << 20) || (k == 0 && n > self.reported) {
+            self.reported = n;
+            (self.sink)(Event::JobOutput { id: self.id, done: n });
+        }
         Ok(k)
     }
 }
@@ -463,7 +471,7 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
     let ctx = Ctx { temp_dir: opts.temp_dir.clone(), host_dir: opts.host_dir.clone(), tune: opts.tune, reg: reg.clone() };
     let output = stage::build(&stages, input, block.origsize, &ctx)?;
     let produced = Arc::new(AtomicU64::new(0));
-    let output: Stream = Box::new(CountOut { inner: output, n: produced.clone() });
+    let output: Stream = Box::new(CountOut { inner: output, n: produced.clone(), id, sink: sink.clone(), reported: 0 });
 
     // Watchdog: stops the block when cancelled, or when no compressed input is consumed and no
     // output produced for a long time (a hung codec, or one waiting on something it can't get).
@@ -603,6 +611,9 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     let mut last = 0u64;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
+        if let Some(mb) = line.strip_prefix("write ").and_then(|v| v.trim().parse::<u64>().ok()) {
+            sink(Event::JobOutput { id, done: mb << 20 });
+        }
         if let Some(mb) = line.strip_prefix("read ").and_then(|v| v.trim().parse::<u64>().ok()) {
             let pos = (mb << 20).min(total);
             if pos > last {

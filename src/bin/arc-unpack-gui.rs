@@ -190,6 +190,9 @@ struct JobView {
     label: String,
     total: u64,
     done: u64,
+    /// Decoded bytes expected / produced so far.
+    out_total: u64,
+    out_done: u64,
     started: Instant,
     finished: Option<(f64, Option<String>)>,
 }
@@ -201,6 +204,8 @@ struct Progress {
     jobs: BTreeMap<usize, JobView>,
     total: u64,
     total_fixed: bool,
+    /// Decoded bytes the whole install produces (0 if unknown).
+    total_out: u64,
     step: Option<(usize, usize, String)>,
     log: Vec<(Level, String)>,
     /// (time, bytes done) over the last few seconds, for a steady speed readout.
@@ -438,17 +443,28 @@ impl App {
                     p.jobs.clear();
                     p.total = 0;
                     p.total_fixed = false;
+                    p.total_out = 0;
+                    p.samples.clear();
                     p.step = None;
                 }
-                Event::Total { compressed } => {
+                Event::Total { compressed, output } => {
                     p.total = compressed;
+                    p.total_out = output;
                     p.total_fixed = true;
+                }
+                Event::JobOutput { id, done } => {
+                    if let Some(j) = p.jobs.get_mut(&id) {
+                        j.out_done = done.max(j.out_done);
+                    }
                 }
                 Event::Plan { compressed, .. } if !p.total_fixed => p.total += compressed,
                 Event::Plan { .. } => {}
                 Event::Step { index, total, label } => p.step = Some((index, total, label)),
-                Event::JobStarted { id, label, compressed, .. } => {
-                    p.jobs.insert(id, JobView { label, total: compressed, done: 0, started: Instant::now(), finished: None });
+                Event::JobStarted { id, label, compressed, output, .. } => {
+                    p.jobs.insert(
+                        id,
+                        JobView { label, total: compressed, done: 0, out_total: output, out_done: 0, started: Instant::now(), finished: None },
+                    );
                 }
                 Event::JobProgress { id, done } => {
                     if let Some(j) = p.jobs.get_mut(&id) {
@@ -458,6 +474,7 @@ impl App {
                 Event::JobFinished { id, secs, error, .. } => {
                     if let Some(j) = p.jobs.get_mut(&id) {
                         j.done = j.total;
+                        j.out_done = j.out_total;
                         j.finished = Some((secs, error));
                     }
                 }
@@ -773,11 +790,21 @@ impl App {
         if !busy {
             return;
         }
-        let (done, _) = self.progress.jobs.values().fold((0u64, 0u64), |(d, t), j| (d + j.done.min(j.total), t + j.total));
+        // Measured in decoded output when it's known (decoders may read all their input first);
+        // otherwise in compressed input.
+        let p = &self.progress;
+        let out_done: u64 = p.jobs.values().map(|j| j.out_done.min(j.out_total.max(j.out_done))).sum();
+        let by_output = p.total_out > 0 || p.jobs.values().any(|j| j.out_done > 0);
+        let (done, total) = if by_output {
+            let total: u64 = if p.total_out > 0 { p.total_out } else { p.jobs.values().map(|j| j.out_total).sum() };
+            (out_done, total)
+        } else {
+            let (d, t) = p.jobs.values().fold((0u64, 0u64), |(d, t), j| (d + j.done.min(j.total), t + j.total));
+            (d, if p.total_fixed { p.total } else { t.max(p.total) })
+        };
         let speed = self.progress.speed(done);
         let p = &self.progress;
-        let (done, total) = p.jobs.values().fold((0u64, 0u64), |(d, t), j| (d + j.done.min(j.total), t + j.total));
-        let total = if p.total_fixed { p.total } else { total.max(p.total) }.max(1);
+        let total = total.max(1);
         let frac = (done as f64 / total as f64).min(0.995);
         let elapsed = p.phase_started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         let cancelled = self.running.as_ref().is_some_and(|r| r.cancel.load(Ordering::Relaxed));
@@ -832,8 +859,9 @@ impl App {
                 let running = p.jobs.values().filter(|j| j.finished.is_none());
                 let finished: Vec<&JobView> = p.jobs.values().filter(|j| j.finished.is_some()).collect();
                 for j in running {
-                    let rate = j.done as f64 / j.started.elapsed().as_secs_f64().max(0.1);
-                    ui.add(egui::ProgressBar::new(j.done as f32 / j.total.max(1) as f32).text(format!("{} · {}/s", j.label, human(rate as u64))));
+                    let (d, t) = if j.out_total > 0 && j.out_done > 0 { (j.out_done, j.out_total) } else { (j.done, j.total) };
+                    let rate = d as f64 / j.started.elapsed().as_secs_f64().max(0.1);
+                    ui.add(egui::ProgressBar::new(d as f32 / t.max(1) as f32).text(format!("{} · {}/s", j.label, human(rate as u64))));
                 }
                 for j in finished.iter().rev().take(5) {
                     match &j.finished {

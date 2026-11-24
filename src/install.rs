@@ -643,7 +643,7 @@ fn install_scripted(
     };
 
     sink(Event::Phase { name: "Installing".into() });
-    sink(Event::Total { compressed: packed });
+    sink(Event::Total { compressed: packed, output: need });
     let mut runner = ScriptRunner {
         opts,
         sink,
