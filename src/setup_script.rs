@@ -637,6 +637,44 @@ pub fn prepare_tmp(setup: &Setup, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A plan needs the installer's `{tmp}` files (scripts check for them and edit its INI files).
+/// Unpacking them takes a moment, so one copy per installer is kept and copied for each plan.
+fn fill_plan_tmp(setup: &Setup, dir: &Path) -> Result<()> {
+    let template = std::env::temp_dir().join(format!("arc-unpack-plan-{}", setup.fingerprint()));
+    if !template.join(".ready").is_file() {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let part = template.with_extension(format!("part-{}-{n}", std::process::id()));
+        prepare_tmp(setup, &part)?;
+        std::fs::write(part.join(".ready"), "")?;
+        if std::fs::rename(&part, &template).is_err() {
+            // Another plan finished first (fine), or a crashed one left a half-made copy.
+            if !template.join(".ready").is_file() {
+                let _ = std::fs::remove_dir_all(&template);
+                if std::fs::rename(&part, &template).is_ok() {
+                    return copy_tree(&template, dir);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&part);
+        }
+    }
+    copy_tree(&template, dir)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let dst = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_tree(&e.path(), &dst)?;
+        } else if e.file_name() != ".ready" {
+            std::fs::copy(e.path(), &dst)?;
+        }
+    }
+    Ok(())
+}
+
 /// Names of the files in the repack folder (for optional-component detection).
 pub fn repack_files(repack: &Path) -> Vec<String> {
     std::fs::read_dir(repack)
@@ -684,7 +722,7 @@ pub fn plan_with(
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("arcunp-plan-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    prepare_tmp(setup, &tmp)?;
+    fill_plan_tmp(setup, &tmp)?;
     let selected = selected.unwrap_or_else(|| default_components(setup, &repack_files(repack)));
     let components = setup
         .components

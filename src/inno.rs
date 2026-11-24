@@ -432,6 +432,11 @@ impl Setup {
         Ok(Setup { version, files, types, components, icons, code, data, data_offset, blob })
     }
 
+    /// Identifies this installer's contents (for caches).
+    pub fn fingerprint(&self) -> String {
+        format!("{:08x}{:x}", crc32fast::hash(&self.blob), self.blob.len())
+    }
+
     fn chunk(&self, d: &DataEntry) -> Result<Vec<u8>> {
         let start = self.data_offset as usize + d.chunk_offset as usize;
         ensure!(self.blob.get(start..start + 4) == Some(b"zlb\x1a"), "bad chunk magic");
