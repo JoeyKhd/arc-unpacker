@@ -15,13 +15,36 @@ const DATA_ENTRY_SIZE: usize = 74; // 5.5.x layout
 const FLAG_CALL_FILTER: u16 = 1 << 4;
 const FLAG_ENCRYPTED: u16 = 1 << 6;
 const FLAG_COMPRESSED: u16 = 1 << 7;
+const FILE_TYPE_UNINSTALLER: u8 = 1;
+/// A file entry whose 10 strings are all empty: 10 length prefixes + the fixed 43-byte tail.
+const EMPTY_FILE_ENTRY: usize = 10 * 4 + 43;
 
 #[derive(Debug, Clone)]
 pub struct SetupFile {
     /// Destination as written in the installer, e.g. `{tmp}\arc.ini`.
     pub dest: String,
     pub size: u64,
+    /// Inno conditions, as written in the script (empty = unconditional).
+    pub components: String,
+    pub tasks: String,
+    pub languages: String,
+    pub check: String,
     location: Option<usize>,
+}
+
+impl SetupFile {
+    /// `{app}\x\y` -> `x\y` for files the installer puts in the game folder.
+    pub fn app_relative(&self) -> Option<&str> {
+        let rest = self.dest.strip_prefix("{app}")?;
+        let rest = rest.trim_start_matches(['\\', '/']);
+        (!rest.is_empty() && !rest.ends_with(['\\', '/'])).then_some(rest)
+    }
+
+    /// Whether an embedded file can be written at all (directory entries and files the
+    /// installer downloads or finds elsewhere cannot).
+    pub fn has_data(&self) -> bool {
+        self.location.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -146,9 +169,14 @@ fn header_counts(b: &[u8]) -> Result<(usize, usize)> {
 fn parse_file_entry(r: &mut Reader, n_data: usize) -> Result<SetupFile> {
     let _source = r.wstr()?;
     let dest = r.wstr()?;
-    for _ in 0..8 {
-        r.wstr()?; // font, assembly, components, tasks, languages, check, after/before install
-    }
+    r.wstr()?; // install font name
+    r.wstr()?; // strong assembly name
+    let components = r.wstr()?;
+    let tasks = r.wstr()?;
+    let languages = r.wstr()?;
+    let check = r.wstr()?;
+    r.wstr()?; // after install
+    r.wstr()?; // before install
     r.raw(20)?; // windows version range
     let location = r.u32()?;
     r.u32()?; // attributes
@@ -157,15 +185,22 @@ fn parse_file_entry(r: &mut Reader, n_data: usize) -> Result<SetupFile> {
     r.u32()?; // 32 option flags
     let kind = r.u8()?;
     ensure!(kind <= 2, "bad file type");
-    ensure!(!dest.is_empty(), "empty destination");
-    let location = if location == u32::MAX { None } else { Some(location as usize) };
+    // Only the uninstaller's own entry (type 1) has no destination; it is never extracted.
+    ensure!(!dest.is_empty() || kind == FILE_TYPE_UNINSTALLER, "empty destination");
+    let location = if location == u32::MAX || dest.is_empty() { None } else { Some(location as usize) };
     ensure!(location.is_none_or(|l| l < n_data), "bad data location");
-    Ok(SetupFile { dest, size: 0, location })
+    Ok(SetupFile { dest, size: 0, components, tasks, languages, check, location })
 }
 
 /// Finds the file-entry table by trying every plausible start ("{" as the first character of
 /// a destination after an empty source) and keeping the one where all entries parse.
 fn find_file_entries(b: &[u8], n_files: usize, n_data: usize) -> Result<Vec<SetupFile>> {
+    let parse_from = |start: usize| -> Result<Vec<SetupFile>> {
+        let mut r = Reader { b, o: start };
+        (0..n_files).map(|_| parse_file_entry(&mut r, n_data)).collect()
+    };
+    // Only the uninstaller's entry may lack a destination (parse_file_entry enforces that).
+    let plausible = |f: &SetupFile| f.dest.is_empty() || f.dest.contains('\\') || f.dest.contains('}');
     let mut o = 0;
     while let Some(p) = b[o + 1..].windows(2).position(|w| w == b"{\0").map(|p| p + o + 1) {
         o = p;
@@ -173,10 +208,19 @@ fn find_file_entries(b: &[u8], n_files: usize, n_data: usize) -> Result<Vec<Setu
         if u32_at(b, start)? != 0 || !(2..2048).contains(&u32_at(b, start + 4)?) {
             continue;
         }
-        let mut r = Reader { b, o: start };
-        let parsed: Result<Vec<SetupFile>> = (0..n_files).map(|_| parse_file_entry(&mut r, n_data)).collect();
-        if let Ok(files) = parsed
-            && files.iter().all(|f| f.dest.contains('\\') || f.dest.contains('}'))
+        // The uninstaller's own entry (all strings empty) usually comes first, and the anchor
+        // above can't see it. Without it the table would end one entry too late, inside the
+        // icon entries, and produce a bogus file.
+        if let Some(prev) = start.checked_sub(EMPTY_FILE_ENTRY)
+            && b[prev..prev + 40].iter().all(|&x| x == 0)
+            && b[start - 1] == FILE_TYPE_UNINSTALLER
+            && let Ok(files) = parse_from(prev)
+            && files.iter().all(plausible)
+        {
+            return Ok(files);
+        }
+        if let Ok(files) = parse_from(start)
+            && files.iter().all(plausible)
         {
             return Ok(files);
         }
@@ -278,32 +322,53 @@ impl Setup {
         }
     }
 
+    /// One embedded file's bytes (SHA-1 verified). `cache` keeps the last decompressed chunk.
+    fn content(&self, f: &SetupFile, cache: &mut Option<(u32, Vec<u8>)>) -> Result<Vec<u8>> {
+        let d = &self.data[f.location.context("file has no embedded data")?];
+        if cache.as_ref().is_none_or(|(off, _)| *off != d.chunk_offset) {
+            *cache = Some((d.chunk_offset, self.chunk(d)?));
+        }
+        let chunk = &cache.as_ref().unwrap().1;
+        let mut content = chunk
+            .get(d.file_offset as usize..(d.file_offset + d.size) as usize)
+            .with_context(|| format!("{}: chunk too short", f.dest))?
+            .to_vec();
+        if d.flags & FLAG_CALL_FILTER != 0 {
+            decode_call_filter(&mut content);
+        }
+        let digest = sha1_smol::Sha1::from(&content).digest().bytes();
+        ensure!(digest == d.sha1, "{}: SHA-1 mismatch", f.dest);
+        Ok(content)
+    }
+
+    /// Reads one embedded file into memory.
+    pub fn read(&self, f: &SetupFile) -> Result<Vec<u8>> {
+        self.content(f, &mut None)
+    }
+
     /// Extracts every embedded file under `out_dir`, mapping `{tmp}\x` to `out_dir\tmp\x`.
     /// Returns (destination, path) pairs. Fails on any SHA-1 mismatch.
     pub fn extract_all(&self, out_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-        let mut order: Vec<&SetupFile> = self.files.iter().filter(|f| f.location.is_some()).collect();
-        order.sort_by_key(|f| {
+        self.extract_with(|f| Ok(Some(out_dir.join(safe_dest(&f.dest)?))))
+    }
+
+    /// Extracts the embedded files `place` maps to a path (None = skip). Fails on any SHA-1
+    /// mismatch.
+    pub fn extract_with(&self, mut place: impl FnMut(&SetupFile) -> Result<Option<PathBuf>>) -> Result<Vec<(String, PathBuf)>> {
+        let mut order: Vec<(&SetupFile, PathBuf)> = Vec::new();
+        for f in self.files.iter().filter(|f| f.location.is_some()) {
+            if let Some(path) = place(f)? {
+                order.push((f, path));
+            }
+        }
+        order.sort_by_key(|(f, _)| {
             let d = &self.data[f.location.unwrap()];
             (d.chunk_offset, d.file_offset)
         });
         let mut cache: Option<(u32, Vec<u8>)> = None;
         let mut written = Vec::new();
-        for f in order {
-            let d = &self.data[f.location.unwrap()];
-            if cache.as_ref().is_none_or(|(off, _)| *off != d.chunk_offset) {
-                cache = Some((d.chunk_offset, self.chunk(d)?));
-            }
-            let chunk = &cache.as_ref().unwrap().1;
-            let mut content = chunk
-                .get(d.file_offset as usize..(d.file_offset + d.size) as usize)
-                .with_context(|| format!("{}: chunk too short", f.dest))?
-                .to_vec();
-            if d.flags & FLAG_CALL_FILTER != 0 {
-                decode_call_filter(&mut content);
-            }
-            let digest = sha1_smol::Sha1::from(&content).digest().bytes();
-            ensure!(digest == d.sha1, "{}: SHA-1 mismatch", f.dest);
-            let path = out_dir.join(safe_dest(&f.dest)?);
+        for (f, path) in order {
+            let content = self.content(f, &mut cache)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -315,7 +380,7 @@ impl Setup {
 }
 
 /// `{tmp}\cls-srep.dll` -> `tmp\cls-srep.dll`, refusing anything that could escape.
-fn safe_dest(dest: &str) -> Result<PathBuf> {
+pub fn safe_dest(dest: &str) -> Result<PathBuf> {
     let mut p = PathBuf::new();
     for part in dest.split(['\\', '/']) {
         if part.is_empty() || part == "." {
@@ -345,6 +410,47 @@ mod tests {
     fn dest_mapping() {
         assert_eq!(safe_dest(r"{tmp}\cls-srep.dll").unwrap(), Path::new("tmp").join("cls-srep.dll"));
         assert!(safe_dest(r"{app}\..\x").is_err());
+    }
+
+    fn wstr(out: &mut Vec<u8>, s: &str) {
+        let w: Vec<u8> = s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        out.extend_from_slice(&(w.len() as u32).to_le_bytes());
+        out.extend_from_slice(&w);
+    }
+
+    /// One 5.5.x file entry: source, dest, font, assembly, 6 condition strings, fixed tail.
+    fn entry(out: &mut Vec<u8>, dest: &str, components: &str, location: u32, kind: u8) {
+        for s in ["", dest, "", "", components, "", "", "", "", ""] {
+            wstr(out, s);
+        }
+        out.extend_from_slice(&[0u8; 20]); // windows versions
+        out.extend_from_slice(&location.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // attributes
+        out.extend_from_slice(&0u64.to_le_bytes()); // external size
+        out.extend_from_slice(&[0xFF, 0xFF]); // permission
+        out.extend_from_slice(&0u32.to_le_bytes()); // options
+        out.push(kind);
+    }
+
+    #[test]
+    fn file_table_includes_the_uninstaller_entry() {
+        let mut b = vec![7u8; 33]; // whatever precedes the table
+        entry(&mut b, "", "", u32::MAX, FILE_TYPE_UNINSTALLER);
+        entry(&mut b, r"{tmp}\a.dll", "", 0, 0);
+        entry(&mut b, r"{app}\_Redist\b.addon", "bonus", 1, 0);
+        // An icon entry follows; it must not be read as a fourth file.
+        for s in [r"{group}\Game", r"{app}\Game.exe", "", "", "", "", "", "", "", ""] {
+            wstr(&mut b, s);
+        }
+        b.extend_from_slice(&[0u8; 64]);
+
+        let files = find_file_entries(&b, 3, 2).unwrap();
+        let dests: Vec<&str> = files.iter().map(|f| f.dest.as_str()).collect();
+        assert_eq!(dests, ["", r"{tmp}\a.dll", r"{app}\_Redist\b.addon"]);
+        assert!(!files[0].has_data());
+        assert_eq!(files[0].app_relative(), None);
+        assert_eq!(files[2].app_relative(), Some(r"_Redist\b.addon"));
+        assert_eq!(files[2].components, "bonus");
     }
 
     /// Runs against a real installer when ARC_UNPACK_TEST_SETUP points at one.

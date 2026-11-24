@@ -79,9 +79,15 @@ def parse_file_entry(r, n_data):
     e["flags"] = r.u32()   # 32 flags in 5.5.0 -> 4 bytes
     e["type"] = r.u8()
     assert e["type"] <= 2, "bad file type"
-    assert e["dest"], "empty destination"
+    # Only the uninstaller's own entry (type 1) has no destination; it is never extracted.
+    assert e["dest"] or e["type"] == 1, "empty destination"
+    if not e["dest"]:
+        e["location"] = 0xFFFFFFFF
     assert e["location"] < n_data or e["location"] == 0xFFFFFFFF, "bad location"
     return e
+
+
+EMPTY_FILE_ENTRY = 10 * 4 + 43  # 10 empty strings + the fixed tail
 
 
 def find_file_entries(b, n_files, n_data):
@@ -94,13 +100,20 @@ def find_file_entries(b, n_files, n_data):
         start = o - 8  # dest length (4) + empty source string (4)
         if start < 0 or u32(b, start) != 0 or not (2 <= u32(b, start + 4) < 2048):
             continue
-        try:
-            r = R(b, start)
-            entries = [parse_file_entry(r, n_data) for _ in range(n_files)]
-            if all("\\" in e["dest"] or "}" in e["dest"] for e in entries):
-                return entries, start, r.o
-        except (AssertionError, UnicodeDecodeError, struct.error, IndexError):
-            pass
+        # The uninstaller's own entry (all strings empty) usually comes first and has no "{" to
+        # anchor on; without it the table would end one entry late, inside the icon entries.
+        candidates = [start]
+        prev = start - EMPTY_FILE_ENTRY
+        if prev >= 0 and b[prev:prev + 40] == bytes(40) and b[start - 1] == 1:
+            candidates.insert(0, prev)
+        for cand in candidates:
+            try:
+                r = R(b, cand)
+                entries = [parse_file_entry(r, n_data) for _ in range(n_files)]
+                if all(not e["dest"] or "\\" in e["dest"] or "}" in e["dest"] for e in entries):
+                    return entries, cand, r.o
+            except (AssertionError, UnicodeDecodeError, struct.error, IndexError):
+                pass
 
 
 def parse_data_entries(b, n):
