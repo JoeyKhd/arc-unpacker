@@ -47,10 +47,32 @@ impl SetupFile {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SetupType {
+    pub name: String,
+    pub custom: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Component {
+    pub name: String,
+    pub description: String,
+    /// Comma-separated setup types that include this component.
+    pub types: String,
+    pub languages: String,
+    pub fixed: bool,
+    pub exclusive: bool,
+}
+
 #[derive(Debug)]
 pub struct Setup {
     pub version: String,
     pub files: Vec<SetupFile>,
+    /// Setup types (e.g. "full", "custom"); the first one is the default.
+    pub types: Vec<SetupType>,
+    pub components: Vec<Component>,
+    /// Compiled `[Code]` section (empty if the installer has none).
+    pub code: Vec<u8>,
     data: Vec<DataEntry>,
     data_offset: u64,
     blob: Vec<u8>,
@@ -155,15 +177,24 @@ fn read_block(blob: &[u8], pos: usize) -> Result<(Vec<u8>, usize)> {
 }
 
 /// File and data-entry counts from the 5.5.x setup header.
-fn header_counts(b: &[u8]) -> Result<(usize, usize)> {
+/// Entry counts from the 5.5.x setup header: language, message, permission, type, component,
+/// task, directory, file, data, icon, ini, registry, delete, uninstall delete, run, uninstall run.
+fn header_counts(b: &[u8]) -> Result<Vec<usize>> {
     let mut r = Reader { b, o: 0 };
     // 27 binary strings (app name ... close_applications_filter), 3 ANSI texts, compiled code.
     for _ in 0..31 {
         r.bstr()?;
     }
-    let counts: Vec<u32> = (0..16).map(|_| r.u32()).collect::<Result<_>>()?;
-    // language, message, permission, type, component, task, directory, FILE, DATA, icon, ...
-    Ok((counts[7] as usize, counts[8] as usize))
+    (0..16).map(|_| r.u32().map(|v| v as usize)).collect()
+}
+
+/// The 31st header string: the compiled `[Code]` section (Pascal Script bytecode).
+fn compiled_code(b: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Reader { b, o: 0 };
+    for _ in 0..30 {
+        r.bstr()?;
+    }
+    Ok(r.bstr()?.to_vec())
 }
 
 fn parse_file_entry(r: &mut Reader, n_data: usize) -> Result<SetupFile> {
@@ -226,6 +257,59 @@ fn find_file_entries(b: &[u8], n_files: usize, n_data: usize) -> Result<Vec<Setu
         }
     }
     bail!("file entries not found (unsupported Inno Setup variant?)")
+}
+
+fn parse_type_entry(r: &mut Reader) -> Result<SetupType> {
+    let name = r.wstr()?;
+    for _ in 0..3 {
+        r.wstr()?; // description, languages, check
+    }
+    r.raw(20)?; // windows version range
+    let flags = r.u8()?;
+    let kind = r.u8()?;
+    r.u64()?; // size
+    ensure!(!name.is_empty() && kind <= 3 && flags <= 1, "not a type entry");
+    Ok(SetupType { name, custom: flags & 1 != 0 })
+}
+
+fn parse_component_entry(r: &mut Reader) -> Result<Component> {
+    let name = r.wstr()?;
+    let description = r.wstr()?;
+    let types = r.wstr()?;
+    let languages = r.wstr()?;
+    r.wstr()?; // check
+    r.u64()?; // extra disk space
+    let level = r.u32()?;
+    let used = r.u8()?;
+    r.raw(20)?; // windows version range
+    let flags = r.u8()?;
+    r.u64()?; // size
+    ensure!(!name.is_empty() && level < 16 && used <= 1 && flags < 32, "not a component entry");
+    Ok(Component { name, description, types, languages, fixed: flags & 1 != 0, exclusive: flags & 8 != 0 })
+}
+
+/// Finds the type and component tables (they are adjacent) by trying every start offset and
+/// keeping the first where all entries parse and every component's types are known types.
+fn find_component_tables(b: &[u8], n_types: usize, n_components: usize) -> Result<(Vec<SetupType>, Vec<Component>)> {
+    if n_types == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    for start in 0..b.len().saturating_sub(8) {
+        // A type entry starts with a non-empty UTF-16 name.
+        if !(2..256).contains(&u32_at(b, start).unwrap_or(0)) {
+            continue;
+        }
+        let mut r = Reader { b, o: start };
+        let Ok(types) = (0..n_types).map(|_| parse_type_entry(&mut r)).collect::<Result<Vec<_>>>() else { continue };
+        let Ok(components) = (0..n_components).map(|_| parse_component_entry(&mut r)).collect::<Result<Vec<_>>>() else {
+            continue;
+        };
+        let known = |list: &str| list.split(',').map(str::trim).filter(|t| !t.is_empty()).all(|t| types.iter().any(|x| x.name.eq_ignore_ascii_case(t)));
+        if types.iter().all(|t| t.name.chars().all(|c| !c.is_control())) && components.iter().all(|c| known(&c.types)) {
+            return Ok((types, components));
+        }
+    }
+    bail!("setup types/components not found")
 }
 
 fn parse_data_entries(b: &[u8], n: usize) -> Result<Vec<DataEntry>> {
@@ -293,13 +377,17 @@ impl Setup {
         }
         let (b1, end1) = read_block(&blob, header_offset + 64)?;
         let (b2, _) = read_block(&blob, end1)?;
-        let (n_files, n_data) = header_counts(&b1)?;
+        let counts = header_counts(&b1)?;
+        let (n_files, n_data) = (counts[7], counts[8]);
         let data = parse_data_entries(&b2, n_data)?;
         let mut files = find_file_entries(&b1, n_files, n_data)?;
         for f in &mut files {
             f.size = f.location.map(|l| data[l].size).unwrap_or(0);
         }
-        Ok(Setup { version, files, data, data_offset, blob })
+        // Types and components only matter for running the install script; don't fail on them.
+        let (types, components) = find_component_tables(&b1, counts[3], counts[4]).unwrap_or_default();
+        let code = compiled_code(&b1)?;
+        Ok(Setup { version, files, types, components, code, data, data_offset, blob })
     }
 
     fn chunk(&self, d: &DataEntry) -> Result<Vec<u8>> {

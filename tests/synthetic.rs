@@ -525,6 +525,7 @@ fn cancel_stops_a_running_block() {
         heavy_jobs: 1,
         done_dir: None,
         md5: None,
+        md5_prefix: String::new(),
     };
     let c2 = cancel.clone();
     std::thread::spawn(move || {
@@ -558,6 +559,7 @@ fn resume_skips_finished_jobs() {
         heavy_jobs: 1,
         done_dir: Some(env.p("progress")),
         md5: None,
+        md5_prefix: String::new(),
     };
     let sink = arc_unpack::events::null_sink();
     let s1 = arc_unpack::extract::run(vec![arc_unpack::format::Archive::open(&path).unwrap()], &cfg, &opts(false), &sink).unwrap();

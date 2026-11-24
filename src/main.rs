@@ -40,6 +40,17 @@ enum Cmd {
     },
     /// Install a repack folder in one step: prepare codecs from its setup.exe, verify, extract.
     Install(InstallArgs),
+    /// Show what a repack's own install script does: components and steps (changes nothing).
+    Script {
+        /// The repack folder (with setup.exe)
+        repack: PathBuf,
+        /// Game folder to use in the listing
+        #[arg(long, default_value = r"C:\Games\Game")]
+        target: PathBuf,
+        /// Print the bytecode of this script procedure instead (e.g. CurStepChanged)
+        #[arg(long)]
+        disasm: Option<String>,
+    },
     /// Extract the files embedded in an Inno Setup 5.5 installer (without running it).
     ExtractSetup {
         setup: PathBuf,
@@ -151,6 +162,36 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Script { repack, target, disasm } => {
+            let setup_exe = if repack.is_file() { repack.clone() } else { repack.join("setup.exe") };
+            let repack = if repack.is_file() { repack.parent().map(PathBuf::from).unwrap_or_default() } else { repack };
+            if let Some(name) = disasm {
+                let setup = arc_unpack::inno::Setup::open(&setup_exe)?;
+                let script = arc_unpack::pascal::Script::load(&setup.code)?;
+                let p = script.find(&name).with_context(|| format!("no procedure {name} in the script"))?;
+                for line in arc_unpack::pascal::disassemble(&script, p)? {
+                    println!("{line}");
+                }
+                return Ok(());
+            }
+            let plan = arc_unpack::setup_script::plan(&setup_exe, &repack, &target)?;
+            println!("Components (default install + downloaded optional parts):");
+            for (name, desc, on) in &plan.components {
+                println!("  [{}] {name}  {desc}", if *on { "x" } else { " " });
+            }
+            println!("\nSteps:");
+            for (i, s) in plan.steps.iter().enumerate() {
+                println!("  {:3}. {s}", i + 1);
+            }
+            for m in &plan.messages {
+                println!("note: {m}");
+            }
+            if let Some(e) = &plan.error {
+                println!("\nThe script stopped: {e}");
+            }
+            println!("\n(dry run: extraction is only simulated, so steps that check for extracted files may be missing)");
+            Ok(())
+        }
         Cmd::ExtractSetup { setup, out } => {
             let s = arc_unpack::inno::Setup::open(&setup)?;
             println!("{}: {} files", s.version, s.files.len());
@@ -216,6 +257,14 @@ struct InstallArgs {
     /// Scan, prepare codecs and check disk space, but don't extract anything.
     #[arg(long)]
     dry_run: bool,
+    /// Don't run the installer's own install script; just extract every archive into the
+    /// target (the older mode: repack post-processing steps are skipped).
+    #[arg(long)]
+    no_script: bool,
+    /// Components to install, comma-separated (like setup.exe's /COMPONENTS). Default: what a
+    /// default install selects, plus optional parts whose archives were downloaded.
+    #[arg(long, value_delimiter = ',')]
+    components: Option<Vec<String>>,
     /// Wait for Enter before exiting (used when relaunched in its own elevated window).
     #[arg(long, hide = true)]
     keep_open: bool,
@@ -234,7 +283,12 @@ fn install(a: InstallArgs) -> Result<()> {
         if let Some(c) = &a.cache_dir {
             args.extend(["--cache-dir".into(), abs(c).display().to_string()]);
         }
-        for (flag, on) in [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune)] {
+        if let Some(c) = &a.components {
+            args.extend(["--components".into(), c.join(",")]);
+        }
+        for (flag, on) in
+            [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune), ("--no-script", a.no_script)]
+        {
             if on {
                 args.push(flag.into());
             }
@@ -271,6 +325,8 @@ fn install(a: InstallArgs) -> Result<()> {
         host_dir: std::env::current_exe()?.parent().map(PathBuf::from).unwrap_or_default(),
         cancel: Default::default(),
         dry_run: a.dry_run,
+        script: !a.no_script,
+        components: a.components,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();
@@ -354,6 +410,7 @@ fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Re
         heavy_jobs: run.heavy_jobs,
         done_dir: None,
         md5: None,
+        md5_prefix: String::new(),
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();

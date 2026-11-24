@@ -40,6 +40,8 @@ pub struct Options {
     /// The repack's own list of installed-file MD5s (e.g. `_Redist\fitgirl.md5`). Listed files
     /// are hashed while they are written, so no separate verification pass is needed.
     pub md5: Option<Arc<Md5List>>,
+    /// Where `out_dir` sits inside the game folder (e.g. `temp\`), for MD5 list lookups.
+    pub md5_prefix: String,
 }
 
 /// Expected MD5 of one installed file.
@@ -531,6 +533,14 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
 
 /// Extracts (or tests) a whole archive through unarc.dll via unarc-host-x86.exe. unarc checks
 /// file CRCs with its own (possibly modified) algorithm, so success means the files verified.
+struct RemoveDirOnDrop(PathBuf);
+
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &Sink) -> Result<BlockResult> {
     use std::io::BufRead;
     let dll = cfg.unarc_dll().context("no unarc configured")?;
@@ -545,7 +555,12 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     if let Some(out) = &opts.out_dir {
         cmd.arg(format!("-dp{}", abs(out).display()));
     }
-    cmd.arg(format!("-w{}", abs(&opts.temp_dir).display()));
+    // A work folder per job: FreeArc's external codecs use fixed temp-file names in it, so two
+    // unarc jobs sharing one would overwrite each other's files.
+    let work = opts.temp_dir.join(format!("unarc-{}-{}", std::process::id(), stage::unique()));
+    std::fs::create_dir_all(&work).with_context(|| format!("create {}", work.display()))?;
+    let _work_cleanup = RemoveDirOnDrop(work.clone());
+    cmd.arg(format!("-w{}", abs(&work).display()));
     // CreateProcess finds unarc's external codecs (rzw.exe, xtool\...) relative to the current dir.
     cmd.current_dir(cfg.codec_dir());
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
@@ -658,10 +673,8 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
                 left -= n as u64;
             }
             let crc = h.finalize();
-            if let (Some(x), Some(m)) = (expected, m)
-                && let Err(err) = check_md5(x, m)
-            {
-                problems.push(format!("{}: {err}", e.path));
+            if let (Some(x), Some(m)) = (expected, m) {
+                check_md5(x, m);
             }
             if !verify {
                 files_unverified += 1;
@@ -761,15 +774,16 @@ fn check_trailing(stream: &mut Stream, problems: &mut Vec<String>) {
 }
 
 fn expected_md5<'a>(opts: &'a Options, rel: &str) -> Option<&'a ExpectedMd5> {
-    opts.md5.as_ref()?.get(&md5_key(rel))
+    opts.md5.as_ref()?.get(&md5_key(&format!("{}{rel}", opts.md5_prefix)))
 }
 
-fn check_md5(expected: &ExpectedMd5, ctx: md5::Context) -> Result<()> {
+/// Records the hash of a file as written. A mismatch is not an error here: a later step (a
+/// later archive, a repack tool) may still replace the file, so mismatches are re-checked
+/// from disk once everything is done.
+fn check_md5(expected: &ExpectedMd5, ctx: md5::Context) {
     let got = ctx.finalize().0;
     expected.matched.store(got == expected.md5, Ordering::Relaxed);
     expected.checked.store(true, Ordering::Relaxed);
-    ensure!(got == expected.md5,"MD5 mismatch with the repack's list (got {}, want {})", hex(&got), hex(&expected.md5));
-    Ok(())
 }
 
 fn write_file(job: &FileJob, overwrite: bool, verify: bool, expected: Option<&ExpectedMd5>) -> Result<()> {
@@ -798,7 +812,7 @@ fn write_file(job: &FileJob, overwrite: bool, verify: bool, expected: Option<&Ex
     let crc = h.finalize();
     ensure!(!verify || crc == job.crc, "CRC mismatch (got {crc:08x}, want {:08x})", job.crc);
     if let (Some(x), Some(m)) = (expected, m) {
-        check_md5(x, m)?;
+        check_md5(x, m);
     }
     Ok(())
 }

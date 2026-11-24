@@ -79,6 +79,10 @@ pub struct InstallOptions {
     pub cancel: Arc<AtomicBool>,
     /// Scan, prepare codecs and check space, but extract nothing.
     pub dry_run: bool,
+    /// Run the installer's own install script (falls back to plain extraction if it can't).
+    pub script: bool,
+    /// Components to install (None: default selection plus downloaded optional parts).
+    pub components: Option<Vec<String>>,
 }
 
 pub struct InstallReport {
@@ -92,6 +96,8 @@ pub struct InstallReport {
     pub setup_files: usize,
     /// Installed files that matched the repack's own MD5 list.
     pub files_md5: usize,
+    /// Steps the installer's own script took (0 when it wasn't used).
+    pub script_steps: usize,
 }
 
 pub fn default_cache_dir() -> PathBuf {
@@ -342,6 +348,7 @@ fn run_role(
         heavy_jobs: opts.heavy_jobs,
         done_dir,
         md5,
+        md5_prefix: String::new(),
     };
     std::fs::create_dir_all(&eopts.temp_dir)?;
     extract::run(reopened, cfg, &eopts, sink)
@@ -350,6 +357,22 @@ fn run_role(
 pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     sink(Event::Phase { name: "Scanning".into() });
     let first = scan(&opts.repack_dir, None)?;
+    // Preferred: run the installer's own install script (exact result, any post-processing).
+    if opts.script
+        && opts.config.is_none()
+        && let Some(setup) = &first.setup
+    {
+        let usable = crate::inno::Setup::open(setup).and_then(|inno| {
+            ensure!(!inno.code.is_empty(), "the installer has no install script");
+            let script = crate::pascal::Script::load(&inno.code)?;
+            ensure!(script.find("CURSTEPCHANGED").is_some(), "the installer's script has no install procedure");
+            Ok((inno, script))
+        });
+        match usable {
+            Ok((inno, script)) => return install_scripted(opts, &first, setup, &inno, &script, sink),
+            Err(e) => events::warn(sink, format!("can't run the installer's own script ({e:#}); extracting the archives directly")),
+        }
+    }
     let config_path = match &opts.config {
         Some(c) => c.clone(),
         None => {
@@ -387,6 +410,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
             md5_checked: 0,
             setup_files: 0,
             files_md5: 0,
+            script_steps: 0,
         });
     }
 
@@ -483,7 +507,8 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
             .iter()
             .flat_map(|a| a.archive.entries.iter().filter(|e| !e.is_dir).map(|e| extract::md5_key(&e.path)))
             .collect();
-        let check = check_md5_list(list, &opts.target_dir, &in_archives, &opts.cancel);
+        let entries: Vec<(&String, &ExpectedMd5)> = list.iter().collect();
+        let check = check_md5_list(&entries, &opts.target_dir, Some(&in_archives), &opts.cancel);
         if check.after > 0 {
             events::info(sink, format!("{} files written by unarc.dll or an earlier run were hashed afterwards", check.after));
         }
@@ -492,7 +517,319 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
         summary.notes.extend(check.notes);
     }
     sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
-    Ok(InstallReport { summary, codec_dir, scripts, scripts_dir, md5_checked, setup_files, files_md5 })
+    Ok(InstallReport { summary, codec_dir, scripts, scripts_dir, md5_checked, setup_files, files_md5, script_steps: 0 })
+}
+
+/// Installs by running the installer's own install script (see `setup_script`): every archive
+/// extraction goes through arc-unpack's engine, the repack's own post-processing runs as the
+/// script says, and the result is checked against the repack's MD5 list.
+fn install_scripted(
+    opts: &InstallOptions,
+    scan: &Scan,
+    setup_exe: &Path,
+    inno: &crate::inno::Setup,
+    script: &crate::pascal::Script,
+    sink: &Sink,
+) -> Result<InstallReport> {
+    use crate::setup_script::{self as ss, Folders, InnoHost};
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = abs(&opts.target_dir);
+    let selected: std::collections::BTreeSet<String> = match &opts.components {
+        Some(list) => list.iter().map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect(),
+        None => ss::default_components(inno, &ss::repack_files(&opts.repack_dir)),
+    };
+    events::info(sink, format!("running the installer's own install script; components: {}", selected.iter().cloned().collect::<Vec<_>>().join(", ")));
+
+    // Upper bound: everything every archive holds (inner archives are extracted and deleted).
+    let need: u64 = scan.archives.iter().map(|a| a.archive.total_size()).sum();
+    if let Some(free) = crate::guard::free_space(&target) {
+        ensure!(free > need + (1 << 30), "not enough space on the target drive: need {}, {} free", human(need), human(free));
+    }
+    if opts.dry_run {
+        let plan = ss::plan(setup_exe, &opts.repack_dir, &target)?;
+        for (i, s) in plan.steps.iter().enumerate() {
+            events::info(sink, format!("step {}: {s}", i + 1));
+        }
+        if let Some(e) = plan.error {
+            events::warn(sink, format!("the script would stop: {e}"));
+        }
+        events::info(sink, format!("would install up to {} into {}", human(need), target.display()));
+        let mut report = empty_report(PathBuf::new());
+        report.script_steps = plan.steps.len();
+        return Ok(report);
+    }
+
+    let mut md5_checked = 0;
+    if opts.verify_md5 {
+        sink(Event::Phase { name: "Verifying archives".into() });
+        md5_checked = verify_md5(scan, &opts.cancel, sink)?;
+    }
+
+    // A fresh copy of the installer's temporary files per run: the script edits some of them.
+    let target_key = sha1_smol::Sha1::from(target.to_string_lossy().to_lowercase()).digest().to_string();
+    let run_dir = opts.cache_dir.join("run").join(&target_key[..12]);
+    let _ = std::fs::remove_dir_all(&run_dir);
+    let tmp = run_dir.join("tmp");
+    ss::prepare_tmp(inno, &tmp).context("unpacking the installer's temporary files")?;
+    std::fs::create_dir_all(&target)?;
+
+    let md5 = match md5_list_from_setup(inno) {
+        Ok(l) => l.map(Arc::new),
+        Err(e) => {
+            events::warn(sink, format!("installed-file MD5 list: {e:#}"));
+            None
+        }
+    };
+
+    sink(Event::Phase { name: "Installing".into() });
+    let mut runner = ScriptRunner { opts, sink, md5: md5.clone(), app: target.clone(), summary: Summary::default(), configs: Vec::new(), n: 0 };
+    let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
+    let mut host = InnoHost::new(folders, inno, selected, &mut runner);
+    let mut vm = crate::pascal::Vm::new(script);
+    let mut script_error = None;
+    let mut setup_files = 0;
+    // Inno's order: ssInstall, then its [Files], then ssPostInstall (where repacks unpack), ssDone.
+    for step in [ss::SS_INSTALL, ss::SS_POST_INSTALL, ss::SS_DONE] {
+        if step == ss::SS_POST_INSTALL {
+            match install_setup_files(inno, &target, sink) {
+                Ok(n) => setup_files = n,
+                Err(e) => script_error = Some(format!("files from setup.exe: {e:#}")),
+            }
+        }
+        if script_error.is_some() {
+            break;
+        }
+        if let Err(e) = ss::run_step(script, &mut vm, &mut host, step) {
+            script_error = Some(format!("{e:#}"));
+        }
+    }
+    let messages = std::mem::take(&mut host.messages);
+    let script_steps = host.steps.len();
+    drop(host);
+    let mut summary = runner.summary;
+    summary.notes.extend(messages);
+    if opts.cancel.load(Ordering::Relaxed) {
+        summary.cancelled = true;
+    } else if let Some(e) = script_error {
+        summary.problems.push(format!("the installer's script stopped: {e}"));
+    }
+
+    let mut files_md5 = 0;
+    if !summary.cancelled
+        && let Some(list) = &md5
+    {
+        sink(Event::Phase { name: "Checking files".into() });
+        // Check what the installed list (after the script merged optional parts) names.
+        let wanted = md5_keys_on_disk(inno, &target);
+        let entries: Vec<(&String, &ExpectedMd5)> = list.iter().filter(|(k, _)| wanted.as_ref().is_none_or(|w| w.contains(*k))).collect();
+        let check = check_md5_list(&entries, &target, None, &opts.cancel);
+        files_md5 = check.ok;
+        summary.problems.extend(check.problems);
+        summary.notes.extend(check.notes);
+    }
+    let _ = std::fs::remove_dir_all(&run_dir);
+    sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
+    Ok(InstallReport {
+        summary,
+        codec_dir: tmp,
+        scripts: Vec::new(),
+        scripts_dir: None,
+        md5_checked,
+        setup_files,
+        files_md5,
+        script_steps,
+    })
+}
+
+fn empty_report(codec_dir: PathBuf) -> InstallReport {
+    InstallReport {
+        summary: Summary::default(),
+        codec_dir,
+        scripts: Vec::new(),
+        scripts_dir: None,
+        md5_checked: 0,
+        setup_files: 0,
+        files_md5: 0,
+        script_steps: 0,
+    }
+}
+
+/// Keys of the MD5 lists as they are in the game folder after the script ran (it may have
+/// merged optional parts' lists into the main one), or None if there are none.
+fn md5_keys_on_disk(inno: &crate::inno::Setup, target: &Path) -> Option<HashSet<String>> {
+    let mut list = Md5List::new();
+    for f in &inno.files {
+        let Some(rel) = f.app_relative() else { continue };
+        if !rel.to_ascii_lowercase().ends_with(".md5") {
+            continue;
+        }
+        let Ok(text) = std::fs::read(target.join(rel)) else { continue };
+        let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+        base.pop();
+        parse_installed_md5(&String::from_utf8_lossy(&text), &base, &mut list);
+    }
+    (!list.is_empty()).then(|| list.into_keys().collect())
+}
+
+/// Carries out the script's steps with arc-unpack's engine.
+struct ScriptRunner<'a> {
+    opts: &'a InstallOptions,
+    sink: &'a Sink,
+    md5: Option<Arc<Md5List>>,
+    app: PathBuf,
+    summary: Summary,
+    /// Codec configs imported from the script's arc.ini, by (path, content hash).
+    configs: Vec<(PathBuf, String, Config)>,
+    n: usize,
+}
+
+impl ScriptRunner<'_> {
+    fn config(&mut self, arc_ini: &Path) -> Result<Config> {
+        let bytes = std::fs::read(arc_ini).with_context(|| format!("read {}", arc_ini.display()))?;
+        let hash = sha1_smol::Sha1::from(&bytes).digest().to_string();
+        if let Some((_, _, c)) = self.configs.iter().find(|(p, h, _)| p == arc_ini && *h == hash) {
+            return Ok(c.clone());
+        }
+        let toml = crate::arcini::to_toml(arc_ini)?;
+        let path = arc_ini.with_extension("arc-unpack.toml");
+        std::fs::write(&path, toml)?;
+        let cfg = Config::load(&path)?;
+        self.configs.push((arc_ini.to_path_buf(), hash, cfg.clone()));
+        Ok(cfg)
+    }
+
+    fn extract(&mut self, archive: &Path, out: &Path, arc_ini: &Path, base: Option<&str>) -> Result<bool> {
+        if !archive.is_file() {
+            events::warn(self.sink, format!("{}: not found", archive.display()));
+            return Ok(false);
+        }
+        let cfg = self.config(arc_ini)?;
+        let a = Archive::open(archive)?;
+        // A part of the archive: extract everything next to the target, then move that part in.
+        let stage = base.map(|_| out.join(format!(".arc-unpack-part-{}", self.n)));
+        let dest = stage.clone().unwrap_or_else(|| out.to_path_buf());
+        // MD5 list paths are relative to the game folder.
+        let prefix = match (&stage, out.strip_prefix(&self.app)) {
+            (None, Ok(rel)) => Some(if rel.as_os_str().is_empty() { String::new() } else { format!("{}\\", rel.display()) }),
+            _ => None,
+        };
+        let eopts = Options {
+            out_dir: Some(dest),
+            jobs: self.opts.jobs,
+            writers: self.opts.writers,
+            overwrite: true,
+            skip_missing: false,
+            tune: self.opts.tune,
+            temp_dir: self.opts.cache_dir.join("tmp"),
+            host_dir: self.opts.host_dir.clone(),
+            stall_timeout: self.opts.stall_timeout,
+            cancel: self.opts.cancel.clone(),
+            heavy_jobs: self.opts.heavy_jobs,
+            done_dir: None,
+            md5: prefix.as_ref().and(self.md5.clone()),
+            md5_prefix: prefix.unwrap_or_default(),
+        };
+        std::fs::create_dir_all(&eopts.temp_dir)?;
+        let s = extract::run(vec![a], &cfg, &eopts, self.sink)?;
+        if let (Some(stage), Some(base)) = (&stage, base) {
+            let part = stage.join(base.replace('/', "\\"));
+            if part.is_dir() {
+                move_tree(&part, out)?;
+            }
+            let _ = std::fs::remove_dir_all(stage);
+        }
+        let ok = s.problems.is_empty() && !s.cancelled;
+        let sm = &mut self.summary;
+        sm.files_ok += s.files_ok;
+        sm.files_unverified += s.files_unverified;
+        sm.bytes += s.bytes;
+        sm.cancelled |= s.cancelled;
+        sm.problems.extend(s.problems);
+        for n in s.notes {
+            if !sm.notes.contains(&n) {
+                sm.notes.push(n);
+            }
+        }
+        Ok(ok)
+    }
+
+    fn exec(&mut self, program: &Path, args: &str, dir: &Path) -> Result<bool> {
+        let mut cmd;
+        let is_batch = program.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
+        if is_batch {
+            // As Inno's Exec does: batch files run through cmd.exe.
+            cmd = std::process::Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()));
+            raw_arg(&mut cmd, &format!("/C \"\"{}\"{args}\"", program.display()));
+        } else {
+            cmd = std::process::Command::new(program);
+            raw_arg(&mut cmd, args.trim_start());
+        }
+        cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
+        let mut child = cmd.spawn().with_context(|| format!("start {}", program.display()))?;
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            if self.opts.cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                bail!("cancelled");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if !status.success() {
+            let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let note = format!("{name}{args}: exited with code {}", status.code().unwrap_or(-1));
+            events::warn(self.sink, note.clone());
+            self.summary.notes.push(note);
+        }
+        // Like ISDone: a program that ran counts as done; the final MD5 check catches failures.
+        Ok(true)
+    }
+}
+
+impl crate::setup_script::Runner for ScriptRunner<'_> {
+    fn run(&mut self, step: &crate::setup_script::Step) -> Result<bool> {
+        use crate::setup_script::Step;
+        ensure!(!self.opts.cancel.load(Ordering::Relaxed), "cancelled");
+        self.n += 1;
+        let started = std::time::Instant::now();
+        let ok = match step {
+            Step::Extract { archive, out, cfg, base } => self.extract(archive, out, cfg, base.as_deref())?,
+            Step::Exec { program, args, dir } => self.exec(program, args, dir)?,
+        };
+        let secs = started.elapsed().as_secs_f64();
+        events::info(self.sink, format!("step {}: {step} ({secs:.1}s){}", self.n, if ok { "" } else { " FAILED" }));
+        Ok(ok)
+    }
+}
+
+#[cfg(windows)]
+fn raw_arg(cmd: &mut std::process::Command, args: &str) {
+    use std::os::windows::process::CommandExt;
+    if !args.is_empty() {
+        cmd.raw_arg(args);
+    }
+}
+
+#[cfg(not(windows))]
+fn raw_arg(cmd: &mut std::process::Command, args: &str) {
+    cmd.args(args.split_whitespace());
+}
+
+/// Moves every file under `from` into `to` (same volume: renames), replacing existing ones.
+fn move_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let dst = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            move_tree(&e.path(), &dst)?;
+        } else {
+            std::fs::rename(e.path(), &dst).with_context(|| format!("move {} to {}", e.path().display(), dst.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// The repack's list of installed-file MD5s shipped inside setup.exe (FitGirl:
@@ -554,16 +891,36 @@ struct Md5Check {
     notes: Vec<String>,
 }
 
-/// Completes the MD5 check: hashes listed files that weren't hashed while being written
-/// (unarc.dll wrote them, or a resumed run skipped their archive) and reports missing ones.
-/// Files that no archive in the folder contains are only noted (optional parts not downloaded).
-fn check_md5_list(list: &Md5List, target: &Path, in_archives: &HashSet<String>, cancel: &AtomicBool) -> Md5Check {
+/// Completes the MD5 check. Files whose hash matched while they were written only need to
+/// still exist; everything else (written by unarc.dll, skipped by a resumed run, or
+/// mismatched at write time and possibly replaced later) is hashed from disk now. Missing
+/// files are problems, except, with `in_archives`, those no archive here contains (optional
+/// parts not downloaded), which are only noted.
+fn check_md5_list(
+    entries: &[(&String, &ExpectedMd5)],
+    target: &Path,
+    in_archives: Option<&HashSet<String>>,
+    cancel: &AtomicBool,
+) -> Md5Check {
     let mut check = Md5Check { ok: 0, after: 0, problems: Vec::new(), notes: Vec::new() };
-    let todo: Vec<(&String, &ExpectedMd5)> = list.iter().filter(|(_, x)| !x.checked.load(Ordering::Relaxed)).collect();
-    check.ok = list.values().filter(|x| x.matched.load(Ordering::Relaxed)).count();
+    let path_of = |x: &ExpectedMd5| target.join(x.path.replace('/', "\\"));
+    let mut todo = Vec::new();
+    let mut gone = Vec::new();
+    for &(key, x) in entries {
+        if x.checked.load(Ordering::Relaxed) && x.matched.load(Ordering::Relaxed) {
+            if path_of(x).is_file() {
+                check.ok += 1;
+            } else {
+                gone.push((key, x));
+            }
+        } else {
+            todo.push((key, x));
+        }
+    }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
-    let results: Vec<(usize, Result<bool, String>)> = std::thread::scope(|s| {
+    let todo_ref = &todo;
+    let mut results: Vec<(usize, Result<bool, String>)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 s.spawn(|| {
@@ -571,12 +928,12 @@ fn check_md5_list(list: &Md5List, target: &Path, in_archives: &HashSet<String>, 
                     let mut buf = vec![0u8; 1 << 20];
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= todo.len() || cancel.load(Ordering::Relaxed) {
+                        if i >= todo_ref.len() || cancel.load(Ordering::Relaxed) {
                             break;
                         }
-                        let x = todo[i].1;
+                        let x = todo_ref[i].1;
                         let r = (|| -> std::io::Result<bool> {
-                            let mut f = std::fs::File::open(target.join(x.path.replace('/', "\\")))?;
+                            let mut f = std::fs::File::open(path_of(x))?;
                             let mut ctx = md5::Context::new();
                             loop {
                                 let n = f.read(&mut buf)?;
@@ -595,6 +952,9 @@ fn check_md5_list(list: &Md5List, target: &Path, in_archives: &HashSet<String>, 
             .collect();
         workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
     });
+    let base = todo.len();
+    todo.extend(gone);
+    results.extend((base..todo.len()).map(|i| (i, Err(String::new()))));
     let (mut missing, mut absent, mut bad) = (Vec::new(), Vec::new(), Vec::new());
     for (i, r) in results {
         let (key, x) = todo[i];
@@ -604,7 +964,7 @@ fn check_md5_list(list: &Md5List, target: &Path, in_archives: &HashSet<String>, 
                 check.after += 1;
             }
             Ok(false) => bad.push(format!("{} (MD5 mismatch with the repack's list)", x.path)),
-            Err(e) if e.is_empty() && in_archives.contains(key) => missing.push(x.path.clone()),
+            Err(e) if e.is_empty() && in_archives.is_none_or(|a| a.contains(key.as_str())) => missing.push(x.path.clone()),
             Err(e) if e.is_empty() => absent.push(x.path.clone()),
             Err(e) => bad.push(format!("{}: {e}", x.path)),
         }
@@ -627,7 +987,7 @@ fn check_md5_list(list: &Md5List, target: &Path, in_archives: &HashSet<String>, 
 
 /// Whether an Inno `Languages:` expression includes English (or is empty = every language).
 /// The silent default is the installer's first language; repacks list English as "en"/"english".
-fn english_or_neutral(languages: &str) -> bool {
+pub fn english_or_neutral(languages: &str) -> bool {
     let words: Vec<String> = languages
         .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
         .filter(|w| !w.is_empty())
@@ -707,7 +1067,8 @@ mod tests {
             list.insert(extract::md5_key(p), ExpectedMd5::new(md5::compute(content).0, p.to_string()));
         }
         let in_archives: HashSet<String> = ["sub/a.txt", "b.txt", "gone.txt"].iter().map(|p| extract::md5_key(p)).collect();
-        let c = check_md5_list(&list, &dir, &in_archives, &AtomicBool::new(false));
+        let entries: Vec<(&String, &ExpectedMd5)> = list.iter().collect();
+        let c = check_md5_list(&entries, &dir, Some(&in_archives), &AtomicBool::new(false));
         assert_eq!((c.ok, c.after), (1, 1));
         assert_eq!(c.problems.len(), 2, "{:?}", c.problems);
         assert!(c.problems.iter().any(|p| p.starts_with("b.txt (MD5 mismatch")));

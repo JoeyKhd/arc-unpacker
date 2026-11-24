@@ -174,6 +174,8 @@ impl App {
             host_dir: std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default(),
             cancel: cancel.clone(),
             dry_run: false,
+            script: true,
+            components: None,
         };
         let done_ctx = ctx.clone();
         std::thread::spawn(move || {

@@ -17,7 +17,7 @@ rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 sha1_smol = "1.0.1"
 toml = "1.2.2"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Diagnostics_Debug", "Win32_System_SystemServices", "Win32_System_JobObjects", "Win32_UI_WindowsAndMessaging", "Win32_Security", "Win32_System_Memory", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Diagnostics_Debug", "Win32_System_SystemServices", "Win32_System_JobObjects", "Win32_UI_WindowsAndMessaging", "Win32_Security", "Win32_System_Memory", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
 
 [features]
 # Release builds: carry cls-host/unarc-host inside the main executables (see build.ps1).
