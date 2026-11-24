@@ -73,14 +73,19 @@ function Invoke-Measured([string]$name, [scriptblock]$body) {
 New-Item -ItemType Directory -Force $Work | Out-Null
 $temp = Join-Path $Work 'tmp'; New-Item -ItemType Directory -Force $temp | Out-Null
 $rows = @()
+$script:baselineParts = @()
 
 $rows += Invoke-Measured 'baseline-unarc-sequential' {
     param($out)
     Push-Location $Codecs   # unarc finds its external codecs relative to the current folder
     foreach ($a in $paths) {
-        $log = Join-Path $Work ("unarc-" + [IO.Path]::GetFileName($a) + ".log")
+        $name = [IO.Path]::GetFileName($a)
+        $log = Join-Path $Work "unarc-$name.log"
+        $t = [Diagnostics.Stopwatch]::StartNew()
         & "$Dist\unarc-host-x86.exe" "$Codecs\unarc.dll" x $a -o+ "-cfg$Codecs\arc.ini" "-dp$out" "-w$temp" *> $log
-        if ($LASTEXITCODE -ne 0) { Write-Warning "unarc failed on $a ($LASTEXITCODE), see $log" }
+        $code = $LASTEXITCODE
+        $script:baselineParts += [pscustomobject]@{ archive = $name; seconds = [math]::Round($t.Elapsed.TotalSeconds, 1); exit_code = $code }
+        if ($code -ne 0) { Write-Warning "unarc failed on $a ($code), see $log" }
     }
     Pop-Location
 }
@@ -102,5 +107,6 @@ $machine = [pscustomobject]@{
     archives = $Archives
     packed_bytes = ($paths | ForEach-Object { (Get-Item -LiteralPath $_).Length } | Measure-Object -Sum).Sum
 }
-[pscustomobject]@{ machine = $machine; runs = $rows; date = (Get-Date -Format s) } | ConvertTo-Json -Depth 4 | Set-Content -Path $Results -Encoding UTF8
+[pscustomobject]@{ machine = $machine; runs = $rows; baseline_per_archive = $script:baselineParts; date = (Get-Date -Format s) } |
+    ConvertTo-Json -Depth 4 | Set-Content -Path $Results -Encoding UTF8
 Write-Host "results written to $Results"
