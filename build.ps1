@@ -1,6 +1,7 @@
 # Builds release binaries into .\dist (or -OutDir <folder>)
 #   arc-unpack.exe, arc-unpack-gui.exe   self-contained: the helpers below are embedded
 #   cls-host-x64.exe, cls-host-x86.exe, unarc-host-x86.exe   the helpers on their own (for development)
+#   zz-arc-unpack-timer.dll   the xtool timer plugin (also embedded)
 param([string]$OutDir = 'dist')
 # Exit codes are checked explicitly: under Windows PowerShell 5.1, ErrorActionPreference=Stop
 # would turn cargo's progress messages on stderr into terminating errors.
@@ -27,6 +28,10 @@ Copy-Item $td\release\cls-host.exe "$embed\cls-host-x64.exe" -Force -ErrorAction
 Copy-Item $td\i686-pc-windows-msvc\release\cls-host.exe "$embed\cls-host-x86.exe" -Force -ErrorAction Stop
 Copy-Item $td\i686-pc-windows-msvc\release\unarc-host.exe "$embed\unarc-host-x86.exe" -Force -ErrorAction Stop
 
+# The xtool timer plugin (its own tiny crate; 64-bit, like the xtool builds it is for).
+Invoke-Cargo build --release --manifest-path xtool-timer\Cargo.toml --target-dir "$td\xtool-timer"
+Copy-Item "$td\xtool-timer\release\xtool_timer.dll" "$embed\zz-arc-unpack-timer.dll" -Force -ErrorAction Stop
+
 # 2. Main programs with the helpers embedded.
 $env:ARC_UNPACK_EMBED_DIR = $embed.Replace('\', '/')
 Invoke-Cargo build --release --features embed-helpers --bin arc-unpack --bin arc-unpack-gui
@@ -36,4 +41,5 @@ New-Item -ItemType Directory -Force $OutDir -ErrorAction Stop | Out-Null
 Copy-Item $td\release\arc-unpack.exe $OutDir -Force -ErrorAction Stop
 Copy-Item $td\release\arc-unpack-gui.exe $OutDir -Force -ErrorAction Stop
 Copy-Item "$embed\*.exe" $OutDir -Force -ErrorAction Stop
+Copy-Item "$embed\*.dll" $OutDir -Force -ErrorAction Stop
 Write-Host "Built into $OutDir"

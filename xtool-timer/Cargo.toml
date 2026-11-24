@@ -1,0 +1,18 @@
+[package]
+name = "xtool-timer"
+version = "0.1.0"
+edition = "2024"
+description = "A do-nothing xtool plugin that asks Windows for 1 ms timer resolution inside xtool's process"
+
+[lib]
+name = "xtool_timer"
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true
+
+# Built on its own (see ../build.ps1), not as part of the arc-unpack package.
+[workspace]

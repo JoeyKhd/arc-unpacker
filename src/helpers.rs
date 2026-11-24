@@ -12,6 +12,7 @@ const EMBEDDED: &[(&str, &[u8])] = &[
     ("cls-host-x86.exe", include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/cls-host-x86.exe"))),
     ("cls-host-x64.exe", include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/cls-host-x64.exe"))),
     ("unarc-host-x86.exe", include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/unarc-host-x86.exe"))),
+    (XTOOL_TIMER, include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/zz-arc-unpack-timer.dll"))),
 ];
 #[cfg(not(feature = "embed-helpers"))]
 const EMBEDDED: &[(&str, &[u8])] = &[];
@@ -52,6 +53,39 @@ fn unpack(name: &str, bytes: &[u8]) -> Result<PathBuf> {
         }
     }
     Ok(path)
+}
+
+/// The xtool plugin from `xtool-timer/`. Named to sort last among the plugins xtool finds.
+pub const XTOOL_TIMER: &str = "zz-arc-unpack-timer.dll";
+
+/// xtool (the precompressor most repacks use) coordinates its threads with `Sleep(1)`, which
+/// lasts ~15.6 ms at Windows' default timer resolution; a tiny plugin next to xtool.exe makes
+/// xtool ask for 1 ms (see `xtool-timer/src/lib.rs`). This puts the plugin next to every 64-bit
+/// `xtool*.exe` in `codec_dir` and its subfolders, or removes it when
+/// `ARC_UNPACK_NO_XTOOL_TIMER` is set. Failures are ignored: it is only a speed-up.
+pub fn place_xtool_timer(codec_dir: &Path, host_dir: &Path) {
+    let enabled = std::env::var_os("ARC_UNPACK_NO_XTOOL_TIMER").is_none();
+    let mut dirs = vec![codec_dir.to_path_buf()];
+    dirs.extend(std::fs::read_dir(codec_dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    let mut plugin: Option<Option<PathBuf>> = None;
+    for dir in dirs {
+        let has_xtool = std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            name.starts_with("xtool") && name.ends_with(".exe") && crate::stage::pe_machine(&e.path()).is_ok_and(|m| m == 0x8664)
+        });
+        let dest = dir.join(XTOOL_TIMER);
+        if !enabled || !has_xtool {
+            if dest.is_file() {
+                let _ = std::fs::remove_file(&dest);
+            }
+            continue;
+        }
+        let Some(src) = plugin.get_or_insert_with(|| find(&[XTOOL_TIMER], host_dir).ok()).clone() else { return };
+        let same = |a: &Path, b: &Path| std::fs::metadata(a).ok().map(|m| m.len()) == std::fs::metadata(b).ok().map(|m| m.len());
+        if !dest.is_file() || !same(&src, &dest) {
+            let _ = std::fs::copy(&src, &dest);
+        }
+    }
 }
 
 /// True when this build carries its helpers inside the executable.
