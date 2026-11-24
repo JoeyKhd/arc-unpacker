@@ -1,59 +1,226 @@
-//! arc-unpack window: pick a repack folder and a target folder, press Install.
+//! arc-unpack window: pick (or drop) a repack folder, choose what to install, press Install.
 //! Launch it by double-clicking, or drop the repack folder onto the .exe.
 #![windows_subsystem = "windows"]
 
 use arc_unpack::events::{Event, Level, Sink};
 use arc_unpack::extract::human;
-use arc_unpack::install::{self, InstallOptions, InstallReport, Role};
+use arc_unpack::inno::Setup;
+use arc_unpack::install::{self, InstallOptions, InstallReport, Scan};
+use arc_unpack::pascal::Script;
+use arc_unpack::setup_script::{self as ss, Choice};
 use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui::{self, Color32, RichText};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+const OK: Color32 = Color32::from_rgb(110, 200, 120);
+const BAD: Color32 = Color32::from_rgb(240, 110, 110);
+const WARN: Color32 = Color32::from_rgb(230, 180, 60);
+
 fn main() -> eframe::Result {
     arc_unpack::guard::kill_descendants_on_exit();
     arc_unpack::perf::tune_self();
-    let start_dir = std::env::args_os().nth(1).map(PathBuf::from).filter(|p| p.is_dir());
+    let flags = Flags::parse();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 640.0]).with_min_inner_size([560.0, 420.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([700.0, 520.0])
+            .with_min_inner_size([560.0, 420.0])
+            .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("arc-unpack", options, Box::new(move |_cc| Ok(Box::new(App::new(start_dir)))))
+    eframe::run_native("arc-unpack", options, Box::new(move |_cc| Ok(Box::new(App::new(flags)))))
 }
 
-struct ArchiveRow {
-    name: String,
-    packed: u64,
-    unpacked: u64,
-    role: Role,
-    md5: bool,
+/// Command line: an optional repack folder (or a file in it), plus hidden flags used for
+/// screenshots and end-to-end tests of the window.
+#[derive(Default)]
+struct Flags {
+    repack: Option<PathBuf>,
+    /// `--install-to <dir>`
+    target: Option<String>,
+    /// `--auto-install`: press Install as soon as it's possible.
+    auto_install: bool,
+    /// `--screenshot <file.png>`: save the window when it's ready (or, with --auto-install,
+    /// `<file>-installing.png` mid-install and `<file>-done.png` at the end), then close.
+    screenshot: Option<PathBuf>,
 }
 
-struct ScanView {
-    rows: Vec<ArchiveRow>,
-    setup: bool,
-    md5_list: bool,
-    game_bytes: u64,
+impl Flags {
+    fn parse() -> Flags {
+        let mut f = Flags::default();
+        let mut args = std::env::args_os().skip(1);
+        while let Some(a) = args.next() {
+            match a.to_str() {
+                Some("--install-to") => f.target = args.next().map(|v| v.to_string_lossy().into_owned()),
+                Some("--auto-install") => f.auto_install = true,
+                Some("--screenshot") => f.screenshot = args.next().map(PathBuf::from),
+                _ => f.repack = f.repack.take().or_else(|| repack_dir_of(PathBuf::from(&a))),
+            }
+        }
+        f
+    }
+}
+
+/// A dropped/opened path as a repack folder: the folder itself, or the folder of a setup.exe /
+/// .bin file inside it.
+fn repack_dir_of(p: PathBuf) -> Option<PathBuf> {
+    if p.is_dir() {
+        Some(p)
+    } else if p.is_file() {
+        p.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+fn default_target(repack: &Path) -> String {
+    let name = repack.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // "Title [Some Repack]" -> "Title"
+    let clean = name.split(" [").next().unwrap_or(&name).trim().to_string();
+    let base = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    format!("{base}\\Games\\{}", if clean.is_empty() { "Game".into() } else { clean })
+}
+
+/// "1 min 24 s", "45 s", "1 h 3 min".
+fn duration(secs: f64) -> String {
+    let s = secs.round() as u64;
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => format!("{} min {} s", s / 60, s % 60),
+        _ => format!("{} h {} min", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// "0:51", "1:02:05".
+fn clock(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+/// "3,489".
+fn count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// What reading a repack folder found (done in the background).
+struct Analysis {
+    repack: PathBuf,
+    setup_exe: Option<PathBuf>,
+    inno: Option<Arc<Setup>>,
+    /// The installer's script, if arc-unpack can run it.
+    script: Option<Arc<Script>>,
+    scan: Arc<Scan>,
+    choices: Vec<Choice>,
+    /// Why the script can't be used (then the archives are extracted directly).
+    note: Option<String>,
+}
+
+fn analyze(repack: PathBuf) -> Result<Analysis, String> {
+    let scan = install::scan(&repack, None).map_err(|e| format!("{e:#}"))?;
+    let setup_exe = scan.setup.clone();
+    let mut a = Analysis { repack: repack.clone(), setup_exe: setup_exe.clone(), inno: None, script: None, scan: Arc::new(scan), choices: Vec::new(), note: None };
+    let Some(exe) = setup_exe else {
+        a.note = Some("No setup.exe here, so its install steps can't be run.".into());
+        return Ok(a);
+    };
+    let inno = match Setup::open(&exe) {
+        Ok(i) => Arc::new(i),
+        Err(e) => {
+            a.note = Some(format!("This setup.exe isn't supported ({e:#})."));
+            return Ok(a);
+        }
+    };
+    let usable = (|| -> anyhow::Result<(Script, Vec<Choice>)> {
+        anyhow::ensure!(!inno.code.is_empty(), "it has no install script");
+        let script = Script::load(&inno.code)?;
+        let plan = ss::plan_with(&inno, &script, &exe, &repack, Path::new("C:\\arc-unpack-plan"), None)?;
+        if let Some(e) = &plan.error {
+            anyhow::bail!("{e}");
+        }
+        let choices = ss::choices(&inno, &plan, &repack);
+        Ok((script, choices))
+    })();
+    match usable {
+        Ok((script, choices)) => {
+            a.script = Some(Arc::new(script));
+            a.choices = choices;
+        }
+        Err(e) => a.note = Some(format!("The installer's own steps can't be run ({e:#}); the archives will be extracted directly.")),
+    }
+    a.inno = Some(inno);
+    Ok(a)
+}
+
+/// What the current selection needs from the folder and the disk.
+#[derive(Default, Clone)]
+struct Check {
+    missing: Vec<String>,
+    need: u64,
+    steps: usize,
+    error: Option<String>,
+}
+
+fn check(a: &Analysis, selected: &BTreeSet<String>) -> Check {
+    let (Some(inno), Some(script), Some(exe)) = (&a.inno, &a.script, &a.setup_exe) else {
+        let (need, _) = install::needed_size(&a.scan, None);
+        return Check { need, ..Default::default() };
+    };
+    match ss::plan_with(inno, script, exe, &a.repack, Path::new("C:\\arc-unpack-plan"), Some(selected.clone())) {
+        Ok(plan) => {
+            let pf = ss::preflight(&plan, &a.repack);
+            let (need, _) = install::needed_size(&a.scan, Some(&pf));
+            Check { missing: pf.missing, need, steps: plan.steps.len(), error: plan.error }
+        }
+        Err(e) => Check { error: Some(format!("{e:#}")), ..Default::default() },
+    }
 }
 
 struct JobView {
     label: String,
-    method: String,
     total: u64,
     done: u64,
     started: Instant,
-    finished: Option<(f64, Option<String>, String)>, // secs, error, codec summary
+    finished: Option<(f64, Option<String>)>,
 }
 
 #[derive(Default)]
 struct Progress {
     phase: String,
+    phase_started: Option<Instant>,
     jobs: BTreeMap<usize, JobView>,
-    plan_total: u64,
+    total: u64,
+    total_fixed: bool,
+    step: Option<(usize, usize, String)>,
     log: Vec<(Level, String)>,
+    /// (time, bytes done) over the last few seconds, for a steady speed readout.
+    samples: std::collections::VecDeque<(Instant, u64)>,
+}
+
+impl Progress {
+    /// Bytes per second over the last ~4 seconds.
+    fn speed(&mut self, done: u64) -> Option<f64> {
+        let now = Instant::now();
+        if self.samples.back().is_none_or(|(t, _)| now.duration_since(*t) >= Duration::from_millis(250)) {
+            self.samples.push_back((now, done));
+        }
+        while self.samples.len() > 2 && self.samples.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(4)) {
+            self.samples.pop_front();
+        }
+        let (t0, d0) = *self.samples.front()?;
+        let secs = now.duration_since(t0).as_secs_f64();
+        (secs >= 1.0).then(|| done.saturating_sub(d0) as f64 / secs)
+    }
 }
 
 struct Running {
@@ -72,84 +239,150 @@ enum Outcome {
 struct App {
     repack: String,
     target: String,
-    scan: Option<Result<ScanView, String>>,
-    scanned_for: String,
-    /// Don't check the downloaded archives against the repack's MD5 list first.
+    /// The target was filled in automatically (so a new repack may replace it).
+    target_auto: bool,
+    edited: Instant,
+    analysis: Option<Result<Arc<Analysis>, String>>,
+    analyzing: Option<(String, Receiver<Result<Analysis, String>>)>,
+    selected: BTreeSet<String>,
+    check: Option<Check>,
+    checking: Option<(BTreeSet<String>, Receiver<Check>)>,
+    checked_for: Option<BTreeSet<String>>,
+    limit_ram: bool,
     skip_check: bool,
-    heavy_jobs: usize,
     progress: Progress,
     running: Option<Running>,
     outcome: Option<Outcome>,
+    shortcut_result: Option<Result<String, String>>,
     cpu: f64,
     ram: (u64, u64),
-    threads: usize,
+    free: Option<(String, Option<u64>, Instant)>,
     last_sample: Instant,
-}
-
-fn default_target(repack: &Path) -> String {
-    let name = repack.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    // "Title [Some Repack]" -> "Title"
-    let clean = name.split(" [").next().unwrap_or(&name).trim().to_string();
-    let base = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
-    format!("{base}\\Games\\{}", if clean.is_empty() { "Game".into() } else { clean })
+    screenshot: Option<PathBuf>,
+    /// Frames the window has been settled for (screenshot timing).
+    settled_frames: u32,
+    shots_taken: u32,
+    auto_install: bool,
 }
 
 impl App {
-    fn new(start_dir: Option<PathBuf>) -> Self {
+    fn new(flags: Flags) -> Self {
         let mut app = App {
             repack: String::new(),
             target: String::new(),
-            scan: None,
-            scanned_for: String::new(),
+            target_auto: true,
+            edited: Instant::now(),
+            analysis: None,
+            analyzing: None,
+            selected: BTreeSet::new(),
+            check: None,
+            checking: None,
+            checked_for: None,
+            limit_ram: false,
             skip_check: false,
-            heavy_jobs: 2,
             progress: Progress::default(),
             running: None,
             outcome: None,
+            shortcut_result: None,
             cpu: 0.0,
             ram: (0, 0),
-            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            free: None,
             last_sample: Instant::now() - Duration::from_secs(1),
+            screenshot: flags.screenshot,
+            settled_frames: 0,
+            shots_taken: 0,
+            auto_install: flags.auto_install,
         };
-        if let Some(d) = start_dir {
-            app.set_repack(d);
+        if let Some(d) = flags.repack {
+            app.set_repack(&d);
+        }
+        if let Some(t) = flags.target {
+            app.target = t;
+            app.target_auto = false;
         }
         app
     }
 
-    fn set_repack(&mut self, dir: PathBuf) {
+    fn set_repack(&mut self, dir: &Path) {
         self.repack = dir.display().to_string();
-        if self.target.is_empty() {
-            self.target = default_target(&dir);
+        self.edited = Instant::now() - Duration::from_secs(1);
+        if self.target_auto || self.target.is_empty() {
+            self.target = default_target(dir);
+            self.target_auto = true;
         }
     }
 
-    fn rescan_if_needed(&mut self) {
-        if self.repack.is_empty() || self.repack == self.scanned_for {
+    /// Reads the repack folder in the background once its path has stopped changing.
+    fn analyze_if_needed(&mut self, ctx: &egui::Context) {
+        let path = self.repack.trim().to_string();
+        let current = self.analyzing.as_ref().map(|(p, _)| p.clone()).or_else(|| match &self.analysis {
+            Some(Ok(a)) => Some(a.repack.display().to_string()),
+            _ => None,
+        });
+        if path.is_empty() || current.as_deref() == Some(path.as_str()) || self.edited.elapsed() < Duration::from_millis(300) {
             return;
         }
-        self.scanned_for = self.repack.clone();
-        let dir = Path::new(&self.repack);
-        let scanned = install::scan_prepared(dir, &install::default_cache_dir()).or_else(|_| install::scan(dir, None));
-        self.scan = Some(match scanned {
-            Ok(s) => Ok(ScanView {
-                setup: s.setup.is_some(),
-                md5_list: s.md5_file.is_some(),
-                game_bytes: s.game_bytes(),
-                rows: s
-                    .archives
-                    .iter()
-                    .map(|a| ArchiveRow {
-                        name: a.archive.name(),
-                        packed: a.archive.len,
-                        unpacked: a.archive.total_size(),
-                        role: a.role,
-                        md5: a.md5.is_some(),
-                    })
-                    .collect(),
-            }),
-            Err(e) => Err(format!("{e:#}")),
+        if !Path::new(&path).is_dir() {
+            self.analysis = Some(Err("That folder doesn't exist.".into()));
+            return;
+        }
+        let (tx, rx) = unbounded();
+        let (p, c) = (PathBuf::from(&path), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(analyze(p));
+            c.request_repaint();
         });
+        self.analyzing = Some((path, rx));
+        self.analysis = None;
+        self.check = None;
+        self.checked_for = None;
+        self.outcome = None;
+    }
+
+    fn poll_background(&mut self, ctx: &egui::Context) {
+        if let Some((path, rx)) = &self.analyzing
+            && let Ok(r) = rx.try_recv()
+        {
+            let stale = path.as_str() != self.repack.trim();
+            self.analyzing = None;
+            if !stale {
+                if let Ok(a) = &r {
+                    self.selected = a.choices.iter().filter(|c| c.fixed || c.default).map(|c| c.name.clone()).collect();
+                }
+                self.analysis = Some(r.map(Arc::new));
+            }
+        }
+        if let Some((sel, rx)) = &self.checking
+            && let Ok(c) = rx.try_recv()
+        {
+            if *sel == self.selected {
+                self.check = Some(c);
+                self.checked_for = Some(sel.clone());
+            }
+            self.checking = None;
+        }
+        // Re-check what the selection needs whenever it changes.
+        if let Some(Ok(a)) = &self.analysis
+            && self.checking.is_none()
+            && self.checked_for.as_ref() != Some(&self.selected)
+        {
+            let (tx, rx) = unbounded();
+            let (a, sel, c) = (a.clone(), self.selected.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(check(&a, &sel));
+                c.request_repaint();
+            });
+            self.checking = Some((self.selected.clone(), rx));
+        }
+    }
+
+    fn free_space(&mut self) -> Option<u64> {
+        let stale = self.free.as_ref().is_none_or(|(t, _, at)| *t != self.target || at.elapsed() > Duration::from_secs(3));
+        if stale {
+            let f = arc_unpack::guard::free_space(Path::new(&self.target));
+            self.free = Some((self.target.clone(), f, Instant::now()));
+        }
+        self.free.as_ref().and_then(|(_, f, _)| *f)
     }
 
     fn start(&mut self, ctx: &egui::Context) {
@@ -162,24 +395,25 @@ impl App {
             let _ = etx.send(e);
             repaint.request_repaint();
         });
+        let script = matches!(&self.analysis, Some(Ok(a)) if a.script.is_some());
         let opts = InstallOptions {
-            repack_dir: PathBuf::from(&self.repack),
-            target_dir: PathBuf::from(&self.target),
+            repack_dir: PathBuf::from(self.repack.trim()),
+            target_dir: PathBuf::from(self.target.trim()),
             cache_dir: install::default_cache_dir(),
             config: None,
             verify_md5: !self.skip_check,
             jobs: 3,
-            heavy_jobs: self.heavy_jobs,
+            heavy_jobs: if self.limit_ram { 1 } else { 2 },
             writers: 8,
-            overwrite: true, // a re-run repairs / resumes the same folder
+            overwrite: true,
             stall_timeout: 600,
             tune: true,
             host_dir: std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default(),
             cancel: cancel.clone(),
             skip_verify: skip_verify.clone(),
             dry_run: false,
-            script: true,
-            components: None,
+            script,
+            components: script.then(|| self.selected.iter().cloned().collect()),
         };
         let done_ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -189,6 +423,7 @@ impl App {
         });
         self.progress = Progress::default();
         self.outcome = None;
+        self.shortcut_result = None;
         self.running = Some(Running { events: erx, result: rrx, cancel, skip_verify, started: Instant::now() });
     }
 
@@ -199,27 +434,31 @@ impl App {
             match e {
                 Event::Phase { name } => {
                     p.phase = name;
+                    p.phase_started = Some(Instant::now());
                     p.jobs.clear();
-                    p.plan_total = 0;
+                    p.total = 0;
+                    p.total_fixed = false;
+                    p.step = None;
                 }
-                Event::Plan { compressed, .. } => p.plan_total += compressed,
-                Event::JobStarted { id, label, method, compressed, .. } => {
-                    p.jobs.insert(id, JobView { label, method, total: compressed, done: 0, started: Instant::now(), finished: None });
+                Event::Total { compressed } => {
+                    p.total = compressed;
+                    p.total_fixed = true;
+                }
+                Event::Plan { compressed, .. } if !p.total_fixed => p.total += compressed,
+                Event::Plan { .. } => {}
+                Event::Step { index, total, label } => p.step = Some((index, total, label)),
+                Event::JobStarted { id, label, compressed, .. } => {
+                    p.jobs.insert(id, JobView { label, total: compressed, done: 0, started: Instant::now(), finished: None });
                 }
                 Event::JobProgress { id, done } => {
                     if let Some(j) = p.jobs.get_mut(&id) {
                         j.done = done.max(j.done);
                     }
                 }
-                Event::JobFinished { id, secs, error, codecs, .. } => {
-                    let summary = codecs
-                        .iter()
-                        .filter_map(|c| c.cores().map(|k| format!("{} {:.1} cores", c.label.split(' ').next().unwrap_or(""), k)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                Event::JobFinished { id, secs, error, .. } => {
                     if let Some(j) = p.jobs.get_mut(&id) {
                         j.done = j.total;
-                        j.finished = Some((secs, error, summary));
+                        j.finished = Some((secs, error));
                     }
                 }
                 Event::Message { level, text } => p.log.push((level, text)),
@@ -243,229 +482,137 @@ impl App {
             self.last_sample = Instant::now();
         }
     }
+
+    fn take_dropped(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if self.running.is_none()
+            && let Some(dir) = dropped.into_iter().find_map(repack_dir_of)
+        {
+            self.set_repack(&dir);
+        }
+    }
+
+    /// Test hooks: --auto-install presses Install once it's possible; --screenshot saves the
+    /// window at the right moments and closes it at the end.
+    fn test_hooks(&mut self, ctx: &egui::Context) {
+        let ready = self.check.as_ref().is_some_and(|c| c.missing.is_empty() && c.error.is_none()) && self.checking.is_none();
+        if self.auto_install && ready && self.running.is_none() && self.outcome.is_none() {
+            self.auto_install = false;
+            self.start(ctx);
+        }
+        let Some(path) = self.screenshot.clone() else { return };
+        let in_install = self.progress.phase == "Installing" && self.progress.step.as_ref().is_some_and(|s| s.0 >= 3);
+        let (moment, last) = if self.outcome.is_some() {
+            (Some("done"), true)
+        } else if in_install && self.shots_taken == 0 && self.running.is_some() {
+            (Some("installing"), false)
+        } else if !self.auto_install && self.running.is_none() && self.outcome.is_none() && ready && self.analyzing.is_none() {
+            (Some(""), true)
+        } else {
+            (None, false)
+        };
+        let Some(moment) = moment else {
+            self.settled_frames = 0;
+            ctx.request_repaint();
+            return;
+        };
+        self.settled_frames += 1;
+        if self.settled_frames == 20 {
+            let file = if moment.is_empty() {
+                path
+            } else {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                path.with_file_name(format!("{stem}-{moment}.png"))
+            };
+            self.shots_taken += 1;
+            let c = ctx.clone();
+            ctx.request_screenshot(move |img| {
+                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+                let _ = save_png(&file, img.size[0] as u32, img.size[1] as u32, &rgba);
+                if last {
+                    c.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                c.request_repaint();
+            });
+        }
+        ctx.request_repaint();
+    }
 }
 
-fn folder_row(ui: &mut egui::Ui, label: &str, value: &mut String, enabled: bool) -> bool {
-    let mut picked = false;
+fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut enc = png::Encoder::new(file, w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(rgba)?;
+    Ok(())
+}
+
+fn folder_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, enabled: bool) -> bool {
+    let mut changed = false;
     ui.horizontal(|ui| {
-        ui.add_sized([70.0, 20.0], egui::Label::new(label));
-        let w = ui.available_width() - 80.0;
-        ui.add_enabled(enabled, egui::TextEdit::singleline(value).desired_width(w));
+        ui.add_sized([72.0, 22.0], egui::Label::new(label));
+        let w = ui.available_width() - 84.0;
+        let edit = ui.add_enabled(enabled, egui::TextEdit::singleline(value).hint_text(hint).desired_width(w));
+        changed |= edit.changed();
         if ui.add_enabled(enabled, egui::Button::new("Browse…")).clicked()
             && let Some(d) = rfd::FileDialog::new().pick_folder()
         {
             *value = d.display().to_string();
-            picked = true;
+            changed = true;
         }
     });
-    picked
+    changed
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.pump();
+        self.take_dropped(&ctx);
+        self.analyze_if_needed(&ctx);
+        self.poll_background(&ctx);
         self.sample_system();
-        self.rescan_if_needed();
-        if self.running.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(500));
+        if self.running.is_some() || self.analyzing.is_some() || self.checking.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
         let busy = self.running.is_some();
+        let dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
         egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             ui.heading("arc-unpack");
-            ui.label(RichText::new("Fast, parallel installer for FreeArc-based repacks").weak());
+            ui.label(RichText::new("Installs repacks faster, using the installer's own steps").weak());
+            ui.add_space(10.0);
+
+            let before = self.repack.clone();
+            if folder_row(ui, "Repack", &mut self.repack, "the repack folder (with setup.exe and the .bin files)", !busy) && self.repack != before {
+                self.edited = Instant::now();
+                if self.target_auto {
+                    self.target = default_target(Path::new(self.repack.trim()));
+                }
+            }
+            if folder_row(ui, "Install to", &mut self.target, "where the game goes", !busy) {
+                self.target_auto = false;
+            }
             ui.add_space(8.0);
 
-            if folder_row(ui, "Repack", &mut self.repack, !busy) && self.target.is_empty() {
-                self.target = default_target(Path::new(&self.repack));
-            }
-            folder_row(ui, "Install to", &mut self.target, !busy);
-            ui.add_space(6.0);
-
-            let mut can_install = false;
-            match &self.scan {
-                None => {
-                    ui.label("Pick a repack folder (or drop it onto arc-unpack-gui.exe).");
-                }
-                Some(Err(e)) => {
-                    ui.colored_label(Color32::LIGHT_RED, e);
-                }
-                Some(Ok(s)) => {
-                    egui::Grid::new("archives").striped(true).num_columns(4).show(ui, |ui| {
-                        ui.strong("Archive");
-                        ui.strong("Packed");
-                        ui.strong("Unpacked");
-                        ui.strong("Role");
-                        ui.end_row();
-                        for r in &s.rows {
-                            ui.label(&r.name);
-                            ui.label(human(r.packed));
-                            ui.label(human(r.unpacked));
-                            ui.label(format!("{}{}", r.role.describe(), if r.md5 { "" } else { " (no MD5)" }));
-                            ui.end_row();
-                        }
-                    });
-                    let free = arc_unpack::guard::free_space(Path::new(&self.target));
-                    let enough = free.is_none_or(|f| f > s.game_bytes + (1 << 30));
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Needs about {}", human(s.game_bytes)));
-                        if let Some(f) = free {
-                            let txt = format!("· {} free on the target drive", human(f));
-                            if enough { ui.label(txt) } else { ui.colored_label(Color32::LIGHT_RED, txt) };
-                        }
-                    });
-                    if !s.setup {
-                        ui.colored_label(Color32::LIGHT_RED, "No Inno Setup installer (setup.exe) found: codecs can't be prepared.");
-                    }
-                    can_install = s.setup && enough && !self.target.trim().is_empty();
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.add_enabled(!busy && s.md5_list, egui::Checkbox::new(&mut self.skip_check, "Skip archive check"))
-                            .on_hover_text(
-                                "Don't check the downloaded .bin files against the repack's MD5 list before installing. \
-                                 Faster; the installed files are still checked as they are written.",
-                            );
-                        ui.separator();
-                        ui.label("Heavy codec jobs at once:");
-                        ui.add_enabled_ui(!busy, |ui| {
-                            ui.radio_value(&mut self.heavy_jobs, 1, "1");
-                            ui.radio_value(&mut self.heavy_jobs, 2, "2 when RAM allows (default)");
-                        });
-                    });
-                }
-            }
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if busy {
-                    if ui.button("Cancel").clicked()
-                        && let Some(r) = &self.running
-                    {
-                        r.cancel.store(true, Ordering::Relaxed);
-                    }
-                    let checking = self.progress.phase == "Verifying archives";
-                    if let Some(r) = &self.running
-                        && checking
-                        && !r.skip_verify.load(Ordering::Relaxed)
-                        && ui
-                            .button("Skip archive check")
-                            .on_hover_text("Stop checking the downloaded archives and start installing now.")
-                            .clicked()
-                    {
-                        r.skip_verify.store(true, Ordering::Relaxed);
-                    }
-                    let cancelled = self.running.as_ref().is_some_and(|r| r.cancel.load(Ordering::Relaxed));
-                    ui.spinner();
-                    ui.label(if cancelled { "Cancelling…".to_string() } else { self.progress.phase.clone() });
-                } else if ui.add_enabled(can_install, egui::Button::new(RichText::new("Install").strong())).clicked() {
-                    self.start(&ctx);
-                }
-            });
-
-            // Live system load: how much of the machine the codecs are using.
-            ui.label(
-                RichText::new(format!(
-                    "CPU {:.0}% (~{:.0} of {} threads busy) · RAM {} / {}",
-                    self.cpu * 100.0,
-                    self.cpu * self.threads as f64,
-                    self.threads,
-                    human(self.ram.0),
-                    human(self.ram.1)
-                ))
-                .weak(),
-            );
-            ui.separator();
-
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                if busy || !self.progress.jobs.is_empty() {
-                    let (done, total): (u64, u64) =
-                        self.progress.jobs.values().fold((0, 0), |(d, t), j| (d + j.done.min(j.total), t + j.total));
-                    let total = total.max(self.progress.plan_total).max(1);
-                    ui.add(egui::ProgressBar::new(done as f32 / total as f32).text(format!(
-                        "{}: {} / {}",
-                        self.progress.phase,
-                        human(done),
-                        human(total)
-                    )));
-                    ui.add_space(4.0);
-                    for j in self.progress.jobs.values() {
-                        let frac = j.done as f32 / j.total.max(1) as f32;
-                        let text = match &j.finished {
-                            Some((secs, None, codecs)) => format!("{} done in {secs:.0}s {codecs}", j.label),
-                            Some((_, Some(err), _)) => format!("{} FAILED: {}", j.label, err.lines().next().unwrap_or("")),
-                            None => {
-                                let rate = j.done as f64 / j.started.elapsed().as_secs_f64().max(0.1);
-                                format!("{}  {}  {}/s", j.label, j.method, human(rate as u64))
-                            }
-                        };
-                        let bar = egui::ProgressBar::new(frac).text(text);
-                        let bar = match &j.finished {
-                            Some((_, Some(_), _)) => bar.fill(Color32::DARK_RED),
-                            Some(_) => bar.fill(Color32::DARK_GREEN),
-                            None => bar,
-                        };
-                        ui.add(bar);
-                    }
+                if dragging {
+                    ui.add_space(30.0);
+                    ui.vertical_centered(|ui| ui.label(RichText::new("Drop to use this repack").size(18.0)));
+                    return;
                 }
-
-                match &self.outcome {
-                    Some(Outcome::Done { report, secs }) => {
-                        let s = &report.summary;
-                        ui.add_space(8.0);
-                        let ok = s.problems.is_empty() && !s.cancelled;
-                        let title = if s.cancelled {
-                            "Cancelled".to_string()
-                        } else if ok {
-                            format!("Installed {} files ({}) in {:.0} min", s.files_ok + s.files_unverified, human(s.bytes), secs / 60.0)
-                        } else {
-                            format!("Finished with {} problem(s)", s.problems.len())
-                        };
-                        ui.heading(title);
-                        if report.files_md5 > 0 {
-                            ui.label(format!("✔ {} files match the repack's own MD5 list (checked while writing)", report.files_md5));
-                        }
-                        if report.setup_files > 0 {
-                            ui.label(format!("+ {} files from setup.exe itself (launcher, _Redist, MD5 list)", report.setup_files));
-                        }
-                        for p in &s.problems {
-                            ui.colored_label(Color32::LIGHT_RED, p);
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.button("Open game folder").clicked() {
-                                let _ = std::process::Command::new("explorer").arg(&self.target).spawn();
-                            }
-                            if let Some(d) = &report.scripts_dir
-                                && ui.button("Open installer scripts").clicked()
-                            {
-                                let _ = std::process::Command::new("explorer").arg(d).spawn();
-                            }
-                        });
-                        if !report.scripts.is_empty() {
-                            ui.label(
-                                "The original installer runs these scripts after unpacking. They were not run; \
-                                 review them before running them yourself:",
-                            );
-                            for p in &report.scripts {
-                                ui.monospace(p.display().to_string());
-                            }
-                        }
-                    }
-                    Some(Outcome::Failed(e)) => {
-                        ui.add_space(8.0);
-                        ui.colored_label(Color32::LIGHT_RED, format!("Install failed: {e}"));
-                    }
-                    None => {}
-                }
-
+                self.before_install(ui, &ctx, busy);
+                self.installing(ui, busy);
+                self.result(ui);
                 if !self.progress.log.is_empty() {
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
                     egui::CollapsingHeader::new(format!("Log ({})", self.progress.log.len())).show(ui, |ui| {
                         for (level, text) in &self.progress.log {
                             let color = match level {
                                 Level::Info => ui.visuals().text_color(),
-                                Level::Warn => Color32::from_rgb(230, 180, 60),
-                                Level::Error => Color32::LIGHT_RED,
+                                Level::Warn => WARN,
+                                Level::Error => BAD,
                             };
                             ui.colored_label(color, text);
                         }
@@ -473,5 +620,294 @@ impl eframe::App for App {
                 }
             });
         });
+        self.test_hooks(&ctx);
+    }
+}
+
+impl App {
+    fn before_install(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
+        if self.repack.trim().is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Drop a repack folder here, or press Browse").size(16.0));
+                ui.label(RichText::new("The folder with setup.exe and the fg-*.bin files").weak());
+            });
+            return;
+        }
+        if self.analyzing.is_some() || (self.analysis.is_none() && Path::new(self.repack.trim()).is_dir()) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Reading setup.exe…");
+            });
+            return;
+        }
+        let a = match &self.analysis {
+            Some(Ok(a)) => a.clone(),
+            Some(Err(e)) => {
+                ui.colored_label(BAD, e);
+                return;
+            }
+            None => return,
+        };
+
+        // What to install.
+        if !a.choices.is_empty() {
+            ui.label(RichText::new("What to install").strong());
+            let mut toggled: Option<(String, bool, bool)> = None;
+            for c in &a.choices {
+                ui.horizontal(|ui| {
+                    let mut on = c.fixed || self.selected.contains(&c.name);
+                    let resp = ui.add_enabled(!busy && !c.fixed, egui::Checkbox::new(&mut on, &c.label));
+                    if resp.changed() {
+                        toggled = Some((c.name.clone(), on, c.exclusive));
+                    }
+                    if c.fixed {
+                        ui.label(RichText::new("required").weak());
+                    } else if let Some(f) = &c.file {
+                        ui.label(RichText::new(format!("downloaded · {f}")).weak());
+                    }
+                });
+            }
+            if let Some((name, on, exclusive)) = toggled {
+                if on {
+                    if exclusive {
+                        // Only one of an exclusive group (e.g. a language) at a time.
+                        let parent = |n: &str| n.rsplit_once('\\').map(|(p, _)| p.to_string()).unwrap_or_default();
+                        let group = parent(&name);
+                        for other in a.choices.iter().filter(|o| o.exclusive && o.name != name && parent(&o.name) == group) {
+                            self.selected.remove(&other.name);
+                        }
+                    }
+                    self.selected.insert(name);
+                } else {
+                    self.selected.remove(&name);
+                }
+            }
+            ui.add_space(6.0);
+        }
+
+        // Pre-flight: are the needed files here, and does it fit?
+        let free = self.free_space();
+        let mut ready = false;
+        match (&self.check, &self.checking) {
+            (_, Some(_)) | (None, None) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Checking what's needed…");
+                });
+            }
+            (Some(c), None) => {
+                let drive = Path::new(self.target.trim())
+                    .components()
+                    .next()
+                    .map(|p| p.as_os_str().to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let fits = free.is_none_or(|f| f > c.need + (1 << 30));
+                if !c.missing.is_empty() {
+                    let (s, it) = if c.missing.len() == 1 { ("", "it") } else { ("s", "them") };
+                    ui.colored_label(
+                        BAD,
+                        format!("Missing file{s}: {}. Download {it} into the repack folder, or untick the part that needs {it}.", c.missing.join(", ")),
+                    );
+                } else if let Some(e) = &c.error {
+                    ui.colored_label(BAD, format!("The installer's steps can't be run: {e}"));
+                } else if !fits {
+                    ui.colored_label(
+                        BAD,
+                        format!("Needs {}, but only {} is free on {drive}", human(c.need), human(free.unwrap_or(0))),
+                    );
+                } else {
+                    let mut line = format!("All needed files are here · needs {}", human(c.need));
+                    if let Some(f) = free {
+                        line.push_str(&format!(" · {} free on {drive}", human(f)));
+                    }
+                    ui.colored_label(OK, line);
+                    ready = true;
+                }
+            }
+        }
+        if let Some(note) = &a.note {
+            ui.colored_label(WARN, note);
+        }
+
+        // Options, in FitGirl's words.
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.limit_ram, "Limit RAM usage"))
+                .on_hover_text("For PCs with 16 GB of RAM or less: runs one memory-hungry decoder at a time. Slower.");
+            ui.add_space(12.0);
+            let has_list = a.scan.md5_file.is_some();
+            ui.add_enabled(!busy && has_list, egui::Checkbox::new(&mut self.skip_check, "Skip archive check")).on_hover_text(if has_list {
+                "Don't check the downloaded .bin files before installing. Faster; installed files are still checked as they're written."
+            } else {
+                "This repack has no MD5 list for its .bin files."
+            });
+        });
+
+        // The one primary action (gone once this install succeeded; picking another folder
+        // brings it back).
+        ui.add_space(10.0);
+        let installed = matches!(&self.outcome, Some(Outcome::Done { report, .. }) if report.summary.problems.is_empty() && !report.summary.cancelled);
+        if !busy && !installed {
+            let can = ready && !self.target.trim().is_empty();
+            let button = egui::Button::new(RichText::new("Install").size(18.0).strong())
+                .fill(if can { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.bg_fill });
+            let clicked = ui
+                .with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+                    ui.add_enabled(can, button.min_size(egui::vec2(0.0, 40.0))).clicked()
+                })
+                .inner;
+            if clicked {
+                self.start(ctx);
+            }
+            if let Some(c) = &self.check
+                && c.steps > 0
+                && can
+            {
+                ui.label(RichText::new(format!("Runs the installer's {} steps into {}", c.steps, self.target.trim())).weak());
+            }
+        }
+    }
+
+    fn installing(&mut self, ui: &mut egui::Ui, busy: bool) {
+        if !busy {
+            return;
+        }
+        let (done, _) = self.progress.jobs.values().fold((0u64, 0u64), |(d, t), j| (d + j.done.min(j.total), t + j.total));
+        let speed = self.progress.speed(done);
+        let p = &self.progress;
+        let (done, total) = p.jobs.values().fold((0u64, 0u64), |(d, t), j| (d + j.done.min(j.total), t + j.total));
+        let total = if p.total_fixed { p.total } else { total.max(p.total) }.max(1);
+        let frac = (done as f64 / total as f64).min(0.995);
+        let elapsed = p.phase_started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+        let cancelled = self.running.as_ref().is_some_and(|r| r.cancel.load(Ordering::Relaxed));
+        let (title, sub) = match p.phase.as_str() {
+            _ if cancelled => ("Cancelling…".to_string(), String::new()),
+            "Verifying archives" => ("Checking the downloaded files".to_string(), String::new()),
+            "Checking files" => ("Checking the installed files".to_string(), String::new()),
+            "Installing" | "Installing game files" => (
+                "Installing".to_string(),
+                p.step.as_ref().map(|(i, n, l)| format!("Step {i} of {n} · {l}")).unwrap_or_default(),
+            ),
+            other => (other.to_string(), String::new()),
+        };
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new(&title).strong().size(16.0));
+        });
+        if !sub.is_empty() {
+            ui.label(&sub);
+        }
+        let mut text = format!("{}%", (frac * 100.0).floor());
+        if let Some(bps) = speed.filter(|b| *b > 0.0) {
+            text.push_str(&format!(" · {}/s", human(bps as u64)));
+        }
+        text.push_str(&format!(" · {} elapsed", clock(elapsed)));
+        if frac > 0.02 && elapsed > 5.0 && !p.jobs.is_empty() {
+            text.push_str(&format!(" · about {} left", clock(elapsed * (1.0 - frac) / frac)));
+        }
+        let show_bar = !p.jobs.is_empty() || p.total_fixed;
+        if show_bar {
+            ui.add(egui::ProgressBar::new(frac as f32).text(text));
+        }
+        ui.horizontal(|ui| {
+            if let Some(r) = &self.running {
+                if ui.button("Cancel").clicked() {
+                    r.cancel.store(true, Ordering::Relaxed);
+                }
+                if p.phase == "Verifying archives"
+                    && !r.skip_verify.load(Ordering::Relaxed)
+                    && ui.button("Skip archive check").on_hover_text("Stop checking the downloaded files and start installing now.").clicked()
+                {
+                    r.skip_verify.store(true, Ordering::Relaxed);
+                }
+            }
+            ui.label(
+                RichText::new(format!("CPU {:.0}% · RAM {} of {}", self.cpu * 100.0, human(self.ram.0), human(self.ram.1))).weak(),
+            );
+        });
+        if !p.jobs.is_empty() {
+            egui::CollapsingHeader::new("Details").default_open(false).show(ui, |ui| {
+                let running = p.jobs.values().filter(|j| j.finished.is_none());
+                let finished: Vec<&JobView> = p.jobs.values().filter(|j| j.finished.is_some()).collect();
+                for j in running {
+                    let rate = j.done as f64 / j.started.elapsed().as_secs_f64().max(0.1);
+                    ui.add(egui::ProgressBar::new(j.done as f32 / j.total.max(1) as f32).text(format!("{} · {}/s", j.label, human(rate as u64))));
+                }
+                for j in finished.iter().rev().take(5) {
+                    match &j.finished {
+                        Some((secs, None)) => ui.label(RichText::new(format!("{} done ({})", j.label, duration(*secs))).weak()),
+                        Some((_, Some(err))) => ui.colored_label(BAD, format!("{} failed: {}", j.label, err.lines().next().unwrap_or(""))),
+                        None => unreachable!(),
+                    };
+                }
+                if finished.len() > 5 {
+                    ui.label(RichText::new(format!("… and {} more finished", finished.len() - 5)).weak());
+                }
+            });
+        }
+    }
+
+    fn result(&mut self, ui: &mut egui::Ui) {
+        let Some(outcome) = &self.outcome else { return };
+        ui.add_space(12.0);
+        match outcome {
+            Outcome::Done { report, secs } => {
+                let s = &report.summary;
+                let ok = s.problems.is_empty() && !s.cancelled;
+                let (title, color) = if s.cancelled {
+                    ("Cancelled".to_string(), WARN)
+                } else if ok {
+                    ("Installed".to_string(), OK)
+                } else {
+                    (format!("Finished with {} problem{}", s.problems.len(), if s.problems.len() == 1 { "" } else { "s" }), BAD)
+                };
+                ui.label(RichText::new(title).size(20.0).strong().color(color));
+                if !s.cancelled {
+                    ui.label(format!(
+                        "{} files · {} · {} · {}/s on average",
+                        count(s.files_ok + s.files_unverified),
+                        human(s.bytes),
+                        duration(*secs),
+                        human((s.bytes as f64 / secs.max(0.1)) as u64)
+                    ));
+                }
+                if report.files_md5 > 0 {
+                    ui.colored_label(OK, format!("All {} files match the repack's MD5 list", count(report.files_md5 as u64)));
+                }
+                for p in &s.problems {
+                    ui.colored_label(BAD, p);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open game folder").clicked() {
+                        let _ = std::process::Command::new("explorer").arg(self.target.trim()).spawn();
+                    }
+                    if ok && !report.shortcuts.is_empty() && self.shortcut_result.is_none() {
+                        let label = if report.shortcuts.len() == 1 { "Create desktop shortcut" } else { "Create desktop shortcuts" };
+                        if ui.button(label).clicked() {
+                            self.shortcut_result = Some(match ss::create_desktop_shortcuts(&report.shortcuts) {
+                                Ok(made) => Ok(format!("Created {} on the desktop", made.iter().filter_map(|p| p.file_stem()).map(|n| n.to_string_lossy()).collect::<Vec<_>>().join(", "))),
+                                Err(e) => Err(format!("{e:#}")),
+                            });
+                        }
+                    }
+                });
+                match &self.shortcut_result {
+                    Some(Ok(t)) => {
+                        ui.colored_label(OK, t);
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(BAD, format!("Couldn't create the shortcut: {e}"));
+                    }
+                    None => {}
+                }
+            }
+            Outcome::Failed(e) => {
+                ui.label(RichText::new("Install failed").size(20.0).strong().color(BAD));
+                ui.colored_label(BAD, e);
+            }
+        }
     }
 }

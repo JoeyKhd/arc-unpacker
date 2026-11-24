@@ -224,6 +224,7 @@ dependencies = [
  "libloading 0.9.1",
  "lzma-rs",
  "md5",
+ "png",
  "rfd",
  "serde",
  "sha1_smol",

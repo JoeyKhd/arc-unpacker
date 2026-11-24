@@ -11,6 +11,8 @@ use std::time::Duration;
 #[derive(Default)]
 struct State {
     overall: Option<ProgressBar>,
+    /// The overall total came from a Total event: Plan events don't add to it.
+    fixed_total: bool,
     bars: HashMap<usize, (ProgressBar, u64)>,
 }
 
@@ -28,28 +30,38 @@ impl Terminal {
         }
     }
 
+    fn overall_bar(&self, len: u64) -> ProgressBar {
+        let pb = self.mp.add(ProgressBar::new(len));
+        pb.set_style(
+            ProgressStyle::with_template("{prefix:>14} [{bar:40}] {bytes}/{total_bytes} compressed  {binary_bytes_per_sec}  ETA {eta}")
+                .unwrap()
+                .progress_chars("=> "),
+        );
+        pb.set_prefix("total");
+        pb.enable_steady_tick(Duration::from_millis(500));
+        pb
+    }
+
     fn handle(&self, e: Event) {
         let mut st = self.state.lock().unwrap();
         match e {
             // Several extractions can run side by side (an install script's early ones): their
             // plans add up on one overall bar.
+            Event::Plan { .. } if st.fixed_total => {}
             Event::Plan { compressed, .. } if st.overall.is_some() => {
                 if let Some(pb) = &st.overall {
                     pb.inc_length(compressed);
                 }
             }
+            Event::Total { compressed } => {
+                if let Some(o) = st.overall.take() {
+                    o.finish_and_clear();
+                }
+                st.overall = Some(self.overall_bar(compressed));
+                st.fixed_total = true;
+            }
             Event::Plan { compressed, .. } => {
-                let pb = self.mp.add(ProgressBar::new(compressed));
-                pb.set_style(
-                    ProgressStyle::with_template(
-                        "{prefix:>14} [{bar:40}] {bytes}/{total_bytes} compressed  {binary_bytes_per_sec}  ETA {eta}",
-                    )
-                    .unwrap()
-                    .progress_chars("=> "),
-                );
-                pb.set_prefix("total");
-                pb.enable_steady_tick(Duration::from_millis(500));
-                st.overall = Some(pb);
+                st.overall = Some(self.overall_bar(compressed));
             }
             Event::JobStarted { id, label, method, compressed, .. } => {
                 let pb = match &st.overall {
@@ -101,7 +113,9 @@ impl Terminal {
                     }
                 }
             }
+            Event::Step { .. } => {}
             Event::Phase { name } => {
+                st.fixed_total = false;
                 if let Some(o) = st.overall.take() {
                     o.finish_and_clear();
                 }

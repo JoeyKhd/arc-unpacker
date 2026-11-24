@@ -14,6 +14,7 @@ libloading = "0.9.1"
 lzma-rs = { version = "0.3.0", features = ["stream"] }
 md5 = "0.8.1"
 rfd = "0.18.0"
+png = "0.18"
 serde = { version = "1.0.229", features = ["derive"] }
 sha1_smol = "1.0.1"
 toml = "1.2.2"

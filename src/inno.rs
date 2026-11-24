@@ -64,6 +64,42 @@ pub struct Component {
     pub exclusive: bool,
 }
 
+/// A shortcut from the installer's `[Icons]` section, e.g. `{commondesktop}\Game` ->
+/// `{app}\Game.exe`.
+#[derive(Debug, Clone)]
+pub struct Icon {
+    pub name: String,
+    pub filename: String,
+    pub parameters: String,
+    pub working_dir: String,
+    pub components: String,
+    pub tasks: String,
+    pub languages: String,
+}
+
+/// 5.5.x icon entries: name, file, parameters, working dir, icon file, comment, six condition
+/// strings and the AppUserModelID, then a fixed 32-byte tail.
+fn parse_icons(b: &[u8], start: usize, n: usize) -> Result<Vec<Icon>> {
+    let mut r = Reader { b, o: start };
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let mut s: Vec<String> = (0..13).map(|_| r.wstr()).collect::<Result<_>>()?;
+        r.raw(20 + 4 + 4 + 1 + 2 + 1)?;
+        ensure!(!s[0].is_empty() && !s[1].is_empty(), "not an icon entry");
+        let take = |s: &mut Vec<String>, i: usize| std::mem::take(&mut s[i]);
+        out.push(Icon {
+            name: take(&mut s, 0),
+            filename: take(&mut s, 1),
+            parameters: take(&mut s, 2),
+            working_dir: take(&mut s, 3),
+            components: take(&mut s, 6),
+            tasks: take(&mut s, 7),
+            languages: take(&mut s, 8),
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Debug)]
 pub struct Setup {
     pub version: String,
@@ -71,6 +107,8 @@ pub struct Setup {
     /// Setup types (e.g. "full", "custom"); the first one is the default.
     pub types: Vec<SetupType>,
     pub components: Vec<Component>,
+    /// Shortcuts the installer creates (`[Icons]`).
+    pub icons: Vec<Icon>,
     /// Compiled `[Code]` section (empty if the installer has none).
     pub code: Vec<u8>,
     data: Vec<DataEntry>,
@@ -225,10 +263,12 @@ fn parse_file_entry(r: &mut Reader, n_data: usize) -> Result<SetupFile> {
 
 /// Finds the file-entry table by trying every plausible start ("{" as the first character of
 /// a destination after an empty source) and keeping the one where all entries parse.
-fn find_file_entries(b: &[u8], n_files: usize, n_data: usize) -> Result<Vec<SetupFile>> {
-    let parse_from = |start: usize| -> Result<Vec<SetupFile>> {
+/// Returns the entries and the offset right after the table (where the icon entries start).
+fn find_file_entries(b: &[u8], n_files: usize, n_data: usize) -> Result<(Vec<SetupFile>, usize)> {
+    let parse_from = |start: usize| -> Result<(Vec<SetupFile>, usize)> {
         let mut r = Reader { b, o: start };
-        (0..n_files).map(|_| parse_file_entry(&mut r, n_data)).collect()
+        let files = (0..n_files).map(|_| parse_file_entry(&mut r, n_data)).collect::<Result<_>>()?;
+        Ok((files, r.o))
     };
     // Only the uninstaller's entry may lack a destination (parse_file_entry enforces that).
     let plausible = |f: &SetupFile| f.dest.is_empty() || f.dest.contains('\\') || f.dest.contains('}');
@@ -245,15 +285,15 @@ fn find_file_entries(b: &[u8], n_files: usize, n_data: usize) -> Result<Vec<Setu
         if let Some(prev) = start.checked_sub(EMPTY_FILE_ENTRY)
             && b[prev..prev + 40].iter().all(|&x| x == 0)
             && b[start - 1] == FILE_TYPE_UNINSTALLER
-            && let Ok(files) = parse_from(prev)
-            && files.iter().all(plausible)
+            && let Ok(found) = parse_from(prev)
+            && found.0.iter().all(plausible)
         {
-            return Ok(files);
+            return Ok(found);
         }
-        if let Ok(files) = parse_from(start)
-            && files.iter().all(plausible)
+        if let Ok(found) = parse_from(start)
+            && found.0.iter().all(plausible)
         {
-            return Ok(files);
+            return Ok(found);
         }
     }
     bail!("file entries not found (unsupported Inno Setup variant?)")
@@ -380,14 +420,16 @@ impl Setup {
         let counts = header_counts(&b1)?;
         let (n_files, n_data) = (counts[7], counts[8]);
         let data = parse_data_entries(&b2, n_data)?;
-        let mut files = find_file_entries(&b1, n_files, n_data)?;
+        let (mut files, files_end) = find_file_entries(&b1, n_files, n_data)?;
+        // Shortcuts follow the files; only needed for "create desktop shortcut", so optional.
+        let icons = parse_icons(&b1, files_end, counts[9]).unwrap_or_default();
         for f in &mut files {
             f.size = f.location.map(|l| data[l].size).unwrap_or(0);
         }
         // Types and components only matter for running the install script; don't fail on them.
         let (types, components) = find_component_tables(&b1, counts[3], counts[4]).unwrap_or_default();
         let code = compiled_code(&b1)?;
-        Ok(Setup { version, files, types, components, code, data, data_offset, blob })
+        Ok(Setup { version, files, types, components, icons, code, data, data_offset, blob })
     }
 
     fn chunk(&self, d: &DataEntry) -> Result<Vec<u8>> {
@@ -532,7 +574,7 @@ mod tests {
         }
         b.extend_from_slice(&[0u8; 64]);
 
-        let files = find_file_entries(&b, 3, 2).unwrap();
+        let (files, _) = find_file_entries(&b, 3, 2).unwrap();
         let dests: Vec<&str> = files.iter().map(|f| f.dest.as_str()).collect();
         assert_eq!(dests, ["", r"{tmp}\a.dll", r"{app}\_Redist\b.addon"]);
         assert!(!files[0].has_data());

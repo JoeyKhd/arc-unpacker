@@ -12,6 +12,8 @@ use crate::pascal::{Host, Script, Value, Vm};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 /// One thing the script asks for that does real work.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,7 +96,7 @@ fn downloaded_part(component: &str, repack_files: &[String]) -> bool {
 }
 
 /// Evaluates an Inno component expression ("a", "a\b", "a or not (b and c)").
-fn eval_components(expr: &str, selected: &BTreeSet<String>) -> Result<bool> {
+pub fn eval_components(expr: &str, selected: &BTreeSet<String>) -> Result<bool> {
     let spaced = expr.replace('(', " ( ").replace(')', " ) ");
     let tokens: Vec<String> = spaced.split_whitespace().map(|t| t.to_ascii_lowercase()).collect();
     fn or(t: &[String], i: &mut usize, s: &BTreeSet<String>) -> Result<bool> {
@@ -146,11 +148,23 @@ pub struct InnoHost<'a> {
     pub dry: bool,
     /// Files the script changed itself (INI writes), with the number of steps taken before.
     pub writes: Vec<(usize, PathBuf)>,
+    /// Component names the script asked about (IsComponentSelected), lowercase.
+    pub queried: BTreeSet<String>,
 }
 
 impl<'a> InnoHost<'a> {
     pub fn new(folders: Folders, setup: &'a Setup, selected: BTreeSet<String>, runner: &'a mut dyn Runner) -> InnoHost<'a> {
-        InnoHost { folders, setup, selected, runner, messages: Vec::new(), steps: Vec::new(), dry: false, writes: Vec::new() }
+        InnoHost {
+            folders,
+            setup,
+            selected,
+            runner,
+            messages: Vec::new(),
+            steps: Vec::new(),
+            dry: false,
+            writes: Vec::new(),
+            queried: BTreeSet::new(),
+        }
     }
 
     fn expand(&self, s: &str) -> Result<String> {
@@ -323,7 +337,16 @@ impl Host for InnoHost<'_> {
         }
         Ok(match key {
             "EXPANDCONSTANT" => Some(Value::Str(self.expand(&s(0))?)),
-            "ISCOMPONENTSELECTED" => yes(eval_components(&s(0), &self.selected)?),
+            "ISCOMPONENTSELECTED" => {
+                let expr = s(0);
+                for w in expr.replace(['(', ')'], " ").split_whitespace() {
+                    let w = w.to_ascii_lowercase();
+                    if !matches!(w.as_str(), "and" | "or" | "not") {
+                        self.queried.insert(w);
+                    }
+                }
+                yes(eval_components(&expr, &self.selected)?)
+            }
             "ISTASKSELECTED" => yes(false),
             "WIZARDSILENT" => yes(true),
             "FILEEXISTS" => yes(Path::new(&s(0)).is_file()),
@@ -628,6 +651,8 @@ pub struct Plan {
     pub steps: Vec<Step>,
     /// Files the script changes itself, with the number of steps taken before (see InnoHost).
     pub writes: Vec<(usize, PathBuf)>,
+    /// Components the script asked about (the ones worth offering as choices).
+    pub queried: BTreeSet<String>,
     pub messages: Vec<String>,
     /// Set if the script stopped (e.g. it calls something arc-unpack doesn't provide).
     pub error: Option<String>,
@@ -643,10 +668,24 @@ pub fn plan(setup_exe: &Path, repack: &Path, target: &Path, selected: Option<BTr
     let setup = Setup::open(setup_exe)?;
     ensure!(!setup.code.is_empty(), "this installer has no install script");
     let script = Script::load(&setup.code)?;
-    let tmp = std::env::temp_dir().join(format!("arcunp-plan-{}", std::process::id()));
+    plan_with(&setup, &script, setup_exe, repack, target, selected)
+}
+
+/// `plan` for an installer that is already open.
+pub fn plan_with(
+    setup: &Setup,
+    script: &Script,
+    setup_exe: &Path,
+    repack: &Path,
+    target: &Path,
+    selected: Option<BTreeSet<String>>,
+) -> Result<Plan> {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = std::env::temp_dir().join(format!("arcunp-plan-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    prepare_tmp(&setup, &tmp)?;
-    let selected = selected.unwrap_or_else(|| default_components(&setup, &repack_files(repack)));
+    prepare_tmp(setup, &tmp)?;
+    let selected = selected.unwrap_or_else(|| default_components(setup, &repack_files(repack)));
     let components = setup
         .components
         .iter()
@@ -660,12 +699,12 @@ pub fn plan(setup_exe: &Path, repack: &Path, target: &Path, selected: Option<BTr
         setup_exe: std::path::absolute(setup_exe)?,
     };
     let mut runner = PlanOnly;
-    let mut host = InnoHost::new(folders, &setup, selected, &mut runner);
+    let mut host = InnoHost::new(folders, setup, selected, &mut runner);
     host.dry = true;
-    let mut vm = Vm::new(&script);
+    let mut vm = Vm::new(script);
     let mut error = None;
     for step in [SS_INSTALL, SS_POST_INSTALL, SS_DONE] {
-        if let Err(e) = run_step(&script, &mut vm, &mut host, step) {
+        if let Err(e) = run_step(script, &mut vm, &mut host, step) {
             error = Some(format!("{e:#}"));
             break;
         }
@@ -674,12 +713,171 @@ pub fn plan(setup_exe: &Path, repack: &Path, target: &Path, selected: Option<BTr
         components,
         steps: std::mem::take(&mut host.steps),
         writes: std::mem::take(&mut host.writes),
+        queried: std::mem::take(&mut host.queried),
         messages: std::mem::take(&mut host.messages),
         error,
         tmp: tmp.clone(),
     };
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(plan)
+}
+
+/// A component the user can choose, as the window shows it.
+#[derive(Debug, Clone)]
+pub struct Choice {
+    /// Inno component name, lowercase (what `--components` takes).
+    pub name: String,
+    /// The installer's description (or the name if it only has a message reference).
+    pub label: String,
+    /// Always installed.
+    pub fixed: bool,
+    /// One of a group where only one may be chosen (e.g. a language).
+    pub exclusive: bool,
+    /// Selected by default.
+    pub default: bool,
+    /// The optional/selective archive found for it in the repack folder.
+    pub file: Option<String>,
+}
+
+/// The components worth offering: fixed ones (shown as required) and the ones the install
+/// script asks about. Components that only drive redistributable installers (DirectX, VC++),
+/// which arc-unpack doesn't run, are left out.
+pub fn choices(setup: &Setup, plan: &Plan, repack: &Path) -> Vec<Choice> {
+    let files = repack_files(repack);
+    let defaults = default_components(setup, &files);
+    let mut out: Vec<Choice> = Vec::new();
+    for c in setup.components.iter().filter(|c| crate::install::english_or_neutral(&c.languages)) {
+        let name = c.name.to_ascii_lowercase();
+        if out.iter().any(|x| x.name == name) || !(c.fixed || plan.queried.contains(&name)) {
+            continue;
+        }
+        let leaf = name.rsplit('\\').next().unwrap_or(&name).to_string();
+        let file = files
+            .iter()
+            .find(|f| {
+                let f = f.to_ascii_lowercase();
+                leaf.len() >= 3 && (f.contains("optional") || f.contains("selective")) && f.contains(&leaf)
+            })
+            .cloned();
+        let label = if c.description.trim().is_empty() || c.description.starts_with("{cm:") { c.name.clone() } else { c.description.clone() };
+        out.push(Choice { name: name.clone(), label, fixed: c.fixed, exclusive: c.exclusive, default: defaults.contains(&name), file });
+    }
+    out
+}
+
+/// What a plan needs from the repack folder.
+#[derive(Debug, Clone, Default)]
+pub struct Preflight {
+    /// Repack archives the script extracts, in order of first use.
+    pub needed: Vec<PathBuf>,
+    /// Of those, the ones that aren't there.
+    pub missing: Vec<String>,
+}
+
+pub fn preflight(plan: &Plan, repack: &Path) -> Preflight {
+    let src = std::path::absolute(repack).unwrap_or_else(|_| repack.to_path_buf());
+    let mut out = Preflight::default();
+    for step in &plan.steps {
+        if let Step::Extract { archive, .. } = step
+            && starts_with_ci(archive, &src)
+            && !out.needed.contains(archive)
+        {
+            if !archive.is_file() {
+                out.missing.push(archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            }
+            out.needed.push(archive.clone());
+        }
+    }
+    out
+}
+
+/// A desktop shortcut the installer would create.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shortcut {
+    /// File name without `.lnk`, e.g. "Some Game".
+    pub name: String,
+    pub target: PathBuf,
+    pub args: String,
+    pub working_dir: PathBuf,
+}
+
+/// The installer's desktop shortcuts for this selection, pointing into `app`.
+pub fn desktop_shortcuts(setup: &Setup, selected: &BTreeSet<String>, app: &Path) -> Vec<Shortcut> {
+    let expand = |s: &str| -> Option<PathBuf> {
+        let rest = s.strip_prefix("{app}")?;
+        Some(app.join(rest.trim_start_matches('\\')))
+    };
+    setup
+        .icons
+        .iter()
+        .filter(|i| {
+            let n = i.name.to_ascii_lowercase();
+            (n.starts_with("{commondesktop}") || n.starts_with("{userdesktop}") || n.starts_with("{desktop}"))
+                && crate::install::english_or_neutral(&i.languages)
+                && (i.components.is_empty() || eval_components(&i.components, selected).unwrap_or(false))
+                && (i.tasks.is_empty() || i.tasks.to_ascii_lowercase().contains("desktop"))
+        })
+        .filter_map(|i| {
+            let target = expand(&i.filename)?;
+            let working_dir = if i.working_dir.is_empty() { target.parent()?.to_path_buf() } else { expand(&i.working_dir)? };
+            let name = i.name.rsplit('\\').next()?.to_string();
+            Some(Shortcut { name, target, args: i.parameters.clone(), working_dir })
+        })
+        .collect()
+}
+
+/// Creates the shortcuts on the current user's desktop. Returns the .lnk paths.
+#[cfg(windows)]
+pub fn create_desktop_shortcuts(shortcuts: &[Shortcut]) -> Result<Vec<PathBuf>> {
+    create_shortcuts(shortcuts, None)
+}
+
+/// Creates the shortcuts in `dir` (None: the current user's desktop). Returns the .lnk paths.
+#[cfg(windows)]
+pub fn create_shortcuts(shortcuts: &[Shortcut], dir: Option<&Path>) -> Result<Vec<PathBuf>> {
+    let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let dir = match dir {
+        Some(d) => d.to_path_buf(),
+        None => desktop_dir()?,
+    };
+    let mut script = String::from("$ErrorActionPreference='Stop'; $w = New-Object -ComObject WScript.Shell; ");
+    let mut out = Vec::new();
+    for sc in shortcuts {
+        let file = dir.join(format!("{}.lnk", sc.name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_")));
+        script.push_str(&format!(
+            "$s = $w.CreateShortcut({}); $s.TargetPath = {}; $s.Arguments = {}; $s.WorkingDirectory = {}; $s.Save(); ",
+            q(&file.to_string_lossy()),
+            q(&sc.target.to_string_lossy()),
+            q(&sc.args),
+            q(&sc.working_dir.to_string_lossy())
+        ));
+        out.push(file);
+    }
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .status()
+        .context("start PowerShell")?;
+    ensure!(status.success(), "creating the shortcut failed");
+    Ok(out)
+}
+
+/// The current user's Desktop folder (it can be redirected, e.g. to OneDrive).
+#[cfg(windows)]
+fn desktop_dir() -> Result<PathBuf> {
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "[Environment]::GetFolderPath('Desktop')"])
+        .creation_flags(0x0800_0000)
+        .output()
+        .context("start PowerShell")?;
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    ensure!(!dir.is_empty(), "no Desktop folder");
+    Ok(PathBuf::from(dir))
+}
+
+#[cfg(not(windows))]
+pub fn create_desktop_shortcuts(_: &[Shortcut]) -> Result<Vec<PathBuf>> {
+    bail!("shortcuts are only supported on Windows")
 }
 
 #[cfg(test)]
@@ -706,6 +904,25 @@ mod tests {
         assert!(!downloaded_part("voice\\german", &files));
         assert!(!downloaded_part("text", &files), "main parts aren't 'downloaded optional parts'");
         assert!(!downloaded_part("fr", &files), "names this short would match too much");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shortcut_files_are_created() {
+        let dir = std::env::temp_dir().join(format!("arcunp-lnk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = std::env::current_exe().unwrap();
+        let sc = Shortcut {
+            name: "Game's \"Test\": 2".into(),
+            target: target.clone(),
+            args: "-x 'quoted'".into(),
+            working_dir: target.parent().unwrap().to_path_buf(),
+        };
+        let made = create_shortcuts(&[sc], Some(&dir)).unwrap();
+        assert_eq!(made.len(), 1);
+        assert!(made[0].is_file(), "{} missing", made[0].display());
+        assert!(made[0].file_name().unwrap().to_string_lossy().ends_with(".lnk"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -100,6 +100,9 @@ pub struct InstallReport {
     pub files_md5: usize,
     /// Steps the installer's own script took (0 when it wasn't used).
     pub script_steps: usize,
+    /// Desktop shortcuts the original installer would create (not created yet: see
+    /// `setup_script::create_shortcuts`).
+    pub shortcuts: Vec<crate::setup_script::Shortcut>,
 }
 
 pub fn default_cache_dir() -> PathBuf {
@@ -430,6 +433,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
             setup_files: 0,
             files_md5: 0,
             script_steps: 0,
+            shortcuts: Vec::new(),
         });
     }
 
@@ -512,7 +516,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     if !summary.cancelled
         && let Some(inno) = &inno
     {
-        match install_setup_files(inno, &opts.target_dir, sink) {
+        match install_setup_files(inno, &opts.target_dir, sink, None) {
             Ok(n) => setup_files = n,
             Err(e) => summary.problems.push(format!("files from setup.exe: {e:#}")),
         }
@@ -536,7 +540,17 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
         summary.notes.extend(check.notes);
     }
     sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
-    Ok(InstallReport { summary, codec_dir, scripts, scripts_dir, md5_checked, setup_files, files_md5, script_steps: 0 })
+    Ok(InstallReport {
+        summary,
+        codec_dir,
+        scripts,
+        scripts_dir,
+        md5_checked,
+        setup_files,
+        files_md5,
+        script_steps: 0,
+        shortcuts: Vec::new(),
+    })
 }
 
 /// Installs by running the installer's own install script (see `setup_script`): every archive
@@ -559,13 +573,32 @@ fn install_scripted(
     };
     events::info(sink, format!("running the installer's own install script; components: {}", selected.iter().cloned().collect::<Vec<_>>().join(", ")));
 
-    // Upper bound: everything every archive holds (inner archives are extracted and deleted).
-    let need: u64 = scan.archives.iter().map(|a| a.archive.total_size()).sum();
+    // What the script will do with this selection: which repack archives it needs (all must be
+    // here), how much space they take, and what can be extracted early.
+    let plan = match ss::plan_with(inno, script, setup_exe, &opts.repack_dir, &target, Some(selected.clone())) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            events::warn(sink, format!("couldn't plan the install ahead: {e:#}"));
+            None
+        }
+    };
+    let needed = plan.as_ref().map(|p| ss::preflight(p, &opts.repack_dir));
+    if let Some(pf) = &needed {
+        ensure!(
+            pf.missing.is_empty(),
+            "the selected parts need {} which {} not in the repack folder: download {}, or don't select the parts that need {}",
+            pf.missing.join(", "),
+            if pf.missing.len() == 1 { "is" } else { "are" },
+            if pf.missing.len() == 1 { "it" } else { "them" },
+            if pf.missing.len() == 1 { "it" } else { "them" }
+        );
+    }
+    let (need, packed) = needed_size(scan, needed.as_ref());
     if let Some(free) = crate::guard::free_space(&target) {
         ensure!(free > need + (1 << 30), "not enough space on the target drive: need {}, {} free", human(need), human(free));
     }
     if opts.dry_run {
-        let plan = ss::plan(setup_exe, &opts.repack_dir, &target, Some(selected.clone()))?;
+        let plan = plan.context("the install script couldn't be planned")?;
         for (i, s) in plan.steps.iter().enumerate() {
             events::info(sink, format!("step {}: {s}", i + 1));
         }
@@ -604,19 +637,13 @@ fn install_scripted(
     // game folder, while earlier steps run; at their step they are moved into place.
     let staging = staging_dir(&target);
     let _ = std::fs::remove_dir_all(&staging);
-    let prefetch = if std::env::var_os("ARC_UNPACK_NO_PREFETCH").is_some() {
-        Vec::new()
-    } else {
-        match ss::plan(setup_exe, &opts.repack_dir, &target, Some(selected.clone())) {
-            Ok(plan) => plan_prefetches(&plan, &abs(&opts.repack_dir), &target, &staging),
-            Err(e) => {
-                events::warn(sink, format!("no early extraction: {e:#}"));
-                Vec::new()
-            }
-        }
+    let prefetch = match &plan {
+        Some(p) if std::env::var_os("ARC_UNPACK_NO_PREFETCH").is_none() => plan_prefetches(p, &abs(&opts.repack_dir), &target, &staging),
+        _ => Vec::new(),
     };
 
     sink(Event::Phase { name: "Installing".into() });
+    sink(Event::Total { compressed: packed });
     let mut runner = ScriptRunner {
         opts,
         sink,
@@ -628,16 +655,17 @@ fn install_scripted(
         n: 0,
         prefetch,
         changes: HashMap::new(),
+        steps_total: plan.as_ref().map(|p| p.steps.len()).unwrap_or(0),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
-    let mut host = InnoHost::new(folders, inno, selected, &mut runner);
+    let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
     let mut vm = crate::pascal::Vm::new(script);
     let mut script_error = None;
     let mut setup_files = 0;
     // Inno's order: ssInstall, then its [Files], then ssPostInstall (where repacks unpack), ssDone.
     for step in [ss::SS_INSTALL, ss::SS_POST_INSTALL, ss::SS_DONE] {
         if step == ss::SS_POST_INSTALL {
-            match install_setup_files(inno, &target, sink) {
+            match install_setup_files(inno, &target, sink, Some(&selected)) {
                 Ok(n) => setup_files = n,
                 Err(e) => script_error = Some(format!("files from setup.exe: {e:#}")),
             }
@@ -676,6 +704,7 @@ fn install_scripted(
         summary.notes.extend(check.notes);
     }
     let _ = std::fs::remove_dir_all(&run_dir);
+    let shortcuts = ss::desktop_shortcuts(inno, &selected, &target).into_iter().filter(|s| s.target.is_file()).collect();
     sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
     Ok(InstallReport {
         summary,
@@ -686,7 +715,22 @@ fn install_scripted(
         setup_files,
         files_md5,
         script_steps,
+        shortcuts,
     })
+}
+
+/// Space the install needs (everything the needed archives hold; inner archives are extracted
+/// and deleted again) and the compressed bytes it reads. Without a plan: every archive.
+pub fn needed_size(scan: &Scan, needed: Option<&crate::setup_script::Preflight>) -> (u64, u64) {
+    // Script paths can carry doubled separators ("R:\\fg-01.bin" from "{src}\\..." with
+    // {src} = "R:\\"): compare normalized, case-insensitively.
+    let norm = |p: &Path| {
+        let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        p.components().collect::<PathBuf>().to_string_lossy().to_lowercase()
+    };
+    let needed: Option<Vec<String>> = needed.map(|n| n.needed.iter().map(|x| norm(x)).collect());
+    let wanted = |a: &&ScannedArchive| needed.as_ref().is_none_or(|n| n.contains(&norm(&a.archive.path)));
+    scan.archives.iter().filter(wanted).fold((0, 0), |(t, c), a| (t + a.archive.total_size(), c + a.archive.len))
 }
 
 fn empty_report(codec_dir: PathBuf) -> InstallReport {
@@ -699,6 +743,7 @@ fn empty_report(codec_dir: PathBuf) -> InstallReport {
         setup_files: 0,
         files_md5: 0,
         script_steps: 0,
+        shortcuts: Vec::new(),
     }
 }
 
@@ -733,6 +778,8 @@ struct ScriptRunner<'a> {
     prefetch: Vec<Prefetch>,
     /// Changes the script has made so far to each codec config, by lowercase file name.
     changes: HashMap<String, usize>,
+    /// Steps in the plan (0 if unknown).
+    steps_total: usize,
 }
 
 /// A repack archive the script will extract later, extracted early into a staging folder.
@@ -1025,6 +1072,8 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         ensure!(!self.opts.cancel.load(Ordering::Relaxed), "cancelled");
         self.start_prefetches();
         self.n += 1;
+        let total = self.steps_total.max(self.n);
+        (self.sink)(Event::Step { index: self.n, total, label: step_label(step) });
         let started = std::time::Instant::now();
         let ok = match step {
             Step::Extract { archive, out, cfg, base } => self.extract(archive, out, cfg, base.as_deref())?,
@@ -1039,6 +1088,32 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
     fn file_written(&mut self, path: &Path) {
         if let Some(name) = path.file_name() {
             *self.changes.entry(name.to_string_lossy().to_lowercase()).or_default() += 1;
+        }
+    }
+}
+
+/// A step in plain words, for the window.
+fn step_label(step: &crate::setup_script::Step) -> String {
+    use crate::setup_script::Step;
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match step {
+        Step::Extract { archive, .. } => format!("Unpacking {}", name(archive)),
+        Step::Exec { program, args, .. } => {
+            // `cmd /C tool.exe ...`: name the tool, not cmd.
+            let tool = args
+                .split(|c: char| c.is_whitespace() || c == '"')
+                .find(|t| {
+                    let t = t.to_ascii_lowercase();
+                    t.ends_with(".exe") || t.ends_with(".bat") || t.ends_with(".cmd")
+                })
+                .map(|t| name(Path::new(t)))
+                .filter(|_| name(program).eq_ignore_ascii_case("cmd.exe"))
+                .unwrap_or_else(|| name(program));
+            if tool.eq_ignore_ascii_case("cmd.exe") {
+                "Finishing up files".to_string()
+            } else {
+                format!("Running the repack's tools ({tool})")
+            }
         }
     }
 }
@@ -1240,11 +1315,22 @@ pub fn english_or_neutral(languages: &str) -> bool {
 /// language-neutral entries of every component (all archives get installed too). Entries that
 /// depend on a task or a script check are skipped and reported. Files the archives already
 /// produced are left alone (the installer writes these first, then the archives overwrite).
-fn install_setup_files(inno: &crate::inno::Setup, target: &Path, sink: &Sink) -> Result<usize> {
+fn install_setup_files(
+    inno: &crate::inno::Setup,
+    target: &Path,
+    sink: &Sink,
+    selected: Option<&std::collections::BTreeSet<String>>,
+) -> Result<usize> {
     let mut skipped = Vec::new();
     let written = inno.extract_with(|f| {
         let Some(rel) = f.app_relative() else { return Ok(None) };
         if !english_or_neutral(&f.languages) {
+            return Ok(None);
+        }
+        if let Some(sel) = selected
+            && !f.components.is_empty()
+            && !crate::setup_script::eval_components(&f.components, sel).unwrap_or(true)
+        {
             return Ok(None);
         }
         if !f.tasks.is_empty() || !f.check.is_empty() {

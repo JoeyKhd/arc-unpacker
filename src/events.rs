@@ -35,6 +35,11 @@ pub enum Event {
     JobFinished { id: usize, label: String, files: u64, output: u64, secs: f64, codecs: Vec<CodecCpu>, error: Option<String> },
     /// A new step of a multi-step operation (install), e.g. "Verifying archives".
     Phase { name: String },
+    /// The compressed input of the whole install, known up front (script-driven installs).
+    /// Later `Plan` events are then part of it, not additions.
+    Total { compressed: u64 },
+    /// The install script started step `index` (1-based) of `total`, in plain words.
+    Step { index: usize, total: usize, label: String },
     /// Status line: notes, warnings, dismissed codec dialogs.
     Message { level: Level, text: String },
 }
