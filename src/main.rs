@@ -414,6 +414,7 @@ fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Re
         done_dir: None,
         md5: None,
         md5_prefix: String::new(),
+        first_job_started: None,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();

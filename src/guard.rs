@@ -111,13 +111,32 @@ mod imp {
             PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, ProcessPowerThrottling,
             SetPriorityClass, SetProcessInformation,
         };
-        for pid in job_pids() {
-            if !done.insert(pid) {
-                continue;
+        const PROCESS_SET_LIMITED_INFORMATION: u32 = 0x2000;
+        let fresh: Vec<u32> = job_pids().into_iter().filter(|p| done.insert(*p)).collect();
+        if fresh.is_empty() {
+            return;
+        }
+        // A helper started by a codec process (a CLS proxy's 64-bit worker) belongs to that
+        // codec's stage: find it through its parents.
+        let parents = if crate::perf::pipeline_mode() == crate::perf::Pipeline::Flat { Default::default() } else { parent_map() };
+        let rank_of = |mut pid: u32| -> Option<usize> {
+            for _ in 0..8 {
+                if let Some(r) = crate::perf::stage_rank(pid) {
+                    return Some(r);
+                }
+                pid = *parents.get(&pid)?;
             }
+            None
+        };
+        for pid in fresh {
             unsafe {
-                let h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                let h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_LIMITED_INFORMATION, 0, pid);
                 if h.is_null() {
+                    continue;
+                }
+                if let Some(rank) = rank_of(pid) {
+                    crate::perf::apply_rank(h, rank);
+                    windows_sys::Win32::Foundation::CloseHandle(h);
                     continue;
                 }
                 SetPriorityClass(h, ABOVE_NORMAL_PRIORITY_CLASS);
@@ -135,6 +154,32 @@ mod imp {
                 windows_sys::Win32::Foundation::CloseHandle(h);
             }
         }
+    }
+
+    /// pid -> parent pid for every process.
+    fn parent_map() -> std::collections::HashMap<u32, u32> {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        };
+        let mut out = std::collections::HashMap::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap as isize == -1 {
+                return out;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut e) != 0 {
+                loop {
+                    out.insert(e.th32ProcessID, e.th32ParentProcessID);
+                    if Process32NextW(snap, &mut e) == 0 {
+                        break;
+                    }
+                }
+            }
+            windows_sys::Win32::Foundation::CloseHandle(snap);
+        }
+        out
     }
 
     fn job_pids() -> HashSet<u32> {

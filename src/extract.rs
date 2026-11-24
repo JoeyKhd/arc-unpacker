@@ -42,6 +42,9 @@ pub struct Options {
     pub md5: Option<Arc<Md5List>>,
     /// Where `out_dir` sits inside the game folder (e.g. `temp\`), for MD5 list lookups.
     pub md5_prefix: String,
+    /// Set once this run has picked its first job (or has none): lets a caller start several
+    /// runs in a chosen order, each getting its memory-heavy slot before the next asks.
+    pub first_job_started: Option<Arc<AtomicBool>>,
 }
 
 /// Expected MD5 of one installed file.
@@ -136,6 +139,9 @@ impl Job {
 
 pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) -> Result<Summary> {
     let archives: Vec<Arc<Archive>> = archives.into_iter().map(Arc::new).collect();
+    if opts.tune {
+        crate::helpers::place_xtool_timer(&cfg.codec_dir(), &opts.host_dir);
+    }
 
     // Validate everything up front: a missing codec should fail in one second, not one hour.
     let mut missing = Vec::new();
@@ -229,6 +235,9 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
             let (queue, wake) = (&queue, &wake);
             workers.push(s.spawn(move || {
                 while let Some((id, job, heavy, slot)) = next_job(queue, wake, opts, sink) {
+                    if let Some(f) = &opts.first_job_started {
+                        f.store(true, Ordering::Relaxed);
+                    }
                     let label = job.label();
                     let marker = opts.done_dir.as_ref().map(|d| d.join(job.marker()));
                     if marker.as_ref().is_some_and(|m| m.is_file()) {
@@ -364,14 +373,33 @@ fn next_job(
 
 /// Memory-hungry jobs: CLS codecs (lolz-class decoders size their buffers by a share of RAM)
 /// and whole-archive unarc runs (which load them too).
+/// Whether a job needs a memory-heavy slot. What decides is the codec, not how it is run:
+/// context-mixing decoders (the lolz family) size their models by a share of RAM, and srep
+/// keeps the data it may need again in memory.
 fn is_heavy(job: &Job, cfg: &Config) -> bool {
+    let block = |b: &DataBlock| method_is_heavy(&b.method, b.origsize, cfg);
     match job.kind {
-        JobKind::Unarc => true,
-        JobKind::Block(i) => cfg
-            .resolve(&job.archive.blocks[i].method)
-            .map(|st| st.iter().any(|s| matches!(s.codec, crate::config::Codec::Cls { .. })))
-            .unwrap_or(false),
+        JobKind::Unarc => job.archive.blocks.iter().any(block),
+        JobKind::Block(i) => block(&job.archive.blocks[i]),
     }
+}
+
+fn method_is_heavy(chain: &str, block_size: u64, cfg: &Config) -> bool {
+    const HUNGRY: [&str; 3] = ["magic", "lolly", "lolz"];
+    let hungry = |s: &str| HUNGRY.iter().any(|h| s.to_ascii_lowercase().starts_with(h));
+    crate::method::parse_chain(chain).iter().any(|m| {
+        if hungry(&m.name) || m.params.iter().any(|p| hungry(p)) {
+            return true;
+        }
+        if m.name.eq_ignore_ascii_case("srep") {
+            // "mem228mb": how much the compressor says decompression needs. Without it, go by size.
+            let declared = m.params.iter().find_map(|p| p.strip_prefix("mem").and_then(crate::method::parse_size));
+            return declared.map(|need| need > 1 << 30).unwrap_or(block_size > 2 << 30);
+        }
+        // Any other CLS codec has an unknown appetite: heavy when the block is big.
+        let cls = cfg.resolve(&m.full()).is_ok_and(|st| st.iter().any(|s| matches!(s.codec, crate::config::Codec::Cls { .. })));
+        cls && block_size > 1 << 30
+    })
 }
 
 /// CLS codecs (or their helper executables) that hard-code "Global\" object names, which only
@@ -548,6 +576,54 @@ pub fn next_job_id() -> usize {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// MD5 of a file on disk.
+pub fn md5_of_file(path: &Path) -> std::io::Result<[u8; 16]> {
+    let mut f = File::open(path)?;
+    let mut ctx = md5::Context::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            return Ok(ctx.finalize().0);
+        }
+        ctx.consume(&buf[..n]);
+    }
+}
+
+/// Hashes the files of `entries` under `out` that the MD5 list names and that haven't been
+/// checked yet, on a few threads, and records the outcome in the list.
+fn hash_written(list: &Md5List, out: &Path, prefix: &str, entries: &[Entry], cancel: &AtomicBool) {
+    let todo: Vec<(&ExpectedMd5, PathBuf)> = entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .filter_map(|e| {
+            let x = list.get(&md5_key(&format!("{prefix}{}", e.path)))?;
+            (!x.checked.load(Ordering::Relaxed)).then_some(())?;
+            Some((x, safe_join(out, &e.path).ok()?))
+        })
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 4);
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(todo.len()) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= todo.len() || cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let (x, path) = &todo[i];
+                    // A file that can't be read stays unchecked: the final check reports it.
+                    if let Ok(got) = md5_of_file(path) {
+                        x.matched.store(got == x.md5, Ordering::Relaxed);
+                        x.checked.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+}
+
 struct RemoveDirOnDrop(PathBuf);
 
 impl Drop for RemoveDirOnDrop {
@@ -644,6 +720,11 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     let mut problems = Vec::new();
     if !errors.trim().is_empty() {
         problems.push(format!("unarc.dll reported: {}", errors.trim()));
+    }
+    // unarc.dll wrote these files itself, so they weren't hashed on the way to disk: check the
+    // listed ones now, while other archives are still decoding, instead of in a pass at the end.
+    if let (Some(list), Some(out)) = (&opts.md5, &opts.out_dir) {
+        hash_written(list, out, &opts.md5_prefix, &archive.entries, &opts.cancel);
     }
     let files = archive.entries.iter().filter(|e| !e.is_dir).count() as u64;
     let codecs = vec![CodecCpu { label: "unarc.dll".into(), cpu_secs: cpu, wall_secs: wall }];
@@ -892,6 +973,24 @@ pub fn human(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heavy_is_decided_by_codec() {
+        let cfg = Config::default();
+        let gb = 1u64 << 30;
+        // lolz-family decoders are always heavy, also as the inner method of 4x4.
+        assert!(method_is_heavy("xt3u+srep:m3yf+magic2", 6 * gb, &cfg));
+        assert!(method_is_heavy("precomp+lollypop2", 100 << 20, &cfg));
+        assert!(method_is_heavy("4x4:b64mb:lolz", gb, &cfg));
+        // srep says what it needs; without that, only big blocks count.
+        assert!(!method_is_heavy("4x4:b128mb:mpzz+srep:m3f:mem228mb+4x4:tor:16mb:c3", gb / 2, &cfg));
+        assert!(method_is_heavy("srep:m3f:mem3gb+lzma", gb / 2, &cfg));
+        assert!(!method_is_heavy("srep:m3zf+dispack070+delta+rzwb", 111 << 20, &cfg));
+        assert!(method_is_heavy("srep:m3f+rzs", 5 * gb, &cfg));
+        // Plain FreeArc methods never are.
+        assert!(!method_is_heavy("dispack070+delta+lzma:96mb", 8 * gb, &cfg));
+        assert!(!method_is_heavy("storing", 50 * gb, &cfg));
+    }
 
     #[test]
     fn safe_join_rules() {

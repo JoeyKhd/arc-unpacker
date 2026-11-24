@@ -107,6 +107,7 @@ pub struct Ctx {
 /// the fully decoded block (known from the directory).
 pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Result<Stream> {
     let mut stream = input;
+    let mut rank = 0;
     for (i, st) in stages.iter().enumerate().rev() {
         let label = st.method.full();
         stream = match &st.codec {
@@ -132,7 +133,9 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                     output_file: e.output_file,
                     header: e.header,
                     performance_cores: e.performance_cores,
+                    rank,
                 };
+                rank += 1;
                 external(spec, stream, ctx)?
             }
             Codec::Cls { dll, method, performance_cores } => {
@@ -145,7 +148,9 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                     output_file: false,
                     header: false,
                     performance_cores: *performance_cores,
+                    rank,
                 };
+                rank += 1;
                 external(spec, stream, ctx)?
             }
         };
@@ -196,6 +201,8 @@ struct ExtSpec {
     output_file: bool,
     header: bool,
     performance_cores: bool,
+    /// Position among this chain's codec processes in decode order (0 reads the archive).
+    rank: usize,
 }
 
 fn command(spec: &ExtSpec, input_path: &Path, output_path: &Path, tune: bool) -> Command {
@@ -234,6 +241,7 @@ fn spawn_child(spec: &ExtSpec, mut cmd: Command, ctx: &Ctx) -> Result<Spawned> {
     let mut child = cmd.spawn().with_context(|| format!("{}: failed to start {:?}", spec.label, spec.argv[0]))?;
     if ctx.tune {
         crate::perf::tune_child(&child, spec.performance_cores);
+        crate::perf::register_stage(child.id(), spec.rank);
     }
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
@@ -314,7 +322,38 @@ impl Read for ChildOut {
     }
 }
 
+/// Debugging aid: `ARC_UNPACK_TEE_XTOOL=<file>` also writes xtool's input stream to a file, so
+/// xtool can be replayed on its own afterwards.
+struct Tee {
+    inner: Stream,
+    copy: io::BufWriter<std::fs::File>,
+}
+
+impl Read for Tee {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n == 0 {
+            self.copy.flush()?;
+        } else {
+            self.copy.write_all(&buf[..n])?;
+        }
+        Ok(n)
+    }
+}
+
+fn tee_if_requested(spec: &ExtSpec, input: Stream) -> Result<Stream> {
+    let is_xtool = Path::new(&spec.argv[0]).file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().starts_with("xtool"));
+    match std::env::var_os("ARC_UNPACK_TEE_XTOOL") {
+        Some(path) if is_xtool => {
+            let file = std::fs::File::create(&path).with_context(|| format!("create {}", Path::new(&path).display()))?;
+            Ok(Box::new(Tee { inner: input, copy: io::BufWriter::with_capacity(IO_BUF, file) }))
+        }
+        _ => Ok(input),
+    }
+}
+
 fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
+    let input = tee_if_requested(&spec, input)?;
     if !spec.header && !spec.input_file && !spec.output_file {
         // Fast path: stdin -> codec -> stdout, read directly by the next stage.
         let mut cmd = command(&spec, Path::new(""), Path::new(""), ctx.tune);

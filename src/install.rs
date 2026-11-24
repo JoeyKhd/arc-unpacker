@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,7 +284,8 @@ fn verify_md5(scan: &Scan, cancel: &AtomicBool, skip: &AtomicBool, sink: &Sink) 
                 let id = extract::next_job_id();
                 s.spawn(move || -> Result<bool> {
                     let name = a.archive.name();
-                    sink(Event::JobStarted { id, label: name.clone(), method: "md5".into(), compressed: a.archive.len, output: 0 });
+                    let label = format!("checking {name}");
+                    sink(Event::JobStarted { id, label: label.clone(), method: "md5".into(), compressed: a.archive.len, output: 0 });
                     let started = std::time::Instant::now();
                     let mut f = std::fs::File::open(&a.archive.path)?;
                     let mut ctx = md5::Context::new();
@@ -371,6 +372,7 @@ fn run_role(
         done_dir,
         md5,
         md5_prefix: String::new(),
+        first_job_started: None,
     };
     std::fs::create_dir_all(&eopts.temp_dir)?;
     extract::run(reopened, cfg, &eopts, sink)
@@ -564,7 +566,7 @@ fn install_scripted(
     script: &crate::pascal::Script,
     sink: &Sink,
 ) -> Result<InstallReport> {
-    use crate::setup_script::{self as ss, Folders, InnoHost};
+    use crate::setup_script as ss;
     let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
     let target = abs(&opts.target_dir);
     let selected: std::collections::BTreeSet<String> = match &opts.components {
@@ -611,11 +613,59 @@ fn install_scripted(
         return Ok(report);
     }
 
-    let mut md5_checked = 0;
-    if opts.verify_md5 {
-        sink(Event::Phase { name: "Verifying archives".into() });
-        md5_checked = verify_md5(scan, &opts.cancel, &opts.skip_verify, sink)?;
-    }
+    // The downloaded archives are checked against the repack's MD5 list while the install runs
+    // (the same bytes are being read anyway). A damaged archive stops the install.
+    sink(Event::Phase { name: "Installing".into() });
+    sink(Event::Total { compressed: packed, output: need });
+    let damaged: Mutex<Option<String>> = Mutex::new(None);
+    std::thread::scope(|threads| {
+        let check = opts.verify_md5.then(|| {
+            threads.spawn(|| match verify_md5(scan, &opts.cancel, &opts.skip_verify, sink) {
+                Ok(n) => n,
+                Err(e) => {
+                    if !opts.cancel.load(Ordering::Relaxed) {
+                        *damaged.lock().unwrap() = Some(format!("{e:#}"));
+                        opts.cancel.store(true, Ordering::Relaxed);
+                    }
+                    0
+                }
+            })
+        });
+        let report = run_scripted(opts, setup_exe, inno, script, sink, &target, selected, plan.as_ref());
+        let md5_checked = check.map(|c| c.join().unwrap_or(0)).unwrap_or(0);
+        let damaged = damaged.lock().unwrap().take();
+        match (report, damaged) {
+            // The archive differs from the list, yet every installed file was verified.
+            (Ok(mut r), Some(why)) if r.files_md5 > 0 && r.summary.problems.is_empty() && !r.summary.cancelled => {
+                r.summary.notes.push(format!("{why} (every installed file still matched the repack's MD5 list)"));
+                r.md5_checked = md5_checked;
+                Ok(r)
+            }
+            (_, Some(why)) => bail!("{why}. The install was stopped; the partly installed game folder can be deleted."),
+            (report, None) => report.map(|mut r| {
+                r.md5_checked = md5_checked;
+                r
+            }),
+        }
+    })
+}
+
+/// The install itself: the script's steps, the installer's own files, the final file check.
+#[allow(clippy::too_many_arguments)]
+fn run_scripted(
+    opts: &InstallOptions,
+    setup_exe: &Path,
+    inno: &crate::inno::Setup,
+    script: &crate::pascal::Script,
+    sink: &Sink,
+    target: &Path,
+    selected: std::collections::BTreeSet<String>,
+    plan: Option<&crate::setup_script::Plan>,
+) -> Result<InstallReport> {
+    use crate::setup_script::{self as ss, Folders, InnoHost};
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = target.to_path_buf();
+    let md5_checked = 0;
 
     // A fresh copy of the installer's temporary files per run: the script edits some of them.
     let target_key = sha1_smol::Sha1::from(target.to_string_lossy().to_lowercase()).digest().to_string();
@@ -637,13 +687,11 @@ fn install_scripted(
     // game folder, while earlier steps run; at their step they are moved into place.
     let staging = staging_dir(&target);
     let _ = std::fs::remove_dir_all(&staging);
-    let prefetch = match &plan {
+    let prefetch = match plan {
         Some(p) if std::env::var_os("ARC_UNPACK_NO_PREFETCH").is_none() => plan_prefetches(p, &abs(&opts.repack_dir), &target, &staging),
         _ => Vec::new(),
     };
 
-    sink(Event::Phase { name: "Installing".into() });
-    sink(Event::Total { compressed: packed, output: need });
     let mut runner = ScriptRunner {
         opts,
         sink,
@@ -655,7 +703,7 @@ fn install_scripted(
         n: 0,
         prefetch,
         changes: HashMap::new(),
-        steps_total: plan.as_ref().map(|p| p.steps.len()).unwrap_or(0),
+        steps_total: plan.map(|p| p.steps.len()).unwrap_or(0),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
@@ -890,16 +938,24 @@ impl ScriptRunner<'_> {
             done_dir: None,
             md5: prefix.as_ref().and(self.md5.clone()),
             md5_prefix: prefix.unwrap_or_default(),
+            first_job_started: None,
         }
     }
 
-    /// Starts every early extraction whose codec config is final by now.
+    /// Starts every early extraction whose codec config is final by now, largest archive
+    /// first: the longest one decides when the install ends, so it must get its memory-heavy
+    /// slot before smaller archives take the slots.
     fn start_prefetches(&mut self) {
-        for i in 0..self.prefetch.len() {
+        let mut ready: Vec<usize> = (0..self.prefetch.len())
+            .filter(|&i| {
+                let p = &self.prefetch[i];
+                !(p.used || p.handle.is_some() || self.changes.get(&p.cfg_name).copied().unwrap_or(0) < p.changes_before)
+            })
+            .collect();
+        let size = |p: &Prefetch| std::fs::metadata(&p.archive).map(|m| m.len()).unwrap_or(0);
+        ready.sort_by_key(|&i| std::cmp::Reverse(size(&self.prefetch[i])));
+        for i in ready {
             let p = &self.prefetch[i];
-            if p.used || p.handle.is_some() || self.changes.get(&p.cfg_name).copied().unwrap_or(0) < p.changes_before {
-                continue;
-            }
             if self.opts.cancel.load(Ordering::Relaxed) {
                 return;
             }
@@ -913,15 +969,23 @@ impl ScriptRunner<'_> {
                     continue;
                 }
             };
-            let eopts = self.options(stage.clone(), whole.then_some(out.as_path()), self.prefetch[i].cancel.clone());
+            let mut eopts = self.options(stage.clone(), whole.then_some(out.as_path()), self.prefetch[i].cancel.clone());
+            let started = Arc::new(AtomicBool::new(false));
+            eopts.first_job_started = Some(started.clone());
             let sink = self.sink.clone();
             let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             events::info(self.sink, format!("{name}: extracting early (the script needs it later)"));
-            self.prefetch[i].handle = Some(std::thread::spawn(move || {
+            let handle = std::thread::spawn(move || {
                 std::fs::create_dir_all(&stage)?;
                 std::fs::create_dir_all(&eopts.temp_dir)?;
                 extract::run(vec![Archive::open(&archive)?], &cfg, &eopts, &sink)
-            }));
+            });
+            // Let it pick its first job (and slot) before the next, smaller one starts.
+            let waited = std::time::Instant::now();
+            while !started.load(Ordering::Relaxed) && !handle.is_finished() && waited.elapsed() < std::time::Duration::from_secs(3) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            self.prefetch[i].handle = Some(handle);
         }
     }
 

@@ -39,6 +39,30 @@ mod imp {
         unsafe { no_throttle(GetCurrentProcess()) };
     }
 
+    /// Applies the pipeline policy to one codec process: `rank` 0 is the first decode stage.
+    pub fn apply_rank(h: HANDLE, rank: usize) {
+        use windows_sys::Win32::System::Threading::{
+            BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, SetPriorityClass,
+        };
+        no_throttle(h);
+        let class = match (super::pipeline_mode(), rank) {
+            (super::Pipeline::Flat, _) => PRIORITY_FLAGS,
+            (super::Pipeline::Low, 0) => PRIORITY_FLAGS,
+            (super::Pipeline::Low, 1) => NORMAL_PRIORITY_CLASS,
+            (super::Pipeline::Low, _) => BELOW_NORMAL_PRIORITY_CLASS,
+            (_, 0) => HIGH_PRIORITY_CLASS,
+            (_, 1) => PRIORITY_FLAGS,
+            (_, _) => NORMAL_PRIORITY_CLASS,
+        };
+        unsafe { SetPriorityClass(h, class) };
+        if super::pipeline_mode() == super::Pipeline::HighP && rank == 0 {
+            let ids = performance_cpu_sets();
+            if !ids.is_empty() {
+                unsafe { SetProcessDefaultCpuSets(h, ids.as_ptr(), ids.len() as u32) };
+            }
+        }
+    }
+
     pub fn tune_child(child: &std::process::Child, performance_cores_only: bool) {
         let h = child.as_raw_handle() as HANDLE;
         no_throttle(h);
@@ -100,6 +124,47 @@ mod imp {
         let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
         Some(t(k) + t(u))
     }
+}
+
+/// How the codec processes of one decode chain share the CPU. The first decode stage (the
+/// entropy decoder reading the archive) is usually serial and sets the pace; later stages
+/// (xtool and friends) are the thread-hungry ones. Because stages are connected by pipes with
+/// back-pressure, favouring upstream can't starve downstream: a stage that is ahead just blocks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pipeline {
+    /// Every codec process above normal priority.
+    Flat,
+    /// Above normal / normal / below normal, by position.
+    Low,
+    /// High / above normal / normal, by position.
+    High,
+    /// `High`, and the first stage restricted to the fastest core class (P-cores).
+    HighP,
+}
+
+/// The policy in use: `ARC_UNPACK_PIPELINE` = flat | low | high | high+p.
+pub fn pipeline_mode() -> Pipeline {
+    static MODE: std::sync::OnceLock<Pipeline> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("ARC_UNPACK_PIPELINE").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "low" => Pipeline::Low,
+        "high" => Pipeline::High,
+        "high+p" => Pipeline::HighP,
+        _ => Pipeline::Flat,
+    })
+}
+
+fn ranks() -> &'static std::sync::Mutex<std::collections::HashMap<u32, usize>> {
+    static RANKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u32, usize>>> = std::sync::OnceLock::new();
+    RANKS.get_or_init(Default::default)
+}
+
+/// Records that process `pid` runs decode stage number `rank` of its chain.
+pub fn register_stage(pid: u32, rank: usize) {
+    ranks().lock().unwrap().insert(pid, rank);
+}
+
+pub fn stage_rank(pid: u32) -> Option<usize> {
+    ranks().lock().unwrap().get(&pid).copied()
 }
 
 #[cfg(not(windows))]
