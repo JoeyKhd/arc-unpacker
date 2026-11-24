@@ -3,3 +3,4 @@
 /testdata/cls-xortest/target
 /hs2-codecs
 /release
+__pycache__/
