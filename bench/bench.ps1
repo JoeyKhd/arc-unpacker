@@ -43,9 +43,11 @@ function Invoke-Measured([string]$name, [scriptblock]$body) {
     $sampler = Start-Job -ArgumentList $csv -ScriptBlock {
         param($f)
         while ($true) {
-            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
-            $os = Get-CimInstance Win32_OperatingSystem
-            $usedMB = [int](($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1024)
+            # In use = total - available. "Available" includes the file cache, so cached archive
+            # data doesn't count as used memory.
+            $c = (Get-Counter '\Processor(_Total)\% Processor Time', '\Memory\Available MBytes').CounterSamples
+            $cpu = $c[0].CookedValue
+            $usedMB = [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB - $c[1].CookedValue)
             "$cpu,$usedMB" | Add-Content -Path $f
         }
     }
@@ -76,8 +78,9 @@ $rows += Invoke-Measured 'baseline-unarc-sequential' {
     param($out)
     Push-Location $Codecs   # unarc finds its external codecs relative to the current folder
     foreach ($a in $paths) {
-        & "$Dist\unarc-host-x86.exe" "$Codecs\unarc.dll" x $a -o+ "-cfg$Codecs\arc.ini" "-dp$out" "-w$temp" | Out-Null
-        if ($LASTEXITCODE -ne 0) { Write-Warning "unarc failed on $a ($LASTEXITCODE)" }
+        $log = Join-Path $Work ("unarc-" + [IO.Path]::GetFileName($a) + ".log")
+        & "$Dist\unarc-host-x86.exe" "$Codecs\unarc.dll" x $a -o+ "-cfg$Codecs\arc.ini" "-dp$out" "-w$temp" *> $log
+        if ($LASTEXITCODE -ne 0) { Write-Warning "unarc failed on $a ($LASTEXITCODE), see $log" }
     }
     Pop-Location
 }
@@ -85,7 +88,7 @@ $rows += Invoke-Measured 'baseline-unarc-sequential' {
 foreach ($heavy in 1, 2) {
     $rows += Invoke-Measured "arc-unpack-heavy$heavy" {
         param($out)
-        & "$Dist\arc-unpack.exe" extract @paths -c "$Codecs\codecs.toml" -o $out -j 3 --heavy-jobs $heavy --temp-dir $temp 2>&1 | Out-Null
+        & "$Dist\arc-unpack.exe" extract @paths -c "$Codecs\codecs.toml" -o $out -j 3 --heavy-jobs $heavy --temp-dir $temp *> (Join-Path $Work "arc-unpack-heavy$heavy.log")
         if ($LASTEXITCODE -ne 0) { Write-Warning "arc-unpack exited with $LASTEXITCODE" }
     }
 }
@@ -97,7 +100,7 @@ $machine = [pscustomobject]@{
     ram_gb   = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
     os       = (Get-CimInstance Win32_OperatingSystem).Caption
     archives = $Archives
-    packed_bytes = ($paths | ForEach-Object { (Get-Item $_).Length } | Measure-Object -Sum).Sum
+    packed_bytes = ($paths | ForEach-Object { (Get-Item -LiteralPath $_).Length } | Measure-Object -Sum).Sum
 }
 [pscustomobject]@{ machine = $machine; runs = $rows; date = (Get-Date -Format s) } | ConvertTo-Json -Depth 4 | Set-Content -Path $Results -Encoding UTF8
 Write-Host "results written to $Results"
