@@ -1,0 +1,32 @@
+# Example codec config. The easiest way to get a real one is:
+#   arc-unpack import-arcini <installer tools folder>\arc.ini -o codecs.toml
+# Anything named cls-<method>.dll in codec_dir is picked up automatically.
+
+# Folder with the codec programs and DLLs (relative to this file).
+codec_dir = "codecs"
+
+# --- External program, piped (fastest: no temp files) -------------------------------
+# {options} expands like FreeArc: "srep:m3yf" -> "-m3yf ".
+# `header` mirrors arc.ini's `header` (default true). Set it to whatever the installer's
+# arc.ini says; getting it wrong shifts the stream by one byte and the codec will fail.
+[methods.srep]
+cmd = 'srep64.exe -d {options}- -'
+header = false
+performance_cores = false
+
+# --- External program that needs real files ----------------------------------------
+# {input} = compressed data, {output} = file the codec must create. Slower: the whole
+# stage is written to disk first.
+[methods.someexe]
+cmd = 'someexe.exe d {input} {output}'
+
+# --- CLS DLL under a different name -----------------------------------------------
+# (Not needed when the file is literally named cls-<method>.dll.)
+[methods.magic2]
+cls = 'cls-lolz_x64.dll'
+# Keep the single-threaded final decoder on P-cores (hybrid Intel CPUs).
+performance_cores = true
+
+# --- Alias: one name standing for another chain ------------------------------------
+[methods.rzs]
+alias = 'razor'

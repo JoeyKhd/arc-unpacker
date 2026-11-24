@@ -1,0 +1,13 @@
+[package]
+name = "cls-xortest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A tiny FreeArc CLS codec used only to test cls-host: XORs the stream with a key taken
+# from the method params ("xortest:k90" -> key 90; default 0x5A).
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[workspace]
