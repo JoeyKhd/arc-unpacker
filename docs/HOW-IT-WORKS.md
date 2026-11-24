@@ -36,8 +36,10 @@ If a script needs a function arc-unpack doesn't provide, the install stops with 
 
 - **Early extraction.** arc-unpack plans the whole script first. While the script works through one step, the repack archives it needs later are already being extracted, into a staging folder next to the game folder. When the script reaches them, the files are moved into place (a rename on the same drive), so the order of effects is the script's own.
 - **Checking while writing.** Every file named in the repack's MD5 list is hashed as it's written. Files changed by a later step are re-checked from disk at the end. There's no second read of the whole game.
+- **Checking the downloads while installing.** The `.bin` files are hashed against the repack's list while they're being decoded, not in a pass before. A damaged archive stops the install with its name.
+- **Shorter waits inside xtool.** xtool, the precompressor most repacks use, coordinates its threads with `Sleep(1)`, which lasts about 15 ms at Windows' default timer resolution. A 10 KB plugin placed next to xtool ([`xtool-timer/`](../xtool-timer/src/lib.rs)) requests 1 ms inside xtool's own process. It registers no codecs and changes nothing else. On PCs that already run a 1 ms timer it makes no difference. Set `ARC_UNPACK_NO_XTOOL_TIMER=1` to leave it out.
 - **Every codec stage at once.** A chain like `xtool + precomp + srep + lolz` runs as four concurrent processes connected by large pipes, instead of one after another.
-- **Memory-aware scheduling.** Light jobs run alongside heavy ones. A second memory-heavy job only starts while plenty of RAM is free, and the limit is machine-wide, so two runs at once can't exhaust RAM or corrupt each other.
+- **Memory-aware scheduling.** Jobs are classed by codec: the lolz family and large srep blocks are memory-heavy, the rest are light and run alongside. The largest archive gets its slot first, because it decides when the install ends. A second heavy job only starts while plenty of RAM is free, and the limit is machine-wide, so two runs at once can't exhaust RAM or corrupt each other.
 - **Fast output.** A pool of writer threads creates, preallocates and timestamps files while decoding continues.
 - **Never throttled.** Codec processes are opted out of Windows EcoQoS, so they aren't parked on efficiency cores.
 
@@ -124,6 +126,7 @@ src/extract.rs         scheduling, splitting, writer pool, watchdog, path safety
 src/stage.rs           stage runners: built-ins, external programs, CLS hosts
 src/config.rs          codecs.toml, method resolution, FreeArc option templates
 src/guard.rs           job objects, dialog handling, cross-process locks, elevation, RAM checks
+xtool-timer/           the xtool timer plugin (its own tiny crate)
 src/events.rs          progress events (terminal and window are listeners)
 src/bin/arc-unpack-gui.rs   the window (egui)
 src/bin/cls-host.rs    CLS DLL host (x86 + x64)
