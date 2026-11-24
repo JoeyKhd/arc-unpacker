@@ -91,8 +91,9 @@ struct RunArgs {
     /// Don't adjust process priority / power throttling.
     #[arg(long)]
     no_tune: bool,
-    /// At most this many memory-heavy jobs (CLS codecs, unarc) at once. 0 = no limit.
-    #[arg(long, default_value_t = 1)]
+    /// At most this many memory-heavy jobs (CLS codecs, unarc) at once; beyond the first, only
+    /// while plenty of RAM is free. 0 = no limit.
+    #[arg(long, default_value_t = 2)]
     heavy_jobs: usize,
     /// Stop a block after this many seconds without any progress (a hung codec). 0 = never.
     #[arg(long, default_value_t = 600)]
@@ -174,7 +175,7 @@ fn real_main() -> Result<()> {
                 }
                 return Ok(());
             }
-            let plan = arc_unpack::setup_script::plan(&setup_exe, &repack, &target)?;
+            let plan = arc_unpack::setup_script::plan(&setup_exe, &repack, &target, None)?;
             println!("Components (default install + downloaded optional parts):");
             for (name, desc, on) in &plan.components {
                 println!("  [{}] {name}  {desc}", if *on { "x" } else { " " });
@@ -237,8 +238,9 @@ struct InstallArgs {
     /// Jobs running at once (light ones fill in around heavy ones).
     #[arg(short, long, default_value_t = 3)]
     jobs: usize,
-    /// At most this many memory-heavy jobs at once.
-    #[arg(long, default_value_t = 1)]
+    /// At most this many memory-heavy jobs at once (beyond the first, only while plenty of RAM
+    /// is free).
+    #[arg(long, default_value_t = 2)]
     heavy_jobs: usize,
     #[arg(long, default_value_t = 8)]
     writers: usize,

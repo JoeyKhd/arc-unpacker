@@ -295,11 +295,27 @@ mod imp {
         }
     }
 
-    /// Takes a free slot among `limit` without waiting, or None if all are busy.
+    /// Physical memory: (available, total) bytes.
+    pub fn memory() -> (u64, u64) {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { (m.ullAvailPhys, m.ullTotalPhys) } else { (0, 0) }
+    }
+
+    /// Takes a free slot among `limit` without waiting, or None if all are busy. The first slot
+    /// is always available to take; the others only while plenty of RAM is free (at least a
+    /// quarter of it, and 8 GB), so a second heavy job runs only when it fits.
     pub fn try_heavy_slot(limit: usize) -> Option<HeavySlot> {
         use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
         for n in 0..limit {
+            if n >= 1 {
+                let (available, total) = memory();
+                if available < (total / 4).max(8 << 30) {
+                    break;
+                }
+            }
             let name = wide(std::ffi::OsStr::new(&format!("Local\\arc-unpack-heavy-{n}")));
             let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
             if h.is_null() {
@@ -383,6 +399,9 @@ mod imp {
     pub struct HeavySlot;
     pub fn try_heavy_slot(_: usize) -> Option<HeavySlot> {
         Some(HeavySlot)
+    }
+    pub fn memory() -> (u64, u64) {
+        (0, 0)
     }
     pub struct InitLock;
     impl InitLock {

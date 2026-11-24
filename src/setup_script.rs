@@ -624,19 +624,22 @@ pub struct Plan {
     pub messages: Vec<String>,
     /// Set if the script stopped (e.g. it calls something arc-unpack doesn't provide).
     pub error: Option<String>,
+    /// The scratch `{tmp}` the plan ran with (deleted again); step paths inside it map to the
+    /// real run's `{tmp}`.
+    pub tmp: PathBuf,
 }
 
 /// Runs the install script against a scratch temp folder with nothing extracted or run.
 /// Extraction "succeeds" without producing files, so steps that check for extracted files may
 /// be missing from the listing.
-pub fn plan(setup_exe: &Path, repack: &Path, target: &Path) -> Result<Plan> {
+pub fn plan(setup_exe: &Path, repack: &Path, target: &Path, selected: Option<BTreeSet<String>>) -> Result<Plan> {
     let setup = Setup::open(setup_exe)?;
     ensure!(!setup.code.is_empty(), "this installer has no install script");
     let script = Script::load(&setup.code)?;
     let tmp = std::env::temp_dir().join(format!("arcunp-plan-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     prepare_tmp(&setup, &tmp)?;
-    let selected = default_components(&setup, &repack_files(repack));
+    let selected = selected.unwrap_or_else(|| default_components(&setup, &repack_files(repack)));
     let components = setup
         .components
         .iter()
@@ -666,6 +669,7 @@ pub fn plan(setup_exe: &Path, repack: &Path, target: &Path) -> Result<Plan> {
         writes: std::mem::take(&mut host.writes),
         messages: std::mem::take(&mut host.messages),
         error,
+        tmp: tmp.clone(),
     };
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(plan)

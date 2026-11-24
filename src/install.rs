@@ -12,7 +12,7 @@ use crate::events::{self, Event, Sink};
 use crate::extract::{self, ExpectedMd5, Md5List, Options, Summary, human};
 use crate::format::Archive;
 use anyhow::{Context, Result, bail, ensure};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -273,9 +273,8 @@ fn verify_md5(scan: &Scan, cancel: &AtomicBool, sink: &Sink) -> Result<usize> {
     let results: Vec<Result<()>> = std::thread::scope(|s| {
         let handles: Vec<_> = todo
             .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                let id = 100_000 + i;
+            .map(|a| {
+                let id = extract::next_job_id();
                 s.spawn(move || -> Result<()> {
                     let name = a.archive.name();
                     sink(Event::JobStarted { id, label: name.clone(), method: "md5".into(), compressed: a.archive.len, output: 0 });
@@ -546,7 +545,7 @@ fn install_scripted(
         ensure!(free > need + (1 << 30), "not enough space on the target drive: need {}, {} free", human(need), human(free));
     }
     if opts.dry_run {
-        let plan = ss::plan(setup_exe, &opts.repack_dir, &target)?;
+        let plan = ss::plan(setup_exe, &opts.repack_dir, &target, Some(selected.clone()))?;
         for (i, s) in plan.steps.iter().enumerate() {
             events::info(sink, format!("step {}: {s}", i + 1));
         }
@@ -581,8 +580,35 @@ fn install_scripted(
         }
     };
 
+    // Repack archives the script extracts later start early, into a staging folder next to the
+    // game folder, while earlier steps run; at their step they are moved into place.
+    let staging = staging_dir(&target);
+    let _ = std::fs::remove_dir_all(&staging);
+    let prefetch = if std::env::var_os("ARC_UNPACK_NO_PREFETCH").is_some() {
+        Vec::new()
+    } else {
+        match ss::plan(setup_exe, &opts.repack_dir, &target, Some(selected.clone())) {
+            Ok(plan) => plan_prefetches(&plan, &abs(&opts.repack_dir), &target, &staging),
+            Err(e) => {
+                events::warn(sink, format!("no early extraction: {e:#}"));
+                Vec::new()
+            }
+        }
+    };
+
     sink(Event::Phase { name: "Installing".into() });
-    let mut runner = ScriptRunner { opts, sink, md5: md5.clone(), app: target.clone(), summary: Summary::default(), configs: Vec::new(), n: 0 };
+    let mut runner = ScriptRunner {
+        opts,
+        sink,
+        md5: md5.clone(),
+        app: target.clone(),
+        tmp: tmp.clone(),
+        summary: Summary::default(),
+        configs: Vec::new(),
+        n: 0,
+        prefetch,
+        changes: HashMap::new(),
+    };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected, &mut runner);
     let mut vm = crate::pascal::Vm::new(script);
@@ -606,6 +632,8 @@ fn install_scripted(
     let messages = std::mem::take(&mut host.messages);
     let script_steps = host.steps.len();
     drop(host);
+    runner.discard_prefetches();
+    let _ = std::fs::remove_dir_all(&staging);
     let mut summary = runner.summary;
     summary.notes.extend(messages);
     if opts.cancel.load(Ordering::Relaxed) {
@@ -681,6 +709,82 @@ struct ScriptRunner<'a> {
     /// Codec configs imported from the script's arc.ini, by (path, content hash).
     configs: Vec<(PathBuf, String, Config)>,
     n: usize,
+    tmp: PathBuf,
+    prefetch: Vec<Prefetch>,
+    /// Changes the script has made so far to each codec config, by lowercase file name.
+    changes: HashMap<String, usize>,
+}
+
+/// A repack archive the script will extract later, extracted early into a staging folder.
+struct Prefetch {
+    archive: PathBuf,
+    out: PathBuf,
+    base: Option<String>,
+    /// The codec config it uses, relative to `{tmp}`, and its lowercase file name.
+    cfg_rel: PathBuf,
+    cfg_name: String,
+    /// How many changes the script makes to that config before this step: the early
+    /// extraction starts once the real run has made them all, so it uses the same config.
+    changes_before: usize,
+    stage: PathBuf,
+    cancel: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<Result<Summary>>>,
+    used: bool,
+}
+
+/// Staging folder for early extractions: next to the game folder (same drive, so moving the
+/// files in is a rename) and outside it (the script never sees it).
+fn staging_dir(target: &Path) -> PathBuf {
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into());
+    target.with_file_name(format!("{name}.arc-unpack-staging"))
+}
+
+fn is_batch(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"))
+}
+
+/// Does an Exec step (possibly) change `cfg_name`? Batch files are opaque, so they count.
+fn exec_touches(program: &Path, args: &str, cfg_name: &str) -> bool {
+    is_batch(program) || args.to_lowercase().contains(cfg_name)
+}
+
+fn path_inside(p: &Path, root: &Path) -> bool {
+    let (p, r) = (p.to_string_lossy().to_lowercase(), root.to_string_lossy().to_lowercase());
+    p.starts_with(&format!("{}\\", r.trim_end_matches('\\')))
+}
+
+/// Every extraction of a repack archive (from the repack folder into the game folder) the plan
+/// contains, with what must happen before it may start.
+fn plan_prefetches(plan: &crate::setup_script::Plan, src: &Path, app: &Path, staging: &Path) -> Vec<Prefetch> {
+    use crate::setup_script::Step;
+    let mut out = Vec::new();
+    for (j, step) in plan.steps.iter().enumerate() {
+        let Step::Extract { archive, out: dest, cfg, base } = step else { continue };
+        if !path_inside(archive, src) || !(path_inside(dest, app) || dest == app) {
+            continue;
+        }
+        let cfg_rel = cfg.strip_prefix(&plan.tmp).map(Path::to_path_buf).unwrap_or_else(|_| cfg.clone());
+        let cfg_name = cfg.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let same = |p: &Path| p.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase() == cfg_name);
+        let writes = plan.writes.iter().filter(|(n, p)| *n <= j && same(p)).count();
+        let execs = plan.steps[..j]
+            .iter()
+            .filter(|s| matches!(s, Step::Exec { program, args, .. } if exec_touches(program, args, &cfg_name)))
+            .count();
+        out.push(Prefetch {
+            archive: archive.clone(),
+            out: dest.clone(),
+            base: base.clone(),
+            cfg_rel,
+            cfg_name,
+            changes_before: writes + execs,
+            stage: staging.join(j.to_string()),
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: None,
+            used: false,
+        });
+    }
+    out
 }
 
 impl ScriptRunner<'_> {
@@ -698,22 +802,13 @@ impl ScriptRunner<'_> {
         Ok(cfg)
     }
 
-    fn extract(&mut self, archive: &Path, out: &Path, arc_ini: &Path, base: Option<&str>) -> Result<bool> {
-        if !archive.is_file() {
-            events::warn(self.sink, format!("{}: not found", archive.display()));
-            return Ok(false);
-        }
-        let cfg = self.config(arc_ini)?;
-        let a = Archive::open(archive)?;
-        // A part of the archive: extract everything next to the target, then move that part in.
-        let stage = base.map(|_| out.join(format!(".arc-unpack-part-{}", self.n)));
-        let dest = stage.clone().unwrap_or_else(|| out.to_path_buf());
-        // MD5 list paths are relative to the game folder.
-        let prefix = match (&stage, out.strip_prefix(&self.app)) {
-            (None, Ok(rel)) => Some(if rel.as_os_str().is_empty() { String::new() } else { format!("{}\\", rel.display()) }),
-            _ => None,
-        };
-        let eopts = Options {
+    /// Extraction options for writing into `dest`; `final_out` is where the files end up (for
+    /// MD5 list lookups, which are relative to the game folder).
+    fn options(&self, dest: PathBuf, final_out: Option<&Path>, cancel: Arc<AtomicBool>) -> Options {
+        let prefix = final_out.and_then(|o| o.strip_prefix(&self.app).ok()).map(|rel| {
+            if rel.as_os_str().is_empty() { String::new() } else { format!("{}\\", rel.display()) }
+        });
+        Options {
             out_dir: Some(dest),
             jobs: self.opts.jobs,
             writers: self.opts.writers,
@@ -723,22 +818,105 @@ impl ScriptRunner<'_> {
             temp_dir: self.opts.cache_dir.join("tmp"),
             host_dir: self.opts.host_dir.clone(),
             stall_timeout: self.opts.stall_timeout,
-            cancel: self.opts.cancel.clone(),
+            cancel,
             heavy_jobs: self.opts.heavy_jobs,
             done_dir: None,
             md5: prefix.as_ref().and(self.md5.clone()),
             md5_prefix: prefix.unwrap_or_default(),
-        };
-        std::fs::create_dir_all(&eopts.temp_dir)?;
-        let s = extract::run(vec![a], &cfg, &eopts, self.sink)?;
-        if let (Some(stage), Some(base)) = (&stage, base) {
-            let part = stage.join(base.replace('/', "\\"));
-            if part.is_dir() {
-                move_tree(&part, out)?;
-            }
-            let _ = std::fs::remove_dir_all(stage);
         }
-        let ok = s.problems.is_empty() && !s.cancelled;
+    }
+
+    /// Starts every early extraction whose codec config is final by now.
+    fn start_prefetches(&mut self) {
+        for i in 0..self.prefetch.len() {
+            let p = &self.prefetch[i];
+            if p.used || p.handle.is_some() || self.changes.get(&p.cfg_name).copied().unwrap_or(0) < p.changes_before {
+                continue;
+            }
+            if self.opts.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let (archive, stage, cfg_path) = (p.archive.clone(), p.stage.clone(), self.tmp.join(&p.cfg_rel));
+            let (out, whole) = (p.out.clone(), p.base.is_none());
+            let cfg = match self.config(&cfg_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    events::warn(self.sink, format!("no early extraction of {}: {e:#}", archive.display()));
+                    self.prefetch[i].used = true;
+                    continue;
+                }
+            };
+            let eopts = self.options(stage.clone(), whole.then_some(out.as_path()), self.prefetch[i].cancel.clone());
+            let sink = self.sink.clone();
+            let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            events::info(self.sink, format!("{name}: extracting early (the script needs it later)"));
+            self.prefetch[i].handle = Some(std::thread::spawn(move || {
+                std::fs::create_dir_all(&stage)?;
+                std::fs::create_dir_all(&eopts.temp_dir)?;
+                extract::run(vec![Archive::open(&archive)?], &cfg, &eopts, &sink)
+            }));
+        }
+    }
+
+    /// The early extraction for this step, if there is one: waits for it and moves its files in.
+    /// Returns None if there was none (or it failed), so the step extracts normally.
+    fn take_prefetch(&mut self, archive: &Path, out: &Path, base: Option<&str>) -> Result<Option<bool>> {
+        let Some(i) = self.prefetch.iter().position(|p| !p.used && p.archive == archive && p.out == out && p.base.as_deref() == base)
+        else {
+            return Ok(None);
+        };
+        self.prefetch[i].used = true;
+        let Some(handle) = self.prefetch[i].handle.take() else { return Ok(None) };
+        let stage = self.prefetch[i].stage.clone();
+        while !handle.is_finished() {
+            if self.opts.cancel.load(Ordering::Relaxed) {
+                self.prefetch[i].cancel.store(true, Ordering::Relaxed);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let result = handle.join().map_err(|_| anyhow::anyhow!("early extraction crashed"))?;
+        match result {
+            Ok(s) if s.problems.is_empty() && !s.cancelled => {
+                let part = match base {
+                    Some(b) => stage.join(b.replace('/', "\\")),
+                    None => stage.clone(),
+                };
+                if part.is_dir() {
+                    move_tree(&part, out)?;
+                }
+                let _ = std::fs::remove_dir_all(&stage);
+                self.merge(s);
+                Ok(Some(true))
+            }
+            Ok(_) if self.opts.cancel.load(Ordering::Relaxed) => {
+                let _ = std::fs::remove_dir_all(&stage);
+                bail!("cancelled")
+            }
+            other => {
+                let why = match other {
+                    Ok(s) => s.problems.join("; "),
+                    Err(e) => format!("{e:#}"),
+                };
+                events::warn(self.sink, format!("early extraction of {} failed ({why}); extracting again", archive.display()));
+                let _ = std::fs::remove_dir_all(&stage);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Stops early extractions the script never asked for and waits for them.
+    fn discard_prefetches(&mut self) {
+        for p in &mut self.prefetch {
+            p.cancel.store(true, Ordering::Relaxed);
+        }
+        for p in &mut self.prefetch {
+            if let Some(h) = p.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    fn merge(&mut self, s: Summary) {
         let sm = &mut self.summary;
         sm.files_ok += s.files_ok;
         sm.files_unverified += s.files_unverified;
@@ -750,6 +928,33 @@ impl ScriptRunner<'_> {
                 sm.notes.push(n);
             }
         }
+    }
+
+    fn extract(&mut self, archive: &Path, out: &Path, arc_ini: &Path, base: Option<&str>) -> Result<bool> {
+        if let Some(ok) = self.take_prefetch(archive, out, base)? {
+            return Ok(ok);
+        }
+        if !archive.is_file() {
+            events::warn(self.sink, format!("{}: not found", archive.display()));
+            return Ok(false);
+        }
+        let cfg = self.config(arc_ini)?;
+        let a = Archive::open(archive)?;
+        // A part of the archive: extract everything next to the target, then move that part in.
+        let stage = base.map(|_| out.join(format!(".arc-unpack-part-{}", self.n)));
+        let dest = stage.clone().unwrap_or_else(|| out.to_path_buf());
+        let eopts = self.options(dest, stage.is_none().then_some(out), self.opts.cancel.clone());
+        std::fs::create_dir_all(&eopts.temp_dir)?;
+        let s = extract::run(vec![a], &cfg, &eopts, self.sink)?;
+        if let (Some(stage), Some(base)) = (&stage, base) {
+            let part = stage.join(base.replace('/', "\\"));
+            if part.is_dir() {
+                move_tree(&part, out)?;
+            }
+            let _ = std::fs::remove_dir_all(stage);
+        }
+        let ok = s.problems.is_empty() && !s.cancelled;
+        self.merge(s);
         Ok(ok)
     }
 
@@ -763,6 +968,12 @@ impl ScriptRunner<'_> {
         } else {
             cmd = std::process::Command::new(program);
             raw_arg(&mut cmd, args.trim_start());
+        }
+        let names: HashSet<String> = self.prefetch.iter().map(|p| p.cfg_name.clone()).collect();
+        for n in names {
+            if exec_touches(program, args, &n) {
+                *self.changes.entry(n).or_default() += 1;
+            }
         }
         cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
@@ -792,6 +1003,7 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
     fn run(&mut self, step: &crate::setup_script::Step) -> Result<bool> {
         use crate::setup_script::Step;
         ensure!(!self.opts.cancel.load(Ordering::Relaxed), "cancelled");
+        self.start_prefetches();
         self.n += 1;
         let started = std::time::Instant::now();
         let ok = match step {
@@ -800,7 +1012,14 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         };
         let secs = started.elapsed().as_secs_f64();
         events::info(self.sink, format!("step {}: {step} ({secs:.1}s){}", self.n, if ok { "" } else { " FAILED" }));
+        self.start_prefetches();
         Ok(ok)
+    }
+
+    fn file_written(&mut self, path: &Path) {
+        if let Some(name) = path.file_name() {
+            *self.changes.entry(name.to_string_lossy().to_lowercase()).or_default() += 1;
+        }
     }
 }
 

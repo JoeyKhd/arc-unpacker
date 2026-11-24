@@ -200,7 +200,7 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
 
     let summary = Arc::new(Mutex::new(summary));
     let pending: Vec<(usize, Job, bool)> =
-        jobs.into_iter().enumerate().map(|(id, j)| { let heavy = is_heavy(&j, cfg); (id, j, heavy) }).collect();
+        jobs.into_iter().map(|j| { let heavy = is_heavy(&j, cfg); (next_job_id(), j, heavy) }).collect();
     let queue = Mutex::new(Queue { pending, heavy_running: 0, told_waiting: false });
     let wake = std::sync::Condvar::new();
 
@@ -533,6 +533,13 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
 
 /// Extracts (or tests) a whole archive through unarc.dll via unarc-host-x86.exe. unarc checks
 /// file CRCs with its own (possibly modified) algorithm, so success means the files verified.
+/// Job ids are unique per process, so the events of extractions running side by side (the
+/// install script's early extractions) never mix.
+pub fn next_job_id() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 struct RemoveDirOnDrop(PathBuf);
 
 impl Drop for RemoveDirOnDrop {

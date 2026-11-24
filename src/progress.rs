@@ -31,6 +31,13 @@ impl Terminal {
     fn handle(&self, e: Event) {
         let mut st = self.state.lock().unwrap();
         match e {
+            // Several extractions can run side by side (an install script's early ones): their
+            // plans add up on one overall bar.
+            Event::Plan { compressed, .. } if st.overall.is_some() => {
+                if let Some(pb) = &st.overall {
+                    pb.inc_length(compressed);
+                }
+            }
             Event::Plan { compressed, .. } => {
                 let pb = self.mp.add(ProgressBar::new(compressed));
                 pb.set_style(

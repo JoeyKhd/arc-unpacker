@@ -100,7 +100,7 @@ impl App {
             scan: None,
             scanned_for: String::new(),
             verify_md5: true,
-            heavy_jobs: 1,
+            heavy_jobs: 2,
             progress: Progress::default(),
             running: None,
             outcome: None,
@@ -198,7 +198,7 @@ impl App {
                     p.jobs.clear();
                     p.plan_total = 0;
                 }
-                Event::Plan { compressed, .. } => p.plan_total = compressed,
+                Event::Plan { compressed, .. } => p.plan_total += compressed,
                 Event::JobStarted { id, label, method, compressed, .. } => {
                     p.jobs.insert(id, JobView { label, method, total: compressed, done: 0, started: Instant::now(), finished: None });
                 }
@@ -321,8 +321,8 @@ impl eframe::App for App {
                         ui.separator();
                         ui.label("Heavy codec jobs at once:");
                         ui.add_enabled_ui(!busy, |ui| {
-                            ui.radio_value(&mut self.heavy_jobs, 1, "1 (safe)");
-                            ui.radio_value(&mut self.heavy_jobs, 2, "2 (needs lots of RAM)");
+                            ui.radio_value(&mut self.heavy_jobs, 1, "1");
+                            ui.radio_value(&mut self.heavy_jobs, 2, "2 when RAM allows (default)");
                         });
                     });
                 }
