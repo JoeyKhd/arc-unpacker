@@ -31,6 +31,8 @@ pub struct Options {
     pub stall_timeout: u64,
     /// Set to stop: running blocks are killed, queued ones are skipped.
     pub cancel: Arc<AtomicBool>,
+    /// At most this many memory-heavy jobs at once (0 = no limit).
+    pub heavy_jobs: usize,
 }
 
 #[derive(Default)]
@@ -149,11 +151,10 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     });
 
     let summary = Arc::new(Mutex::new(summary));
-    let (tx, rx) = unbounded::<(usize, Job)>();
-    for (id, j) in jobs.into_iter().enumerate() {
-        tx.send((id, j)).unwrap();
-    }
-    drop(tx);
+    let pending: Vec<(usize, Job, bool)> =
+        jobs.into_iter().enumerate().map(|(id, j)| { let heavy = is_heavy(&j, cfg); (id, j, heavy) }).collect();
+    let queue = Mutex::new(Queue { pending, heavy_running: 0 });
+    let wake = std::sync::Condvar::new();
 
     let all_done = AtomicBool::new(false);
     let dialogs: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -171,13 +172,10 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
         });
         let mut workers = Vec::new();
         for _ in 0..opts.jobs.max(1) {
-            let rx = rx.clone();
             let summary = summary.clone();
+            let (queue, wake) = (&queue, &wake);
             workers.push(s.spawn(move || {
-                while let Ok((id, job)) = rx.recv() {
-                    if opts.cancel.load(Ordering::Relaxed) {
-                        continue;
-                    }
+                while let Some((id, job, heavy)) = next_job(queue, wake, opts) {
                     let label = job.label();
                     sink(Event::JobStarted {
                         id,
@@ -215,6 +213,11 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                             sink(Event::JobFinished { id, label, files: 0, output: 0, secs, codecs: Vec::new(), error: Some(msg) });
                         }
                     }
+                    drop(sm);
+                    if heavy {
+                        queue.lock().unwrap().heavy_running -= 1;
+                        wake.notify_all();
+                    }
                 }
             }));
         }
@@ -227,6 +230,49 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     summary.problems.extend(dialogs.into_inner().unwrap().into_iter().map(|m| format!("codec error dialog: {m}")));
     summary.cancelled = opts.cancel.load(Ordering::Relaxed);
     Ok(summary)
+}
+
+struct Queue {
+    /// (id, job, heavy), biggest first.
+    pending: Vec<(usize, Job, bool)>,
+    heavy_running: usize,
+}
+
+/// Next job this worker may start: the biggest pending one, except that heavy jobs wait while
+/// `heavy_jobs` of them are already running (light ones may overtake them). None = all done.
+fn next_job(queue: &Mutex<Queue>, wake: &std::sync::Condvar, opts: &Options) -> Option<(usize, Job, bool)> {
+    let mut q = queue.lock().unwrap();
+    loop {
+        if opts.cancel.load(Ordering::Relaxed) {
+            q.pending.clear();
+            wake.notify_all();
+        }
+        if q.pending.is_empty() {
+            return None;
+        }
+        let limit = opts.heavy_jobs;
+        let running = q.heavy_running;
+        if let Some(pos) = q.pending.iter().position(|(_, _, heavy)| !heavy || limit == 0 || running < limit) {
+            let item = q.pending.remove(pos);
+            if item.2 {
+                q.heavy_running += 1;
+            }
+            return Some(item);
+        }
+        q = wake.wait_timeout(q, Duration::from_millis(250)).unwrap().0;
+    }
+}
+
+/// Memory-hungry jobs: CLS codecs (lolz-class decoders size their buffers by a share of RAM)
+/// and whole-archive unarc runs (which load them too).
+fn is_heavy(job: &Job, cfg: &Config) -> bool {
+    match job.kind {
+        JobKind::Unarc => true,
+        JobKind::Block(i) => cfg
+            .resolve(&job.archive.blocks[i].method)
+            .map(|st| st.iter().any(|s| matches!(s.codec, crate::config::Codec::Cls { .. })))
+            .unwrap_or(false),
+    }
 }
 
 /// CLS codecs (or their helper executables) that hard-code "Global\" object names, which only

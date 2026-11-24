@@ -522,6 +522,7 @@ fn cancel_stops_a_running_block() {
         host_dir: Path::new(env!("CARGO_BIN_EXE_arc-unpack")).parent().unwrap().to_path_buf(),
         stall_timeout: 0,
         cancel: cancel.clone(),
+        heavy_jobs: 1,
     };
     let c2 = cancel.clone();
     std::thread::spawn(move || {

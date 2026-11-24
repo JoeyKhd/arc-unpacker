@@ -78,6 +78,9 @@ struct RunArgs {
     /// Don't adjust process priority / power throttling.
     #[arg(long)]
     no_tune: bool,
+    /// At most this many memory-heavy jobs (CLS codecs, unarc) at once. 0 = no limit.
+    #[arg(long, default_value_t = 1)]
+    heavy_jobs: usize,
     /// Stop a block after this many seconds without any progress (a hung codec). 0 = never.
     #[arg(long, default_value_t = 600)]
     stall_timeout: u64,
@@ -185,6 +188,7 @@ fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Re
         temp_dir: run.temp_dir.unwrap_or_else(std::env::temp_dir),
         host_dir,
         cancel: Default::default(),
+        heavy_jobs: run.heavy_jobs,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();
