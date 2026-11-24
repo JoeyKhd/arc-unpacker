@@ -253,6 +253,8 @@ struct App {
     check: Option<Check>,
     checking: Option<(BTreeSet<String>, Receiver<Check>)>,
     checked_for: Option<BTreeSet<String>>,
+    /// When the running check started (its result is only dimmed if it takes a moment).
+    check_started: Instant,
     limit_ram: bool,
     skip_check: bool,
     progress: Progress,
@@ -283,6 +285,7 @@ impl App {
             check: None,
             checking: None,
             checked_for: None,
+            check_started: Instant::now(),
             limit_ram: false,
             skip_check: false,
             progress: Progress::default(),
@@ -378,6 +381,7 @@ impl App {
                 c.request_repaint();
             });
             self.checking = Some((self.selected.clone(), rx));
+            self.check_started = Instant::now();
         }
     }
 
@@ -652,9 +656,10 @@ impl App {
             return;
         }
         if self.analyzing.is_some() || (self.analysis.is_none() && Path::new(self.repack.trim()).is_dir()) {
+            let h = ui.text_style_height(&egui::TextStyle::Body);
             ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Reading setup.exe…");
+                ui.add(egui::Spinner::new().size(h));
+                ui.label(RichText::new("Reading setup.exe…").weak());
             });
             return;
         }
@@ -703,17 +708,22 @@ impl App {
             ui.add_space(6.0);
         }
 
-        // Pre-flight: are the needed files here, and does it fit?
+        // Pre-flight: are the needed files here, and does it fit? While a changed selection is
+        // re-checked, the previous result stays in place (dimmed if it takes a moment), so
+        // nothing below moves.
         let free = self.free_space();
         let mut ready = false;
-        match (&self.check, &self.checking) {
-            (_, Some(_)) | (None, None) => {
+        let line_h = ui.text_style_height(&egui::TextStyle::Body);
+        let dim = self.checking.is_some() && self.check_started.elapsed() > Duration::from_millis(150);
+        let tint = |c: Color32, ui: &egui::Ui| if dim { ui.visuals().weak_text_color() } else { c };
+        match &self.check {
+            None => {
                 ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Checking what's needed…");
+                    ui.add(egui::Spinner::new().size(line_h));
+                    ui.label(RichText::new("Checking what's needed…").weak());
                 });
             }
-            (Some(c), None) => {
+            Some(c) => {
                 let drive = Path::new(self.target.trim())
                     .components()
                     .next()
@@ -723,14 +733,14 @@ impl App {
                 if !c.missing.is_empty() {
                     let (s, it) = if c.missing.len() == 1 { ("", "it") } else { ("s", "them") };
                     ui.colored_label(
-                        BAD,
+                        tint(BAD, ui),
                         format!("Missing file{s}: {}. Download {it} into the repack folder, or untick the part that needs {it}.", c.missing.join(", ")),
                     );
                 } else if let Some(e) = &c.error {
-                    ui.colored_label(BAD, format!("The installer's steps can't be run: {e}"));
+                    ui.colored_label(tint(BAD, ui), format!("The installer's steps can't be run: {e}"));
                 } else if !fits {
                     ui.colored_label(
-                        BAD,
+                        tint(BAD, ui),
                         format!("Needs {}, but only {} is free on {drive}", human(c.need), human(free.unwrap_or(0))),
                     );
                 } else {
@@ -738,7 +748,8 @@ impl App {
                     if let Some(f) = free {
                         line.push_str(&format!(" · {} free on {drive}", human(f)));
                     }
-                    ui.colored_label(OK, line);
+                    ui.colored_label(tint(OK, ui), line);
+                    // Pressing Install mid-check is safe: the install checks for itself.
                     ready = true;
                 }
             }
