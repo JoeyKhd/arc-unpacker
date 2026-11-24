@@ -37,6 +37,38 @@ pub struct Options {
     /// Resume support: a marker per finished job is written here, and jobs that already have
     /// one are skipped.
     pub done_dir: Option<PathBuf>,
+    /// The repack's own list of installed-file MD5s (e.g. `_Redist\fitgirl.md5`). Listed files
+    /// are hashed while they are written, so no separate verification pass is needed.
+    pub md5: Option<Arc<Md5List>>,
+}
+
+/// Expected MD5 of one installed file.
+pub struct ExpectedMd5 {
+    pub md5: [u8; 16],
+    /// Install-relative path as the list spells it (for messages).
+    pub path: String,
+    /// Set once the file was hashed while being written...
+    pub checked: AtomicBool,
+    /// ...and whether it matched.
+    pub matched: AtomicBool,
+}
+
+impl ExpectedMd5 {
+    pub fn new(md5: [u8; 16], path: String) -> Self {
+        ExpectedMd5 { md5, path, checked: AtomicBool::new(false), matched: AtomicBool::new(false) }
+    }
+}
+
+/// Keyed by [`md5_key`] of the path relative to the install folder.
+pub type Md5List = std::collections::HashMap<String, ExpectedMd5>;
+
+/// Normalized lookup key for an install-relative path.
+pub fn md5_key(rel: &str) -> String {
+    rel.replace('/', "\\").trim_start_matches('\\').to_lowercase()
+}
+
+pub fn hex(d: &[u8]) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[derive(Default)]
@@ -613,14 +645,24 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
         let mut buf = vec![0u8; CHUNK];
         for e in entries.iter().filter(|e| !e.is_dir) {
             let mut h = crc32fast::Hasher::new();
+            let expected = expected_md5(opts, &e.path);
+            let mut m = expected.map(|_| md5::Context::new());
             let mut left = e.size;
             while left > 0 {
                 let n = (left as usize).min(CHUNK);
                 stream.read_exact(&mut buf[..n]).with_context(|| short_msg(e, left))?;
                 h.update(&buf[..n]);
+                if let Some(m) = &mut m {
+                    m.consume(&buf[..n]);
+                }
                 left -= n as u64;
             }
             let crc = h.finalize();
+            if let (Some(x), Some(m)) = (expected, m)
+                && let Err(err) = check_md5(x, m)
+            {
+                problems.push(format!("{}: {err}", e.path));
+            }
             if !verify {
                 files_unverified += 1;
             } else if crc == e.crc {
@@ -645,7 +687,7 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
             let overwrite = opts.overwrite;
             s.spawn(move || {
                 while let Ok(job) = job_rx.recv() {
-                    match write_file(&job, overwrite, verify) {
+                    match write_file(&job, overwrite, verify, expected_md5(opts, &job.rel)) {
                         Ok(()) => {
                             ok_counter.fetch_add(1, Ordering::Relaxed);
                         }
@@ -718,7 +760,19 @@ fn check_trailing(stream: &mut Stream, problems: &mut Vec<String>) {
     }
 }
 
-fn write_file(job: &FileJob, overwrite: bool, verify: bool) -> Result<()> {
+fn expected_md5<'a>(opts: &'a Options, rel: &str) -> Option<&'a ExpectedMd5> {
+    opts.md5.as_ref()?.get(&md5_key(rel))
+}
+
+fn check_md5(expected: &ExpectedMd5, ctx: md5::Context) -> Result<()> {
+    let got = ctx.finalize().0;
+    expected.matched.store(got == expected.md5, Ordering::Relaxed);
+    expected.checked.store(true, Ordering::Relaxed);
+    ensure!(got == expected.md5,"MD5 mismatch with the repack's list (got {}, want {})", hex(&got), hex(&expected.md5));
+    Ok(())
+}
+
+fn write_file(job: &FileJob, overwrite: bool, verify: bool, expected: Option<&ExpectedMd5>) -> Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true);
     if overwrite { opts.create(true).truncate(true) } else { opts.create_new(true) };
@@ -728,9 +782,13 @@ fn write_file(job: &FileJob, overwrite: bool, verify: bool) -> Result<()> {
     }
     let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
     let mut h = crc32fast::Hasher::new();
+    let mut m = expected.map(|_| md5::Context::new());
     let mut written = 0u64;
     for chunk in job.chunks.iter() {
         h.update(&chunk);
+        if let Some(m) = &mut m {
+            m.consume(&chunk);
+        }
         w.write_all(&chunk)?;
         written += chunk.len() as u64;
     }
@@ -739,6 +797,9 @@ fn write_file(job: &FileJob, overwrite: bool, verify: bool) -> Result<()> {
     let _ = file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(job.mtime as u64));
     let crc = h.finalize();
     ensure!(!verify || crc == job.crc, "CRC mismatch (got {crc:08x}, want {:08x})", job.crc);
+    if let (Some(x), Some(m)) = (expected, m) {
+        check_md5(x, m)?;
+    }
     Ok(())
 }
 

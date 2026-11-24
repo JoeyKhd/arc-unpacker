@@ -9,7 +9,7 @@
 
 use crate::config::Config;
 use crate::events::{self, Event, Sink};
-use crate::extract::{self, Options, Summary, human};
+use crate::extract::{self, ExpectedMd5, Md5List, Options, Summary, human};
 use crate::format::Archive;
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, HashSet};
@@ -88,6 +88,10 @@ pub struct InstallReport {
     pub scripts: Vec<PathBuf>,
     pub scripts_dir: Option<PathBuf>,
     pub md5_checked: usize,
+    /// Files the installer itself puts in the game folder (launcher stubs, `_Redist`, MD5 list).
+    pub setup_files: usize,
+    /// Installed files that matched the repack's own MD5 list.
+    pub files_md5: usize,
 }
 
 pub fn default_cache_dir() -> PathBuf {
@@ -317,6 +321,7 @@ fn run_role(
     overwrite: bool,
     opts: &InstallOptions,
     done_dir: Option<PathBuf>,
+    md5: Option<Arc<Md5List>>,
     sink: &Sink,
 ) -> Result<Summary> {
     if archives.is_empty() {
@@ -336,6 +341,7 @@ fn run_role(
         cancel: opts.cancel.clone(),
         heavy_jobs: opts.heavy_jobs,
         done_dir,
+        md5,
     };
     std::fs::create_dir_all(&eopts.temp_dir)?;
     extract::run(reopened, cfg, &eopts, sink)
@@ -373,7 +379,15 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
 
     if opts.dry_run {
         events::info(sink, format!("would install {} of game files into {}", human(need), opts.target_dir.display()));
-        return Ok(InstallReport { summary: Summary::default(), codec_dir: cfg.codec_dir(), scripts: Vec::new(), scripts_dir: None, md5_checked: 0 });
+        return Ok(InstallReport {
+            summary: Summary::default(),
+            codec_dir: cfg.codec_dir(),
+            scripts: Vec::new(),
+            scripts_dir: None,
+            md5_checked: 0,
+            setup_files: 0,
+            files_md5: 0,
+        });
     }
 
     let mut md5_checked = 0;
@@ -388,7 +402,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     let tools = by_role(Role::CodecTools);
     if !tools.is_empty() {
         sink(Event::Phase { name: "Extracting codec tools".into() });
-        let s = run_role(&tools, &cfg, &codec_dir, true, opts, None, sink)?;
+        let s = run_role(&tools, &cfg, &codec_dir, true, opts, None, None, sink)?;
         ensure!(s.problems.is_empty() && !s.cancelled, "codec tools failed: {}", s.problems.join("; "));
     }
 
@@ -398,7 +412,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     if !script_archives.is_empty() {
         sink(Event::Phase { name: "Setting aside installer scripts".into() });
         let dir = opts.cache_dir.join("scripts").join(opts.repack_dir.file_name().unwrap_or_default());
-        let s = run_role(&script_archives, &cfg, &dir, true, opts, None, sink)?;
+        let s = run_role(&script_archives, &cfg, &dir, true, opts, None, None, sink)?;
         if !s.problems.is_empty() {
             events::warn(sink, format!("installer scripts: {}", s.problems.join("; ")));
         }
@@ -424,9 +438,230 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
         events::info(sink, "resuming an earlier install into this folder: finished archives are skipped");
     }
     let overwrite = opts.overwrite || resuming;
-    let summary = run_role(&by_role(Role::Game), &cfg, &opts.target_dir, overwrite, opts, Some(done_dir), sink)?;
+
+    // setup.exe carries a few files of its own for the game folder, and usually the repack's
+    // list of installed-file MD5s: with it, every listed file is checked while it is written,
+    // which replaces the installer's separate "verify files" pass.
+    let inno = first.setup.as_ref().and_then(|s| match crate::inno::Setup::open(s) {
+        Ok(i) => Some(i),
+        Err(e) => {
+            events::warn(sink, format!("can't read {}: {e:#}", s.display()));
+            None
+        }
+    });
+    let md5 = inno
+        .as_ref()
+        .and_then(|i| match md5_list_from_setup(i) {
+            Ok(l) => l,
+            Err(e) => {
+                events::warn(sink, format!("installed-file MD5 list: {e:#}"));
+                None
+            }
+        })
+        .map(Arc::new);
+    if let Some(l) = &md5 {
+        events::info(sink, format!("{} files will be checked against the repack's MD5 list as they are written", l.len()));
+    }
+
+    let game = by_role(Role::Game);
+    let mut summary = run_role(&game, &cfg, &opts.target_dir, overwrite, opts, Some(done_dir), md5.clone(), sink)?;
+    let mut setup_files = 0;
+    if !summary.cancelled
+        && let Some(inno) = &inno
+    {
+        match install_setup_files(inno, &opts.target_dir, sink) {
+            Ok(n) => setup_files = n,
+            Err(e) => summary.problems.push(format!("files from setup.exe: {e:#}")),
+        }
+    }
+    let mut files_md5 = 0;
+    if !summary.cancelled
+        && let Some(list) = &md5
+    {
+        sink(Event::Phase { name: "Checking files".into() });
+        let in_archives: HashSet<String> = game
+            .iter()
+            .flat_map(|a| a.archive.entries.iter().filter(|e| !e.is_dir).map(|e| extract::md5_key(&e.path)))
+            .collect();
+        let check = check_md5_list(list, &opts.target_dir, &in_archives, &opts.cancel);
+        if check.after > 0 {
+            events::info(sink, format!("{} files written by unarc.dll or an earlier run were hashed afterwards", check.after));
+        }
+        files_md5 = check.ok;
+        summary.problems.extend(check.problems);
+        summary.notes.extend(check.notes);
+    }
     sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
-    Ok(InstallReport { summary, codec_dir, scripts, scripts_dir, md5_checked })
+    Ok(InstallReport { summary, codec_dir, scripts, scripts_dir, md5_checked, setup_files, files_md5 })
+}
+
+/// The repack's list of installed-file MD5s shipped inside setup.exe (FitGirl:
+/// `{app}\_Redist\fitgirl.md5`, lines like `<md5> *..\Game\file.dat` relative to the list's
+/// own folder).
+fn md5_list_from_setup(inno: &crate::inno::Setup) -> Result<Option<Md5List>> {
+    let mut list = Md5List::new();
+    for f in inno.files.iter().filter(|f| f.has_data() && english_or_neutral(&f.languages)) {
+        let Some(rel) = f.app_relative() else { continue };
+        // FitGirl ships optional parts' entries as `*.addon` next to the list (the installer
+        // appends them when the part is installed).
+        let lower = rel.to_ascii_lowercase();
+        if !lower.ends_with(".md5") && !lower.ends_with(".addon") {
+            continue;
+        }
+        let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+        base.pop();
+        parse_installed_md5(&String::from_utf8_lossy(&inno.read(f)?), &base, &mut list);
+    }
+    Ok((!list.is_empty()).then_some(list))
+}
+
+fn parse_installed_md5(text: &str, base: &[&str], list: &mut Md5List) {
+    for line in text.lines().map(str::trim) {
+        if line.starts_with(';') {
+            continue;
+        }
+        let (Some(hash), Some(rest)) = (line.get(..32), line.get(32..)) else { continue };
+        let Some(md5) = parse_hex16(hash) else { continue };
+        let mut parts: Vec<&str> = base.to_vec();
+        let mut inside = true;
+        for p in rest.trim().trim_start_matches('*').trim().split(['\\', '/']) {
+            match p {
+                "" | "." => {}
+                ".." => inside &= parts.pop().is_some(),
+                p => parts.push(p),
+            }
+        }
+        if inside && !parts.is_empty() && parts.iter().all(|p| !p.contains(':')) {
+            let path = parts.join("\\");
+            list.insert(extract::md5_key(&path), ExpectedMd5::new(md5, path));
+        }
+    }
+}
+
+fn parse_hex16(s: &str) -> Option<[u8; 16]> {
+    let mut out = [0u8; 16];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+struct Md5Check {
+    ok: usize,
+    /// Of `ok`: hashed after extraction instead of while being written.
+    after: usize,
+    problems: Vec<String>,
+    notes: Vec<String>,
+}
+
+/// Completes the MD5 check: hashes listed files that weren't hashed while being written
+/// (unarc.dll wrote them, or a resumed run skipped their archive) and reports missing ones.
+/// Files that no archive in the folder contains are only noted (optional parts not downloaded).
+fn check_md5_list(list: &Md5List, target: &Path, in_archives: &HashSet<String>, cancel: &AtomicBool) -> Md5Check {
+    let mut check = Md5Check { ok: 0, after: 0, problems: Vec::new(), notes: Vec::new() };
+    let todo: Vec<(&String, &ExpectedMd5)> = list.iter().filter(|(_, x)| !x.checked.load(Ordering::Relaxed)).collect();
+    check.ok = list.values().filter(|x| x.matched.load(Ordering::Relaxed)).count();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let results: Vec<(usize, Result<bool, String>)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut out = Vec::new();
+                    let mut buf = vec![0u8; 1 << 20];
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= todo.len() || cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let x = todo[i].1;
+                        let r = (|| -> std::io::Result<bool> {
+                            let mut f = std::fs::File::open(target.join(x.path.replace('/', "\\")))?;
+                            let mut ctx = md5::Context::new();
+                            loop {
+                                let n = f.read(&mut buf)?;
+                                if n == 0 {
+                                    break;
+                                }
+                                ctx.consume(&buf[..n]);
+                            }
+                            Ok(ctx.finalize().0 == x.md5)
+                        })();
+                        out.push((i, r.map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { String::new() } else { e.to_string() })));
+                    }
+                    out
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+    });
+    let (mut missing, mut absent, mut bad) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, r) in results {
+        let (key, x) = todo[i];
+        match r {
+            Ok(true) => {
+                check.ok += 1;
+                check.after += 1;
+            }
+            Ok(false) => bad.push(format!("{} (MD5 mismatch with the repack's list)", x.path)),
+            Err(e) if e.is_empty() && in_archives.contains(key) => missing.push(x.path.clone()),
+            Err(e) if e.is_empty() => absent.push(x.path.clone()),
+            Err(e) => bad.push(format!("{}: {e}", x.path)),
+        }
+    }
+    let sample = |v: &[String]| v.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    check.problems.extend(bad);
+    if !missing.is_empty() {
+        check.problems.push(format!("{} files from the archives are missing: {}", missing.len(), sample(&missing)));
+    }
+    if !absent.is_empty() {
+        check.notes.push(format!(
+            "{} files in the repack's MD5 list are in none of the archives here (made by the installer's own \
+             post-processing, or optional parts not downloaded): {}",
+            absent.len(),
+            sample(&absent)
+        ));
+    }
+    check
+}
+
+/// Whether an Inno `Languages:` expression includes English (or is empty = every language).
+/// The silent default is the installer's first language; repacks list English as "en"/"english".
+fn english_or_neutral(languages: &str) -> bool {
+    let words: Vec<String> = languages
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words.is_empty() || words.iter().any(|w| w == "en" || w == "eng" || w.starts_with("english"))
+}
+
+/// Writes the files the installer itself puts in the game folder (`{app}\...`): launcher
+/// stubs, `_Redist` tools, the MD5 list. Same choice as a default silent install: English or
+/// language-neutral entries of every component (all archives get installed too). Entries that
+/// depend on a task or a script check are skipped and reported. Files the archives already
+/// produced are left alone (the installer writes these first, then the archives overwrite).
+fn install_setup_files(inno: &crate::inno::Setup, target: &Path, sink: &Sink) -> Result<usize> {
+    let mut skipped = Vec::new();
+    let written = inno.extract_with(|f| {
+        let Some(rel) = f.app_relative() else { return Ok(None) };
+        if !english_or_neutral(&f.languages) {
+            return Ok(None);
+        }
+        if !f.tasks.is_empty() || !f.check.is_empty() {
+            skipped.push(format!("{rel} (depends on {})", if f.check.is_empty() { &f.tasks } else { &f.check }));
+            return Ok(None);
+        }
+        let path = target.join(crate::inno::safe_dest(rel)?);
+        Ok((!path.exists()).then_some(path))
+    })?;
+    for s in skipped {
+        events::warn(sink, format!("not installed from setup.exe: {s}"));
+    }
+    if !written.is_empty() {
+        events::info(sink, format!("{} files from setup.exe written to the game folder", written.len()));
+    }
+    Ok(written.len())
 }
 
 #[cfg(test)]
@@ -443,6 +678,52 @@ mod tests {
         assert_eq!(m.get("data-01.bin").unwrap(), "0123456789abcdef0123456789abcdef");
         assert_eq!(m.get("data-02.bin").unwrap(), "ffffffffffffffffffffffffffffffff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installed_md5_list_paths() {
+        let mut list = Md5List::new();
+        let text = "; header\r\n\
+            0123456789abcdef0123456789ABCDEF *..\\Game_Data\\level0\r\n\
+            ffffffffffffffffffffffffffffffff *local.txt\r\n\
+            00000000000000000000000000000000 *..\\..\\outside.txt\r\n\
+            nothex0123456789abcdef0123456789 *..\\x\r\n";
+        parse_installed_md5(text, &["_Redist"], &mut list);
+        assert_eq!(list.len(), 2);
+        let e = &list[&extract::md5_key("game_data/LEVEL0")];
+        assert_eq!(e.path, r"Game_Data\level0");
+        assert_eq!(extract::hex(&e.md5), "0123456789abcdef0123456789abcdef");
+        assert!(list.contains_key(&extract::md5_key(r"_Redist\local.txt")));
+    }
+
+    #[test]
+    fn md5_check_after_extraction() {
+        let dir = std::env::temp_dir().join(format!("arcunp-md5chk-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("a.txt"), b"hello").unwrap();
+        std::fs::write(dir.join("b.txt"), b"tampered").unwrap();
+        let mut list = Md5List::new();
+        for (p, content) in [(r"sub\a.txt", &b"hello"[..]), ("b.txt", b"original"), ("gone.txt", b"x"), ("optional.txt", b"y")] {
+            list.insert(extract::md5_key(p), ExpectedMd5::new(md5::compute(content).0, p.to_string()));
+        }
+        let in_archives: HashSet<String> = ["sub/a.txt", "b.txt", "gone.txt"].iter().map(|p| extract::md5_key(p)).collect();
+        let c = check_md5_list(&list, &dir, &in_archives, &AtomicBool::new(false));
+        assert_eq!((c.ok, c.after), (1, 1));
+        assert_eq!(c.problems.len(), 2, "{:?}", c.problems);
+        assert!(c.problems.iter().any(|p| p.starts_with("b.txt (MD5 mismatch")));
+        assert!(c.problems.iter().any(|p| p.contains("gone.txt")));
+        assert_eq!(c.notes.len(), 1);
+        assert!(c.notes[0].contains("optional.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_file_languages() {
+        assert!(english_or_neutral(""));
+        assert!(english_or_neutral("en"));
+        assert!(english_or_neutral("russian or english"));
+        assert!(!english_or_neutral("russian"));
+        assert!(!english_or_neutral("de"));
     }
 
     #[test]

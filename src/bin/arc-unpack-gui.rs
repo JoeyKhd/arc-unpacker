@@ -401,6 +401,12 @@ impl eframe::App for App {
                             format!("Finished with {} problem(s)", s.problems.len())
                         };
                         ui.heading(title);
+                        if report.files_md5 > 0 {
+                            ui.label(format!("✔ {} files match the repack's own MD5 list (checked while writing)", report.files_md5));
+                        }
+                        if report.setup_files > 0 {
+                            ui.label(format!("+ {} files from setup.exe itself (launcher, _Redist, MD5 list)", report.setup_files));
+                        }
                         for p in &s.problems {
                             ui.colored_label(Color32::LIGHT_RED, p);
                         }

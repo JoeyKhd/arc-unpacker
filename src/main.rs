@@ -157,7 +157,15 @@ fn real_main() -> Result<()> {
             match out {
                 None => {
                     for f in &s.files {
-                        println!("  {:>10}  {}", f.size, f.dest);
+                        let mut cond = Vec::new();
+                        for (k, v) in [("components", &f.components), ("tasks", &f.tasks), ("languages", &f.languages), ("check", &f.check)] {
+                            if !v.is_empty() {
+                                cond.push(format!("{k}: {v}"));
+                            }
+                        }
+                        let cond = if cond.is_empty() { String::new() } else { format!("  [{}]", cond.join("; ")) };
+                        let dest = if f.dest.is_empty() { "(the installer's own uninstaller)" } else { &f.dest };
+                        println!("  {:>10}  {dest}{cond}", f.size);
                     }
                 }
                 Some(dir) => {
@@ -287,6 +295,12 @@ fn install(a: InstallArgs) -> Result<()> {
                     human((s.bytes as f64 / secs.max(0.001)) as u64)
                 );
             }
+            if r.files_md5 > 0 {
+                println!("{} files match the repack's own MD5 list", r.files_md5);
+            }
+            if r.setup_files > 0 {
+                println!("{} files from setup.exe itself (launcher, _Redist, MD5 list)", r.setup_files);
+            }
             if r.md5_checked > 0 {
                 println!("{} archives matched the repack's MD5 list", r.md5_checked);
             }
@@ -339,6 +353,7 @@ fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Re
         cancel: Default::default(),
         heavy_jobs: run.heavy_jobs,
         done_dir: None,
+        md5: None,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();
