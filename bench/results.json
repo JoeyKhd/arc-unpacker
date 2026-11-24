@@ -1,0 +1,64 @@
+﻿{
+    "machine":  {
+                    "cpu":  "13th Gen Intel(R) Core(TM) i9-13900K",
+                    "threads":  32,
+                    "ram_gb":  32,
+                    "os":  "Microsoft Windows 11 Pro",
+                    "archives":  [
+                                     "fg-02.bin",
+                                     "fg-03.bin",
+                                     "fg-04.bin",
+                                     "fg-05.bin"
+                                 ],
+                    "packed_bytes":  8823626909
+                },
+    "runs":  [
+                 {
+                     "name":  "arc-unpack-heavy1",
+                     "seconds":  720.8,
+                     "files":  7204,
+                     "bytes":  12087425216,
+                     "avg_cpu_pct":  16,
+                     "peak_ram_mb":  27169
+                 },
+                 {
+                     "name":  "arc-unpack-heavy2",
+                     "seconds":  682.8,
+                     "files":  7204,
+                     "bytes":  12087425216,
+                     "avg_cpu_pct":  18.8,
+                     "peak_ram_mb":  29236
+                 },
+                 {
+                     "name":  "baseline-unarc-sequential",
+                     "seconds":  1045.6,
+                     "files":  7204,
+                     "bytes":  12087425216,
+                     "avg_cpu_pct":  19.4,
+                     "peak_ram_mb":  32229
+                 }
+             ],
+    "baseline_per_archive":  [
+                                 {
+                                     "archive":  "fg-02.bin",
+                                     "seconds":  10.4,
+                                     "exit_code":  0
+                                 },
+                                 {
+                                     "archive":  "fg-03.bin",
+                                     "seconds":  954.6,
+                                     "exit_code":  0
+                                 },
+                                 {
+                                     "archive":  "fg-04.bin",
+                                     "seconds":  8.5,
+                                     "exit_code":  0
+                                 },
+                                 {
+                                     "archive":  "fg-05.bin",
+                                     "seconds":  72.1,
+                                     "exit_code":  0
+                                 }
+                             ],
+    "date":  "2026-11-24T17:10:29"
+}
