@@ -161,9 +161,13 @@ fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Re
         tune: !run.no_tune,
         temp_dir: run.temp_dir.unwrap_or_else(std::env::temp_dir),
         host_dir,
+        cancel: Default::default(),
     };
     let started = Instant::now();
-    let s = extract::run(archives, &cfg, &opts)?;
+    let (sink, term) = arc_unpack::progress::terminal();
+    let s = extract::run(archives, &cfg, &opts, &sink);
+    term.finish();
+    let s = s?;
     let secs = started.elapsed().as_secs_f64();
     for n in &s.notes {
         eprintln!("note: {n}");

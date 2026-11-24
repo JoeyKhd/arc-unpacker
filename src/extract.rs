@@ -1,16 +1,17 @@
 //! Per-block pipeline: read compressed range -> decode stages -> split into files -> writer pool.
 //! Blocks (across all archives) are scheduled biggest-first on `jobs` parallel workers.
+//! Progress is reported as `Event`s to a `Sink`; this module draws nothing itself.
 
 use crate::config::Config;
+use crate::events::{self, CodecCpu, Event, Level, Sink};
 use crate::format::{Archive, DataBlock, Entry};
 use crate::stage::{self, Ctx, Registry, Stream};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -28,6 +29,8 @@ pub struct Options {
     pub host_dir: PathBuf,
     /// Seconds without any progress before a block is declared hung and stopped (0 = never).
     pub stall_timeout: u64,
+    /// Set to stop: running blocks are killed, queued ones are skipped.
+    pub cancel: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -39,6 +42,7 @@ pub struct Summary {
     pub bytes: u64,
     pub problems: Vec<String>,
     pub notes: Vec<String>,
+    pub cancelled: bool,
 }
 
 enum JobKind {
@@ -72,9 +76,15 @@ impl Job {
             JobKind::Unarc => "unarc.dll (whole archive)".into(),
         }
     }
+    fn label(&self) -> String {
+        match self.kind {
+            JobKind::Block(i) => format!("{} #{i}", self.archive.name()),
+            JobKind::Unarc => format!("{} (unarc)", self.archive.name()),
+        }
+    }
 }
 
-pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summary> {
+pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) -> Result<Summary> {
     let archives: Vec<Arc<Archive>> = archives.into_iter().map(Arc::new).collect();
 
     // Validate everything up front: a missing codec should fail in one second, not one hour.
@@ -93,7 +103,7 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summa
             if m.is_empty() {
                 jobs.push(Job { archive: a.clone(), kind: JobKind::Block(i) });
             } else if opts.skip_missing {
-                eprintln!("skipping {} block {i} ({}): no decoder for {}", a.name(), b.method, m.join(", "));
+                events::warn(sink, format!("skipping {} block {i} ({}): no decoder for {}", a.name(), b.method, m.join(", ")));
             } else {
                 missing.extend(m.into_iter().map(|m| format!("{} block {i}: {m}", a.name())));
             }
@@ -106,10 +116,13 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summa
     if !crate::guard::is_elevated() {
         let needs = codecs_needing_admin(&jobs, cfg);
         if !needs.is_empty() {
-            eprintln!(
-                "warning: not running as administrator, but these codecs create Global\\ shared memory and \
-                 will fail without it: {}. Run arc-unpack from an elevated terminal.",
-                needs.join(", ")
+            events::warn(
+                sink,
+                format!(
+                    "not running as administrator, but these codecs create Global\\ shared memory and will fail \
+                     without it: {}. Run arc-unpack as administrator.",
+                    needs.join(", ")
+                ),
             );
         }
     }
@@ -129,33 +142,28 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summa
     }
 
     jobs.sort_by_key(|j| std::cmp::Reverse(j.compsize()));
-    let total_comp: u64 = jobs.iter().map(Job::compsize).sum();
-    let mp = MultiProgress::new();
-    let overall = mp.add(ProgressBar::new(total_comp));
-    overall.set_style(
-        ProgressStyle::with_template("{prefix:>12} [{bar:40}] {bytes}/{total_bytes} compressed  {binary_bytes_per_sec}  ETA {eta}")
-            .unwrap()
-            .progress_chars("=> "),
-    );
-    overall.set_prefix("total");
-    overall.enable_steady_tick(Duration::from_millis(500));
+    sink(Event::Plan {
+        jobs: jobs.len(),
+        compressed: jobs.iter().map(Job::compsize).sum(),
+        output: jobs.iter().map(Job::origsize).sum(),
+    });
 
     let summary = Arc::new(Mutex::new(summary));
-    let (tx, rx) = unbounded::<Job>();
-    for j in jobs {
-        tx.send(j).unwrap();
+    let (tx, rx) = unbounded::<(usize, Job)>();
+    for (id, j) in jobs.into_iter().enumerate() {
+        tx.send((id, j)).unwrap();
     }
     drop(tx);
 
-    let all_done = std::sync::atomic::AtomicBool::new(false);
+    let all_done = AtomicBool::new(false);
     let dialogs: Mutex<Vec<String>> = Mutex::new(Vec::new());
     std::thread::scope(|s| {
         // Codecs that report errors with a MessageBox would otherwise block until someone
-        // clicks OK. Record the text and press OK for them, so their error path continues.
+        // clicks OK. Record the text and close the dialog, so their error path continues.
         s.spawn(|| {
             while !all_done.load(Ordering::Relaxed) {
                 for m in crate::guard::dismiss_codec_dialogs() {
-                    say(&mp, format!("codec error dialog (dismissed automatically): {m}"));
+                    sink(Event::Message { level: Level::Warn, text: format!("codec error dialog (closed automatically): {m}") });
                     dialogs.lock().unwrap().push(m);
                 }
                 std::thread::sleep(Duration::from_millis(300));
@@ -165,28 +173,25 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summa
         for _ in 0..opts.jobs.max(1) {
             let rx = rx.clone();
             let summary = summary.clone();
-            let mp = mp.clone();
-            let overall = overall.clone();
             workers.push(s.spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    let label = match job.kind {
-                        JobKind::Block(i) => format!("{} #{i}", job.archive.name()),
-                        JobKind::Unarc => format!("{} (unarc)", job.archive.name()),
-                    };
-                    let pb = mp.insert_before(&overall, ProgressBar::new(job.compsize()));
-                    pb.set_style(
-                        ProgressStyle::with_template("{prefix:>12} [{bar:40}] {bytes}/{total_bytes}  {binary_bytes_per_sec}  {msg}")
-                            .unwrap()
-                            .progress_chars("=> "),
-                    );
-                    pb.set_prefix(job.archive.name());
-                    pb.set_message(job.method());
+                while let Ok((id, job)) = rx.recv() {
+                    if opts.cancel.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let label = job.label();
+                    sink(Event::JobStarted {
+                        id,
+                        label: label.clone(),
+                        method: job.method(),
+                        compressed: job.compsize(),
+                        output: job.origsize(),
+                    });
                     let started = Instant::now();
                     let res = match job.kind {
-                        JobKind::Block(i) => run_block(&job.archive, &job.archive.blocks[i], cfg, opts, &pb, &overall),
-                        JobKind::Unarc => run_unarc(&job.archive, cfg, opts, &pb, &overall),
+                        JobKind::Block(i) => run_block(&job.archive, &job.archive.blocks[i], cfg, opts, id, sink),
+                        JobKind::Unarc => run_unarc(&job.archive, cfg, opts, id, sink),
                     };
-                    pb.finish_and_clear();
+                    let secs = started.elapsed().as_secs_f64();
                     let mut sm = summary.lock().unwrap();
                     match res {
                         Ok(r) => {
@@ -194,15 +199,21 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summa
                             sm.files_unverified += r.files_unverified;
                             sm.bytes += job.origsize();
                             sm.problems.extend(r.problems.into_iter().map(|p| format!("{label}: {p}")));
-                            say(&mp, format!(
-                                "{label}: {} files, {} in {:.0}s{}",
-                                r.files_ok + r.files_unverified,
-                                human(job.origsize()),
-                                started.elapsed().as_secs_f64(),
-                                r.cpu_line
-                            ));
+                            sink(Event::JobFinished {
+                                id,
+                                label,
+                                files: r.files_ok + r.files_unverified,
+                                output: job.origsize(),
+                                secs,
+                                codecs: r.codecs,
+                                error: None,
+                            });
                         }
-                        Err(e) => sm.problems.push(format!("{label}: {e:#}")),
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            sm.problems.push(format!("{label}: {msg}"));
+                            sink(Event::JobFinished { id, label, files: 0, output: 0, secs, codecs: Vec::new(), error: Some(msg) });
+                        }
                     }
                 }
             }));
@@ -212,9 +223,9 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options) -> Result<Summa
         }
         all_done.store(true, Ordering::Relaxed);
     });
-    overall.finish_and_clear();
     let mut summary = Arc::try_unwrap(summary).ok().unwrap().into_inner().unwrap();
     summary.problems.extend(dialogs.into_inner().unwrap().into_iter().map(|m| format!("codec error dialog: {m}")));
+    summary.cancelled = opts.cancel.load(Ordering::Relaxed);
     Ok(summary)
 }
 
@@ -255,20 +266,11 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
         .collect()
 }
 
-/// Prints above the progress bars, or straight to stderr when they're hidden (not a terminal).
-fn say(mp: &MultiProgress, msg: String) {
-    if mp.is_hidden() {
-        eprintln!("{msg}");
-    } else {
-        let _ = mp.println(msg);
-    }
-}
-
 struct BlockResult {
     files_ok: u64,
     files_unverified: u64,
     problems: Vec<String>,
-    cpu_line: String,
+    codecs: Vec<CodecCpu>,
 }
 
 /// Counts decoded bytes coming out of the last stage (for the stall watchdog).
@@ -284,29 +286,32 @@ impl Read for CountOut {
     }
 }
 
-/// Counts compressed bytes read, for progress.
+/// Counts compressed bytes read, and reports them as progress.
 struct Counting<R> {
     inner: R,
-    pb: ProgressBar,
-    overall: ProgressBar,
+    done: Arc<AtomicU64>,
+    id: usize,
+    sink: Sink,
 }
 impl<R: Read> Read for Counting<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.pb.inc(n as u64);
-        self.overall.inc(n as u64);
+        let done = self.done.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+        (self.sink)(Event::JobProgress { id: self.id, done });
         Ok(n)
     }
 }
 
-fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options, pb: &ProgressBar, overall: &ProgressBar) -> Result<BlockResult> {
+fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options, id: usize, sink: &Sink) -> Result<BlockResult> {
     let stages = cfg.resolve(&block.method)?;
     let mut f = File::open(&archive.path)?;
     f.seek(SeekFrom::Start(block.pos))?;
+    let consumed = Arc::new(AtomicU64::new(0));
     let input: Stream = Box::new(Counting {
         inner: BufReader::with_capacity(CHUNK, f.take(block.compsize)),
-        pb: pb.clone(),
-        overall: overall.clone(),
+        done: consumed.clone(),
+        id,
+        sink: sink.clone(),
     });
 
     let reg = Registry::default();
@@ -315,41 +320,46 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
     let produced = Arc::new(AtomicU64::new(0));
     let output: Stream = Box::new(CountOut { inner: output, n: produced.clone() });
 
-    // Stall watchdog: no compressed input consumed and no output produced for a long time
-    // means a codec is hung (or waiting on something we can't see). Kill the block.
-    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let watchdog = (opts.stall_timeout > 0).then(|| {
-        let (done, stalled, produced, pb, reg) = (done.clone(), stalled.clone(), produced.clone(), pb.clone(), reg.clone());
-        let limit = Duration::from_secs(opts.stall_timeout);
+    // Watchdog: stops the block when cancelled, or when no compressed input is consumed and no
+    // output produced for a long time (a hung codec, or one waiting on something it can't get).
+    let done = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let (done, stalled, produced, consumed, reg, cancel) =
+            (done.clone(), stalled.clone(), produced.clone(), consumed.clone(), reg.clone(), opts.cancel.clone());
+        let limit = (opts.stall_timeout > 0).then(|| Duration::from_secs(opts.stall_timeout));
         std::thread::spawn(move || {
             let mut last = (u64::MAX, u64::MAX);
             let mut since = Instant::now();
             while !done.load(Ordering::Relaxed) {
-                let now = (pb.position(), produced.load(Ordering::Relaxed));
+                if cancel.load(Ordering::Relaxed) {
+                    reg.kill_all();
+                    return;
+                }
+                let now = (consumed.load(Ordering::Relaxed), produced.load(Ordering::Relaxed));
                 if now != last {
                     last = now;
                     since = Instant::now();
-                } else if since.elapsed() > limit {
+                } else if limit.is_some_and(|l| since.elapsed() > l) {
                     stalled.store(true, Ordering::Relaxed);
                     reg.kill_all();
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(250));
             }
         })
-    });
+    };
 
     let entries = &archive.entries[block.entries()];
     let split = split(output, entries, opts, archive.standard_crc);
     done.store(true, Ordering::Relaxed);
-    if let Some(w) = watchdog {
-        let _ = w.join();
-    }
+    let _ = watchdog.join();
     if split.is_err() {
         reg.kill_all();
     }
-    let split = if stalled.load(Ordering::Relaxed) {
+    let split = if opts.cancel.load(Ordering::Relaxed) {
+        Err(anyhow!("cancelled"))
+    } else if stalled.load(Ordering::Relaxed) {
         Err(anyhow!(
             "no progress for {} s: a codec hung (or is waiting on something it can't get); stopped it",
             opts.stall_timeout
@@ -358,17 +368,17 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
         split
     };
     let stage_errs = reg.join();
-    let cpu_line = cpu_line(&reg);
+    let codecs = codec_report(&reg);
 
     match split {
         Ok(mut r) => {
             // Stage errors after a fully verified split (e.g. a codec complaining about trailing
             // bytes) are reported but don't invalidate the files.
             r.problems.extend(stage_errs.iter().map(|e| format!("{e:#}")));
-            r.cpu_line = cpu_line;
+            r.codecs = codecs;
             Ok(r)
         }
-        Err(e) if !stage_errs.is_empty() => {
+        Err(e) if !stage_errs.is_empty() && !opts.cancel.load(Ordering::Relaxed) => {
             let detail: Vec<String> = stage_errs.iter().map(|e| format!("{e:#}")).collect();
             Err(anyhow!("{e:#}\n    stage errors:\n    {}", detail.join("\n    ")))
         }
@@ -378,7 +388,7 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
 
 /// Extracts (or tests) a whole archive through unarc.dll via unarc-host-x86.exe. unarc checks
 /// file CRCs with its own (possibly modified) algorithm, so success means the files verified.
-fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, pb: &ProgressBar, overall: &ProgressBar) -> Result<BlockResult> {
+fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &Sink) -> Result<BlockResult> {
     use std::io::BufRead;
     let dll = cfg.unarc_dll().context("no unarc configured")?;
     let host = stage::helper_exe(&["unarc-host-x86.exe"], &opts.host_dir)?;
@@ -397,61 +407,78 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, pb: &ProgressBar, 
     cmd.current_dir(cfg.codec_dir());
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     stage::apply_child_flags(&mut cmd, opts.tune);
-    let mut child = cmd.spawn().context("start unarc-host-x86.exe")?;
+    let child = cmd.spawn().context("start unarc-host-x86.exe")?;
     if opts.tune {
         crate::perf::tune_child(&child, false);
     }
     let started = Instant::now();
-    let stderr = child.stderr.take().unwrap();
+    let child = Arc::new(Mutex::new(child));
+    let stderr = child.lock().unwrap().stderr.take().unwrap();
+    let stdout = child.lock().unwrap().stdout.take().unwrap();
     let err_thread = std::thread::spawn(move || {
         let mut s = String::new();
         let _ = BufReader::new(stderr).read_to_string(&mut s);
         s
     });
+    // Cancel support: unarc reports progress in coarse steps, so watch the flag separately.
+    let finished = Arc::new(AtomicBool::new(false));
+    let canceller = {
+        let (child, finished, cancel) = (child.clone(), finished.clone(), opts.cancel.clone());
+        std::thread::spawn(move || {
+            while !finished.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = child.lock().unwrap().kill();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })
+    };
     let total = archive.blocks.iter().map(|b| b.compsize).sum::<u64>();
     let mut last = 0u64;
-    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
-        let line = line?;
+    for line in BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
         if let Some(mb) = line.strip_prefix("read ").and_then(|v| v.trim().parse::<u64>().ok()) {
             let pos = (mb << 20).min(total);
             if pos > last {
-                pb.set_position(pos);
-                overall.inc(pos - last);
+                sink(Event::JobProgress { id, done: pos });
                 last = pos;
             }
         }
     }
-    let status = child.wait()?;
-    overall.inc(total.saturating_sub(last));
+    // Poll instead of wait(): holding the lock in a blocking wait would stop the canceller.
+    let status = loop {
+        if let Some(st) = child.lock().unwrap().try_wait()? {
+            break st;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    finished.store(true, Ordering::Relaxed);
+    let _ = canceller.join();
     let errors = err_thread.join().unwrap_or_default();
-    let cpu = crate::perf::cpu_seconds(&child).map(|c| {
-        let wall = started.elapsed().as_secs_f64();
-        format!("\n    unarc.dll: {c:.0}s cpu / {wall:.0}s wall ({:.1} cores)", c / wall.max(0.001))
-    });
+    let wall = started.elapsed().as_secs_f64();
+    let cpu = crate::perf::cpu_seconds(&child.lock().unwrap());
+    if opts.cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
+    }
     if !status.success() {
         bail!("unarc.dll failed ({status}): {}", errors.trim());
     }
+    sink(Event::JobProgress { id, done: total });
     let mut problems = Vec::new();
     if !errors.trim().is_empty() {
         problems.push(format!("unarc.dll reported: {}", errors.trim()));
     }
     let files = archive.entries.iter().filter(|e| !e.is_dir).count() as u64;
-    Ok(BlockResult { files_ok: files, files_unverified: 0, problems, cpu_line: cpu.unwrap_or_default() })
+    let codecs = vec![CodecCpu { label: "unarc.dll".into(), cpu_secs: cpu, wall_secs: wall }];
+    Ok(BlockResult { files_ok: files, files_unverified: 0, problems, codecs })
 }
 
-fn cpu_line(reg: &Registry) -> String {
-    let rep = reg.cpu_report();
-    if rep.is_empty() {
-        return String::new();
-    }
-    let parts: Vec<String> = rep
-        .iter()
-        .map(|(label, cpu, wall)| match cpu {
-            Some(c) => format!("{label}: {:.0}s cpu / {:.0}s wall ({:.1} cores)", c, wall, c / wall.max(0.001)),
-            None => format!("{label}: ? cpu"),
-        })
-        .collect();
-    format!("\n    {}", parts.join("\n    "))
+fn codec_report(reg: &Registry) -> Vec<CodecCpu> {
+    reg.cpu_report()
+        .into_iter()
+        .map(|(label, cpu_secs, wall_secs)| CodecCpu { label, cpu_secs, wall_secs })
+        .collect()
 }
 
 struct FileJob {
@@ -492,7 +519,7 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
             }
         }
         check_trailing(&mut stream, &mut problems);
-        return Ok(BlockResult { files_ok, files_unverified, problems, cpu_line: String::new() });
+        return Ok(BlockResult { files_ok, files_unverified, problems, codecs: Vec::new() });
     };
 
     // Small queue: each queued file can hold up to 4 chunks, so this bounds memory.
@@ -535,7 +562,7 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
     } else {
         files_unverified += written;
     }
-    Ok(BlockResult { files_ok, files_unverified, problems, cpu_line: String::new() })
+    Ok(BlockResult { files_ok, files_unverified, problems, codecs: Vec::new() })
 }
 
 fn feed_files(stream: &mut Stream, entries: &[Entry], out_dir: &Path, job_tx: &Sender<FileJob>) -> Result<()> {

@@ -500,3 +500,37 @@ fn codec_error_dialog_is_dismissed_and_reported() {
     assert!(t.elapsed().as_secs() < 20, "dialog was not dismissed: took {:?}", t.elapsed());
     assert!(text(&o).contains("codec error dialog") && text(&o).contains("Can't create read mapping!"), "{}", text(&o));
 }
+
+/// The GUI's Cancel button: setting the flag must stop a running block promptly (here, a codec
+/// that would otherwise hang forever) and report the run as cancelled.
+#[test]
+fn cancel_stops_a_running_block() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let env = Env::new();
+    let path = env.write_archive("c.arc", vec![B { method: "hang", files: vec![file("f.bin", vec![1; 1000])], encode: |d| d }], true);
+    let cfg = arc_unpack::config::Config::load(&env.p("codecs.toml")).unwrap();
+    let archive = arc_unpack::format::Archive::open(&path).unwrap();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let opts = arc_unpack::extract::Options {
+        out_dir: None,
+        jobs: 1,
+        writers: 1,
+        overwrite: false,
+        skip_missing: false,
+        tune: false,
+        temp_dir: std::env::temp_dir(),
+        host_dir: Path::new(env!("CARGO_BIN_EXE_arc-unpack")).parent().unwrap().to_path_buf(),
+        stall_timeout: 0,
+        cancel: cancel.clone(),
+    };
+    let c2 = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        c2.store(true, Ordering::Relaxed);
+    });
+    let t = std::time::Instant::now();
+    let s = arc_unpack::extract::run(vec![archive], &cfg, &opts, &arc_unpack::events::null_sink()).unwrap();
+    assert!(s.cancelled);
+    assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
+    assert!(s.problems.iter().any(|p| p.contains("cancelled")), "{:?}", s.problems);
+}
