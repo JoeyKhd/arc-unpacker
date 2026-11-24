@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.svg" alt="arc-unpacker: fast, parallel installer for FreeArc-based repacks" width="100%"></p>
+
 # arc-unpacker
 
 **A fast, parallel unpacker for FreeArc archives and the game-repack installers built on them.**

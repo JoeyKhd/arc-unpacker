@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="arc-unpacker: fast, parallel installer for FreeArc-based repacks">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#18203a"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#f97316"/>
+    </linearGradient>
+    <linearGradient id="fill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="glow" cx="0.82" cy="0.45" r="0.45">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="320" rx="20" fill="url(#bg)"/>
+  <rect width="1280" height="320" rx="20" fill="url(#grid)"/>
+  <rect width="1280" height="320" rx="20" fill="url(#glow)"/>
+
+  <!-- Mark: an archive opening into parallel streams -->
+  <g transform="translate(72 96)">
+    <rect width="96" height="96" rx="22" fill="url(#mark)"/>
+    <rect x="18" y="24" width="44" height="10" rx="5" fill="#ffffff"/>
+    <rect x="18" y="43" width="60" height="10" rx="5" fill="#ffffff" fill-opacity="0.92"/>
+    <rect x="18" y="62" width="34" height="10" rx="5" fill="#ffffff" fill-opacity="0.84"/>
+  </g>
+
+  <g font-family="'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <text x="196" y="146" font-size="62" font-weight="800" fill="#ffffff" letter-spacing="-1">arc-unpacker</text>
+    <text x="198" y="190" font-size="24" fill="#a9b3d1">Fast, parallel installer for FreeArc-based repacks</text>
+
+    <g font-size="15" font-weight="600" fill="#cbd5f5">
+      <rect x="198" y="214" width="66" height="30" rx="15" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
+      <text x="231" y="234" text-anchor="middle">Rust</text>
+      <rect x="274" y="214" width="128" height="30" rx="15" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
+      <text x="338" y="234" text-anchor="middle">Windows x64</text>
+      <rect x="412" y="214" width="150" height="30" rx="15" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
+      <text x="487" y="234" text-anchor="middle">One-click GUI</text>
+    </g>
+
+    <!-- Every codec stage runs at once -->
+    <g transform="translate(800 78)" font-size="15" fill="#8e9ac0">
+      <text x="0" y="17">lzma</text>
+      <rect x="84" y="4" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
+      <rect x="84" y="4" width="262" height="16" rx="8" fill="url(#fill)"/>
+
+      <text x="0" y="59">srep</text>
+      <rect x="84" y="46" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
+      <rect x="84" y="46" width="214" height="16" rx="8" fill="url(#fill)"/>
+
+      <text x="0" y="101">xtool</text>
+      <rect x="84" y="88" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
+      <rect x="84" y="88" width="168" height="16" rx="8" fill="url(#fill)"/>
+
+      <text x="0" y="143">files</text>
+      <rect x="84" y="130" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
+      <rect x="84" y="130" width="126" height="16" rx="8" fill="url(#fill)"/>
+
+      <text x="84" y="184" font-size="14" fill="#6f7aa0" letter-spacing="0.5">every stage runs at once</text>
+    </g>
+  </g>
+</svg>
