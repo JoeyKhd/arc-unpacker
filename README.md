@@ -8,6 +8,16 @@ Repack installers usually unpack through a 32-bit Inno Setup process that runs o
 
 > Use it only on archives you have the right to extract.
 
+## Download
+
+Get **`arc-unpack-gui.exe`** from the [latest release](https://github.com/JoeyKhd/arc-unpacker/releases). It's a single self-contained file:
+
+1. Run it. It asks for administrator rights, as repack installers do.
+2. Pick the repack folder and an install folder.
+3. Press **Install**.
+
+<p align="center"><img src="docs/screenshot.png" alt="arc-unpack window" width="640"></p>
+
 ---
 
 ## Features
