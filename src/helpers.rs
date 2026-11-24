@@ -38,10 +38,11 @@ pub fn find(names: &[&str], host_dir: &Path) -> Result<PathBuf> {
 }
 
 fn unpack(name: &str, bytes: &[u8]) -> Result<PathBuf> {
-    let dir = crate::install::default_cache_dir().join("helpers").join(env!("CARGO_PKG_VERSION"));
+    // Keyed by content, so a changed helper never reuses a stale copy from another build.
+    let digest = sha1_smol::Sha1::from(bytes).digest().to_string();
+    let dir = crate::install::default_cache_dir().join("helpers").join(&digest[..12]);
     let path = dir.join(name);
-    let current = std::fs::metadata(&path).map(|m| m.len() == bytes.len() as u64).unwrap_or(false);
-    if !current {
+    if !path.is_file() {
         std::fs::create_dir_all(&dir)?;
         // Write next to the target and rename, so a half-written helper is never executed.
         let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
