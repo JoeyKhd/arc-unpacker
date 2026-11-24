@@ -77,6 +77,8 @@ pub struct InstallOptions {
     pub tune: bool,
     pub host_dir: PathBuf,
     pub cancel: Arc<AtomicBool>,
+    /// Set while the archive check runs to skip the rest of it; the install continues.
+    pub skip_verify: Arc<AtomicBool>,
     /// Scan, prepare codecs and check space, but extract nothing.
     pub dry_run: bool,
     /// Run the installer's own install script (falls back to plain extraction if it can't).
@@ -262,7 +264,9 @@ pub fn prepare_codecs(setup: &Path, cache_dir: &Path, sink: &Sink) -> Result<Pat
     Ok(config)
 }
 
-fn verify_md5(scan: &Scan, cancel: &AtomicBool, sink: &Sink) -> Result<usize> {
+/// Checks the archives against the repack's MD5 list. Returns how many were fully checked
+/// (fewer if the rest of the check was skipped through `skip`).
+fn verify_md5(scan: &Scan, cancel: &AtomicBool, skip: &AtomicBool, sink: &Sink) -> Result<usize> {
     let todo: Vec<&ScannedArchive> = scan.archives.iter().filter(|a| a.md5.is_some()).collect();
     if todo.is_empty() {
         events::warn(sink, "no MD5 list found next to the archives; skipping verification");
@@ -270,12 +274,12 @@ fn verify_md5(scan: &Scan, cancel: &AtomicBool, sink: &Sink) -> Result<usize> {
     }
     let total: u64 = todo.iter().map(|a| a.archive.len).sum();
     sink(Event::Plan { jobs: todo.len(), compressed: total, output: 0 });
-    let results: Vec<Result<()>> = std::thread::scope(|s| {
+    let results: Vec<Result<bool>> = std::thread::scope(|s| {
         let handles: Vec<_> = todo
             .iter()
             .map(|a| {
                 let id = extract::next_job_id();
-                s.spawn(move || -> Result<()> {
+                s.spawn(move || -> Result<bool> {
                     let name = a.archive.name();
                     sink(Event::JobStarted { id, label: name.clone(), method: "md5".into(), compressed: a.archive.len, output: 0 });
                     let started = std::time::Instant::now();
@@ -286,6 +290,18 @@ fn verify_md5(scan: &Scan, cancel: &AtomicBool, sink: &Sink) -> Result<usize> {
                     loop {
                         if cancel.load(Ordering::Relaxed) {
                             bail!("cancelled");
+                        }
+                        if skip.load(Ordering::Relaxed) {
+                            sink(Event::JobFinished {
+                                id,
+                                label: name.clone(),
+                                files: 0,
+                                output: 0,
+                                secs: started.elapsed().as_secs_f64(),
+                                codecs: Vec::new(),
+                                error: None,
+                            });
+                            return Ok(false);
                         }
                         let n = f.read(&mut buf)?;
                         if n == 0 {
@@ -307,16 +323,20 @@ fn verify_md5(scan: &Scan, cancel: &AtomicBool, sink: &Sink) -> Result<usize> {
                         error: (!ok).then(|| format!("MD5 mismatch: got {got}, expected {}", a.md5.as_deref().unwrap_or("?"))),
                     });
                     ensure!(ok, "{name} is damaged (MD5 mismatch); download it again");
-                    Ok(())
+                    Ok(true)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("verify thread panicked")))).collect()
     });
+    let mut checked = 0;
     for r in results {
-        r?;
+        checked += r? as usize;
     }
-    Ok(todo.len())
+    if checked < todo.len() {
+        events::info(sink, "archive check skipped; installed files are still checked against the repack's MD5 list");
+    }
+    Ok(checked)
 }
 
 fn run_role(
@@ -416,7 +436,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     let mut md5_checked = 0;
     if opts.verify_md5 {
         sink(Event::Phase { name: "Verifying archives".into() });
-        md5_checked = verify_md5(&scan, &opts.cancel, sink)?;
+        md5_checked = verify_md5(&scan, &opts.cancel, &opts.skip_verify, sink)?;
     }
 
     let by_role = |r: Role| scan.archives.iter().filter(|a| a.role == r).collect::<Vec<_>>();
@@ -561,7 +581,7 @@ fn install_scripted(
     let mut md5_checked = 0;
     if opts.verify_md5 {
         sink(Event::Phase { name: "Verifying archives".into() });
-        md5_checked = verify_md5(scan, &opts.cancel, sink)?;
+        md5_checked = verify_md5(scan, &opts.cancel, &opts.skip_verify, sink)?;
     }
 
     // A fresh copy of the installer's temporary files per run: the script edits some of them.

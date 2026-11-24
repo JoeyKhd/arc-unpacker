@@ -326,6 +326,7 @@ fn install(a: InstallArgs) -> Result<()> {
         tune: !a.no_tune,
         host_dir: std::env::current_exe()?.parent().map(PathBuf::from).unwrap_or_default(),
         cancel: Default::default(),
+        skip_verify: Default::default(),
         dry_run: a.dry_run,
         script: !a.no_script,
         components: a.components,

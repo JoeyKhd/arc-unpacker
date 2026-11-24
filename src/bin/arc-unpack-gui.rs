@@ -60,6 +60,7 @@ struct Running {
     events: Receiver<Event>,
     result: Receiver<anyhow::Result<InstallReport>>,
     cancel: Arc<AtomicBool>,
+    skip_verify: Arc<AtomicBool>,
     started: Instant,
 }
 
@@ -73,7 +74,8 @@ struct App {
     target: String,
     scan: Option<Result<ScanView, String>>,
     scanned_for: String,
-    verify_md5: bool,
+    /// Don't check the downloaded archives against the repack's MD5 list first.
+    skip_check: bool,
     heavy_jobs: usize,
     progress: Progress,
     running: Option<Running>,
@@ -99,7 +101,7 @@ impl App {
             target: String::new(),
             scan: None,
             scanned_for: String::new(),
-            verify_md5: true,
+            skip_check: false,
             heavy_jobs: 2,
             progress: Progress::default(),
             running: None,
@@ -154,6 +156,7 @@ impl App {
         let (etx, erx) = unbounded::<Event>();
         let (rtx, rrx) = unbounded();
         let cancel = Arc::new(AtomicBool::new(false));
+        let skip_verify = Arc::new(AtomicBool::new(false));
         let repaint = ctx.clone();
         let sink: Sink = Arc::new(move |e| {
             let _ = etx.send(e);
@@ -164,7 +167,7 @@ impl App {
             target_dir: PathBuf::from(&self.target),
             cache_dir: install::default_cache_dir(),
             config: None,
-            verify_md5: self.verify_md5,
+            verify_md5: !self.skip_check,
             jobs: 3,
             heavy_jobs: self.heavy_jobs,
             writers: 8,
@@ -173,6 +176,7 @@ impl App {
             tune: true,
             host_dir: std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default(),
             cancel: cancel.clone(),
+            skip_verify: skip_verify.clone(),
             dry_run: false,
             script: true,
             components: None,
@@ -185,7 +189,7 @@ impl App {
         });
         self.progress = Progress::default();
         self.outcome = None;
-        self.running = Some(Running { events: erx, result: rrx, cancel, started: Instant::now() });
+        self.running = Some(Running { events: erx, result: rrx, cancel, skip_verify, started: Instant::now() });
     }
 
     fn pump(&mut self) {
@@ -317,7 +321,11 @@ impl eframe::App for App {
                     can_install = s.setup && enough && !self.target.trim().is_empty();
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.add_enabled(!busy && s.md5_list, egui::Checkbox::new(&mut self.verify_md5, "Verify archives (MD5)"));
+                        ui.add_enabled(!busy && s.md5_list, egui::Checkbox::new(&mut self.skip_check, "Skip archive check"))
+                            .on_hover_text(
+                                "Don't check the downloaded .bin files against the repack's MD5 list before installing. \
+                                 Faster; the installed files are still checked as they are written.",
+                            );
                         ui.separator();
                         ui.label("Heavy codec jobs at once:");
                         ui.add_enabled_ui(!busy, |ui| {
@@ -335,6 +343,17 @@ impl eframe::App for App {
                         && let Some(r) = &self.running
                     {
                         r.cancel.store(true, Ordering::Relaxed);
+                    }
+                    let checking = self.progress.phase == "Verifying archives";
+                    if let Some(r) = &self.running
+                        && checking
+                        && !r.skip_verify.load(Ordering::Relaxed)
+                        && ui
+                            .button("Skip archive check")
+                            .on_hover_text("Stop checking the downloaded archives and start installing now.")
+                            .clicked()
+                    {
+                        r.skip_verify.store(true, Ordering::Relaxed);
                     }
                     let cancelled = self.running.as_ref().is_some_and(|r| r.cancel.load(Ordering::Relaxed));
                     ui.spinner();
