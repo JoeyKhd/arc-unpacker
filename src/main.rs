@@ -38,6 +38,8 @@ enum Cmd {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Install a repack folder in one step: prepare codecs from its setup.exe, verify, extract.
+    Install(InstallArgs),
     /// Extract the files embedded in an Inno Setup 5.5 installer (without running it).
     ExtractSetup {
         setup: PathBuf,
@@ -165,9 +167,156 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Install(args) => install(args),
         Cmd::Test(run) => go(run, None, false, 1),
         Cmd::Extract { run, out, overwrite, writers } => go(run, Some(out), overwrite, writers),
     }
+}
+
+#[derive(Args)]
+struct InstallArgs {
+    /// The repack folder (setup.exe + archives).
+    repack: PathBuf,
+    /// Where to install the game files.
+    target: PathBuf,
+    /// Use this codecs.toml instead of preparing codecs from setup.exe.
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+    /// Skip checking the archives against the repack's MD5 list.
+    #[arg(long)]
+    no_verify: bool,
+    /// Jobs running at once (light ones fill in around heavy ones).
+    #[arg(short, long, default_value_t = 3)]
+    jobs: usize,
+    /// At most this many memory-heavy jobs at once.
+    #[arg(long, default_value_t = 1)]
+    heavy_jobs: usize,
+    #[arg(long, default_value_t = 8)]
+    writers: usize,
+    #[arg(long)]
+    overwrite: bool,
+    #[arg(long, default_value_t = 600)]
+    stall_timeout: u64,
+    #[arg(long)]
+    no_tune: bool,
+    /// Don't ask for administrator rights (some codecs then fail).
+    #[arg(long)]
+    no_elevate: bool,
+    /// Where prepared codecs and set-aside scripts are kept.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Scan, prepare codecs and check disk space, but don't extract anything.
+    #[arg(long)]
+    dry_run: bool,
+    /// Wait for Enter before exiting (used when relaunched in its own elevated window).
+    #[arg(long, hide = true)]
+    keep_open: bool,
+}
+
+fn install(a: InstallArgs) -> Result<()> {
+    let abs = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
+    let (repack, target) = (abs(&a.repack), abs(&a.target));
+    if !a.no_elevate && !a.dry_run && !arc_unpack::guard::is_elevated() {
+        // The repack's codecs commonly need admin rights (Global\ shared memory), like setup.exe.
+        println!("Requesting administrator rights (the repack's codecs need them)...");
+        let mut args = vec!["install".to_string(), repack.display().to_string(), target.display().to_string()];
+        if let Some(c) = &a.config {
+            args.extend(["--config".into(), abs(c).display().to_string()]);
+        }
+        if let Some(c) = &a.cache_dir {
+            args.extend(["--cache-dir".into(), abs(c).display().to_string()]);
+        }
+        for (flag, on) in [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune)] {
+            if on {
+                args.push(flag.into());
+            }
+        }
+        args.extend([
+            "--jobs".into(),
+            a.jobs.to_string(),
+            "--heavy-jobs".into(),
+            a.heavy_jobs.to_string(),
+            "--writers".into(),
+            a.writers.to_string(),
+            "--stall-timeout".into(),
+            a.stall_timeout.to_string(),
+            "--keep-open".into(),
+        ]);
+        let code = arc_unpack::guard::relaunch_elevated(&args)?;
+        std::process::exit(code);
+    }
+    if !a.no_tune {
+        perf::tune_self();
+    }
+    let opts = arc_unpack::install::InstallOptions {
+        repack_dir: repack,
+        target_dir: target,
+        cache_dir: a.cache_dir.map(|c| abs(&c)).unwrap_or_else(arc_unpack::install::default_cache_dir),
+        config: a.config.map(|c| abs(&c)),
+        verify_md5: !a.no_verify,
+        jobs: a.jobs,
+        heavy_jobs: a.heavy_jobs,
+        writers: a.writers,
+        overwrite: a.overwrite,
+        stall_timeout: a.stall_timeout,
+        tune: !a.no_tune,
+        host_dir: std::env::current_exe()?.parent().map(PathBuf::from).unwrap_or_default(),
+        cancel: Default::default(),
+        dry_run: a.dry_run,
+    };
+    let started = Instant::now();
+    let (sink, term) = arc_unpack::progress::terminal();
+    let result = arc_unpack::install::install(&opts, &sink);
+    term.finish();
+    let code = match result {
+        Ok(r) => {
+            let s = &r.summary;
+            let secs = started.elapsed().as_secs_f64();
+            for n in &s.notes {
+                eprintln!("note: {n}");
+            }
+            if a.dry_run {
+                println!("dry run: nothing was extracted");
+            } else {
+                println!(
+                    "installed {} files ({} CRC-verified), {} in {:.0}s ({}/s)",
+                    s.files_ok + s.files_unverified,
+                    s.files_ok,
+                    human(s.bytes),
+                    secs,
+                    human((s.bytes as f64 / secs.max(0.001)) as u64)
+                );
+            }
+            if r.md5_checked > 0 {
+                println!("{} archives matched the repack's MD5 list", r.md5_checked);
+            }
+            if !r.scripts.is_empty() {
+                println!("\nThe installer would run these scripts afterwards (not run; review them first):");
+                for p in &r.scripts {
+                    println!("  {}", p.display());
+                }
+            }
+            if s.problems.is_empty() {
+                0
+            } else {
+                eprintln!("{} problem(s):", s.problems.len());
+                for p in &s.problems {
+                    eprintln!("  {p}");
+                }
+                2
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            1
+        }
+    };
+    if a.keep_open {
+        println!("\nPress Enter to close this window.");
+        let mut s = String::new();
+        let _ = std::io::stdin().read_line(&mut s);
+    }
+    std::process::exit(code);
 }
 
 fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Result<()> {

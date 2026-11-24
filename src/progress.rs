@@ -94,6 +94,13 @@ impl Terminal {
                     }
                 }
             }
+            Event::Phase { name } => {
+                if let Some(o) = st.overall.take() {
+                    o.finish_and_clear();
+                }
+                drop(st);
+                self.say(format!("== {name} =="));
+            }
             Event::Message { level, text } => {
                 drop(st);
                 self.say(match level {

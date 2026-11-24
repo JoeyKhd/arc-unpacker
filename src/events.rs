@@ -33,7 +33,9 @@ pub enum Event {
     /// Compressed bytes this job has consumed so far.
     JobProgress { id: usize, done: u64 },
     JobFinished { id: usize, label: String, files: u64, output: u64, secs: f64, codecs: Vec<CodecCpu>, error: Option<String> },
-    /// Status line: phase changes, notes, warnings, dismissed codec dialogs.
+    /// A new step of a multi-step operation (install), e.g. "Verifying archives".
+    Phase { name: String },
+    /// Status line: notes, warnings, dismissed codec dialogs.
     Message { level: Level, text: String },
 }
 

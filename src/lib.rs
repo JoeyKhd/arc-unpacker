@@ -6,6 +6,7 @@ pub mod extract;
 pub mod format;
 pub mod guard;
 pub mod inno;
+pub mod install;
 pub mod lzma;
 pub mod method;
 pub mod perf;

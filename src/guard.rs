@@ -198,10 +198,92 @@ mod imp {
         }
         out
     }
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        s.encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Free bytes on the volume holding `path` (or its nearest existing ancestor).
+    pub fn free_space(path: &std::path::Path) -> Option<u64> {
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let abs = std::path::absolute(path).ok()?;
+        let existing = abs.ancestors().find(|p| p.exists())?;
+        let w = wide(existing.as_os_str());
+        let mut free = 0u64;
+        let ok = unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+        (ok != 0).then_some(free)
+    }
+
+    /// Starts this program again with administrator rights (one UAC prompt), waits for it, and
+    /// returns its exit code.
+    pub fn relaunch_elevated(args: &[String]) -> anyhow::Result<i32> {
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+        use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+        let exe = std::env::current_exe()?;
+        let quoted: Vec<String> = args.iter().map(|a| format!("\"{}\"", a.replace('"', "\\\""))).collect();
+        let (verb, file, params) =
+            (wide("runas".as_ref()), wide(exe.as_os_str()), wide(std::ffi::OsStr::new(&quoted.join(" "))));
+        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = file.as_ptr();
+        info.lpParameters = params.as_ptr();
+        info.nShow = 1; // SW_SHOWNORMAL
+        if unsafe { ShellExecuteExW(&mut info) } == 0 {
+            anyhow::bail!("administrator rights were not granted");
+        }
+        let mut code = 1u32;
+        unsafe {
+            WaitForSingleObject(info.hProcess, INFINITE);
+            GetExitCodeProcess(info.hProcess, &mut code);
+            windows_sys::Win32::Foundation::CloseHandle(info.hProcess);
+        }
+        Ok(code as i32)
+    }
+
+    /// (system CPU busy fraction since the previous call, RAM used bytes, RAM total bytes)
+    pub fn system_usage() -> (f64, u64, u64) {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        use windows_sys::Win32::System::Threading::GetSystemTimes;
+        static LAST: Mutex<(u64, u64)> = Mutex::new((0, 0));
+        let ft = |f: FILETIME| (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64;
+        let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut idle, mut kernel, mut user) = (z, z, z);
+        let mut cpu = 0.0;
+        if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0 {
+            let (idle, total) = (ft(idle), ft(kernel) + ft(user)); // kernel time includes idle
+            let mut last = LAST.lock().unwrap();
+            let (d_idle, d_total) = (idle.saturating_sub(last.0), total.saturating_sub(last.1));
+            if last.1 != 0 && d_total > 0 {
+                cpu = 1.0 - d_idle as f64 / d_total as f64;
+            }
+            *last = (idle, total);
+        }
+        let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        let (used, total) = if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 {
+            (m.ullTotalPhys - m.ullAvailPhys, m.ullTotalPhys)
+        } else {
+            (0, 0)
+        };
+        (cpu.clamp(0.0, 1.0), used, total)
+    }
 }
 
 #[cfg(not(windows))]
 mod imp {
+    pub fn free_space(_: &std::path::Path) -> Option<u64> {
+        None
+    }
+    pub fn relaunch_elevated(_: &[String]) -> anyhow::Result<i32> {
+        anyhow::bail!("elevation is only supported on Windows")
+    }
+    pub fn system_usage() -> (f64, u64, u64) {
+        (0.0, 0, 0)
+    }
     pub fn kill_descendants_on_exit() -> bool {
         false
     }
