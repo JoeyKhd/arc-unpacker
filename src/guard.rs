@@ -243,6 +243,75 @@ mod imp {
         Ok(code as i32)
     }
 
+    /// One of the machine-wide "heavy job" slots, held by the worker thread that runs the job.
+    /// Named mutexes are shared by every arc-unpack process in the session (CLI, GUI,
+    /// benchmarks), so two installs can't both run memory-hungry codecs at once; Windows
+    /// releases an abandoned one if its process dies.
+    pub struct HeavySlot(HANDLE);
+
+    impl Drop for HeavySlot {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Threading::ReleaseMutex;
+            unsafe {
+                ReleaseMutex(self.0);
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Takes a free slot among `limit` without waiting, or None if all are busy.
+    pub fn try_heavy_slot(limit: usize) -> Option<HeavySlot> {
+        use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        for n in 0..limit {
+            let name = wide(std::ffi::OsStr::new(&format!("Local\\arc-unpack-heavy-{n}")));
+            let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+            if h.is_null() {
+                continue;
+            }
+            match unsafe { WaitForSingleObject(h, 0) } {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => return Some(HeavySlot(h)),
+                _ => unsafe {
+                    windows_sys::Win32::Foundation::CloseHandle(h);
+                },
+            }
+        }
+        None
+    }
+
+    /// Codec start-up lock. CLS proxy DLLs claim a numbered IPC channel by probing which
+    /// numbers are free; two starting at the same moment can claim the same one and read each
+    /// other's data. Holding this (session-wide) until the codec is running prevents that.
+    /// It's a semaphore, so any thread may release it (the codec calls back on its own threads);
+    /// waiting is capped so a crashed holder can't block everyone.
+    pub struct InitLock(HANDLE);
+
+    impl InitLock {
+        pub fn acquire() -> Option<InitLock> {
+            use windows_sys::Win32::System::Threading::{CreateSemaphoreW, WaitForSingleObject};
+            let name = wide(std::ffi::OsStr::new("Local\\arc-unpack-codec-init"));
+            let h = unsafe { CreateSemaphoreW(std::ptr::null(), 1, 1, name.as_ptr()) };
+            if h.is_null() {
+                return None;
+            }
+            unsafe { WaitForSingleObject(h, 60_000) };
+            Some(InitLock(h))
+        }
+    }
+
+    impl Drop for InitLock {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Threading::ReleaseSemaphore;
+            unsafe {
+                ReleaseSemaphore(self.0, 1, std::ptr::null_mut());
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+
+    // The lock is created and released on different threads by design.
+    unsafe impl Send for InitLock {}
+
     /// (system CPU busy fraction since the previous call, RAM used bytes, RAM total bytes)
     pub fn system_usage() -> (f64, u64, u64) {
         use windows_sys::Win32::Foundation::FILETIME;
@@ -275,6 +344,16 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
+    pub struct HeavySlot;
+    pub fn try_heavy_slot(_: usize) -> Option<HeavySlot> {
+        Some(HeavySlot)
+    }
+    pub struct InitLock;
+    impl InitLock {
+        pub fn acquire() -> Option<InitLock> {
+            None
+        }
+    }
     pub fn free_space(_: &std::path::Path) -> Option<u64> {
         None
     }
@@ -299,3 +378,33 @@ mod imp {
 }
 
 pub use imp::*;
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heavy_slots_are_exclusive_across_threads() {
+        // Unique limit offset so parallel test runs don't collide: use slot space 0..1 here.
+        let held = try_heavy_slot(1).expect("slot 0 free");
+        let other = std::thread::spawn(|| try_heavy_slot(1).is_some()).join().unwrap();
+        assert!(!other, "a second holder got the same slot");
+        drop(held);
+        let again = std::thread::spawn(|| try_heavy_slot(1).is_some()).join().unwrap();
+        assert!(again, "slot not released");
+    }
+
+    #[test]
+    fn init_lock_serializes() {
+        let first = InitLock::acquire().unwrap();
+        let t = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || {
+            let _l = InitLock::acquire();
+            t.elapsed()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(first); // released from a different thread than any waiter: semaphores allow that
+        let waited = waiter.join().unwrap();
+        assert!(waited >= std::time::Duration::from_millis(250), "second acquire didn't wait ({waited:?})");
+    }
+}

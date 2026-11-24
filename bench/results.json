@@ -1,0 +1,42 @@
+﻿{
+    "machine":  {
+                    "cpu":  "13th Gen Intel(R) Core(TM) i9-13900K",
+                    "threads":  32,
+                    "ram_gb":  32,
+                    "os":  "Microsoft Windows 11 Pro",
+                    "archives":  [
+                                     "fg-02.bin",
+                                     "fg-03.bin",
+                                     "fg-04.bin",
+                                     "fg-05.bin"
+                                 ],
+                    "packed_bytes":  0
+                },
+    "runs":  [
+                 {
+                     "name":  "baseline-unarc-sequential",
+                     "seconds":  1022.3,
+                     "files":  2206,
+                     "bytes":  7086851780,
+                     "avg_cpu_pct":  17.7,
+                     "peak_ram_mb":  31982
+                 },
+                 {
+                     "name":  "arc-unpack-heavy1",
+                     "seconds":  739.5,
+                     "files":  7204,
+                     "bytes":  12087425216,
+                     "avg_cpu_pct":  18.2,
+                     "peak_ram_mb":  31166
+                 },
+                 {
+                     "name":  "arc-unpack-heavy2",
+                     "seconds":  688.8,
+                     "files":  7204,
+                     "bytes":  12087425216,
+                     "avg_cpu_pct":  20.1,
+                     "peak_ram_mb":  31708
+                 }
+             ],
+    "date":  "2026-11-24T15:10:49"
+}

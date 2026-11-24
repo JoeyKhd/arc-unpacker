@@ -31,8 +31,12 @@ pub struct Options {
     pub stall_timeout: u64,
     /// Set to stop: running blocks are killed, queued ones are skipped.
     pub cancel: Arc<AtomicBool>,
-    /// At most this many memory-heavy jobs at once (0 = no limit).
+    /// At most this many memory-heavy jobs at once (0 = no limit). The limit is machine-wide:
+    /// slots are shared with every other arc-unpack process.
     pub heavy_jobs: usize,
+    /// Resume support: a marker per finished job is written here, and jobs that already have
+    /// one are skipped.
+    pub done_dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -45,6 +49,8 @@ pub struct Summary {
     pub problems: Vec<String>,
     pub notes: Vec<String>,
     pub cancelled: bool,
+    /// Jobs skipped because an earlier run already finished them (resume).
+    pub skipped: u64,
 }
 
 enum JobKind {
@@ -77,6 +83,14 @@ impl Job {
             JobKind::Block(i) => self.archive.blocks[i].method.clone(),
             JobKind::Unarc => "unarc.dll (whole archive)".into(),
         }
+    }
+    /// Resume marker file name for this job (archive name, block, archive size).
+    fn marker(&self) -> String {
+        let part = match self.kind {
+            JobKind::Block(i) => i.to_string(),
+            JobKind::Unarc => "all".into(),
+        };
+        format!("{}-{}-{}.done", self.archive.name(), part, self.archive.len)
     }
     fn label(&self) -> String {
         match self.kind {
@@ -153,7 +167,7 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     let summary = Arc::new(Mutex::new(summary));
     let pending: Vec<(usize, Job, bool)> =
         jobs.into_iter().enumerate().map(|(id, j)| { let heavy = is_heavy(&j, cfg); (id, j, heavy) }).collect();
-    let queue = Mutex::new(Queue { pending, heavy_running: 0 });
+    let queue = Mutex::new(Queue { pending, heavy_running: 0, told_waiting: false });
     let wake = std::sync::Condvar::new();
 
     let all_done = AtomicBool::new(false);
@@ -175,8 +189,19 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
             let summary = summary.clone();
             let (queue, wake) = (&queue, &wake);
             workers.push(s.spawn(move || {
-                while let Some((id, job, heavy)) = next_job(queue, wake, opts) {
+                while let Some((id, job, heavy, slot)) = next_job(queue, wake, opts, sink) {
                     let label = job.label();
+                    let marker = opts.done_dir.as_ref().map(|d| d.join(job.marker()));
+                    if marker.as_ref().is_some_and(|m| m.is_file()) {
+                        events::info(sink, format!("{label}: already extracted by an earlier run, skipping"));
+                        summary.lock().unwrap().skipped += 1;
+                        drop(slot);
+                        if heavy {
+                            queue.lock().unwrap().heavy_running -= 1;
+                            wake.notify_all();
+                        }
+                        continue;
+                    }
                     sink(Event::JobStarted {
                         id,
                         label: label.clone(),
@@ -193,6 +218,13 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                     let mut sm = summary.lock().unwrap();
                     match res {
                         Ok(r) => {
+                            if let Some(m) = &marker
+                                && r.problems.is_empty()
+                            {
+                                let _ = std::fs::create_dir_all(m.parent().unwrap());
+                                let _ = std::fs::write(m, format!("{} files
+", r.files_ok + r.files_unverified));
+                            }
                             sm.files_ok += r.files_ok;
                             sm.files_unverified += r.files_unverified;
                             sm.bytes += job.origsize();
@@ -214,6 +246,7 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                         }
                     }
                     drop(sm);
+                    drop(slot);
                     if heavy {
                         queue.lock().unwrap().heavy_running -= 1;
                         wake.notify_all();
@@ -236,11 +269,19 @@ struct Queue {
     /// (id, job, heavy), biggest first.
     pending: Vec<(usize, Job, bool)>,
     heavy_running: usize,
+    told_waiting: bool,
 }
 
 /// Next job this worker may start: the biggest pending one, except that heavy jobs wait while
 /// `heavy_jobs` of them are already running (light ones may overtake them). None = all done.
-fn next_job(queue: &Mutex<Queue>, wake: &std::sync::Condvar, opts: &Options) -> Option<(usize, Job, bool)> {
+/// A heavy job also needs one of the machine-wide slots (guard::try_heavy_slot), so separate
+/// arc-unpack processes share the limit.
+fn next_job(
+    queue: &Mutex<Queue>,
+    wake: &std::sync::Condvar,
+    opts: &Options,
+    sink: &Sink,
+) -> Option<(usize, Job, bool, Option<crate::guard::HeavySlot>)> {
     let mut q = queue.lock().unwrap();
     loop {
         if opts.cancel.load(Ordering::Relaxed) {
@@ -252,12 +293,31 @@ fn next_job(queue: &Mutex<Queue>, wake: &std::sync::Condvar, opts: &Options) -> 
         }
         let limit = opts.heavy_jobs;
         let running = q.heavy_running;
-        if let Some(pos) = q.pending.iter().position(|(_, _, heavy)| !heavy || limit == 0 || running < limit) {
-            let item = q.pending.remove(pos);
-            if item.2 {
+        let mut slot = None;
+        let mut blocked_elsewhere = false;
+        let pick = q.pending.iter().position(|(_, _, heavy)| {
+            if !heavy || limit == 0 {
+                return true;
+            }
+            if running >= limit {
+                return false;
+            }
+            if slot.is_none() {
+                slot = crate::guard::try_heavy_slot(limit);
+                blocked_elsewhere |= slot.is_none();
+            }
+            slot.is_some()
+        });
+        if let Some(pos) = pick {
+            let (id, job, heavy) = q.pending.remove(pos);
+            if heavy {
                 q.heavy_running += 1;
             }
-            return Some(item);
+            return Some((id, job, heavy, slot));
+        }
+        if blocked_elsewhere && !q.told_waiting {
+            q.told_waiting = true;
+            events::warn(sink, "another arc-unpack job is running a memory-heavy step; waiting for it to finish");
         }
         q = wake.wait_timeout(q, Duration::from_millis(250)).unwrap().0;
     }

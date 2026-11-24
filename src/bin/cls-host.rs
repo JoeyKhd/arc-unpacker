@@ -54,7 +54,13 @@ struct Host {
 static TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static IO_CALLS: std::sync::Mutex<Vec<(i32, u64, u64)>> = std::sync::Mutex::new(Vec::new()); // (op, calls, bytes)
 
+/// Held while the codec starts up (see guard::InitLock); released by its first callback.
+static INIT_LOCK: std::sync::Mutex<Option<arc_unpack::guard::InitLock>> = std::sync::Mutex::new(None);
+
 unsafe extern "C" fn callback(instance: *mut c_void, op: i32, ptr: *mut c_void, n: i32) -> i32 {
+    if let Ok(mut l) = INIT_LOCK.try_lock() {
+        l.take(); // the codec is running: it has claimed its IPC channel
+    }
     let ret = unsafe { callback_inner(instance, op, ptr, n) };
     if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
         if matches!(op, CLS_FULL_READ | CLS_PARTIAL_READ | CLS_FULL_WRITE | CLS_PARTIAL_WRITE) {
@@ -214,9 +220,11 @@ fn main() {
     };
 
     TRACE.store(std::env::var_os("ARC_UNPACK_CLS_TRACE").is_some(), std::sync::atomic::Ordering::Relaxed);
+    *INIT_LOCK.lock().unwrap() = arc_unpack::guard::InitLock::acquire();
     let ret = unsafe {
         cls_main(CLS_INIT, None, std::ptr::null_mut());
         let r = cls_main(CLS_DECOMPRESS, Some(callback), &mut host as *mut Host as *mut c_void);
+        INIT_LOCK.lock().unwrap().take();
         cls_main(CLS_DONE, None, std::ptr::null_mut());
         r
     };

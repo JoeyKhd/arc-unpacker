@@ -168,7 +168,7 @@ impl App {
             jobs: 3,
             heavy_jobs: self.heavy_jobs,
             writers: 8,
-            overwrite: false,
+            overwrite: true, // a re-run repairs / resumes the same folder
             stall_timeout: 600,
             tune: true,
             host_dir: std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_default(),

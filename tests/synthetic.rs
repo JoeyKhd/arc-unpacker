@@ -523,6 +523,7 @@ fn cancel_stops_a_running_block() {
         stall_timeout: 0,
         cancel: cancel.clone(),
         heavy_jobs: 1,
+        done_dir: None,
     };
     let c2 = cancel.clone();
     std::thread::spawn(move || {
@@ -534,4 +535,37 @@ fn cancel_stops_a_running_block() {
     assert!(s.cancelled);
     assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
     assert!(s.problems.iter().any(|p| p.contains("cancelled")), "{:?}", s.problems);
+}
+
+/// Resume: with a done_dir, finished jobs leave markers and a second run skips them.
+#[test]
+fn resume_skips_finished_jobs() {
+    let env = Env::new();
+    let path = env.write_archive("r.arc", main_blocks(), true);
+    let cfg = arc_unpack::config::Config::load(&env.p("codecs.toml")).unwrap();
+    let opts = |overwrite| arc_unpack::extract::Options {
+        out_dir: Some(env.p("out")),
+        jobs: 2,
+        writers: 2,
+        overwrite,
+        skip_missing: false,
+        tune: false,
+        temp_dir: std::env::temp_dir(),
+        host_dir: Path::new(env!("CARGO_BIN_EXE_arc-unpack")).parent().unwrap().to_path_buf(),
+        stall_timeout: 0,
+        cancel: Default::default(),
+        heavy_jobs: 1,
+        done_dir: Some(env.p("progress")),
+    };
+    let sink = arc_unpack::events::null_sink();
+    let s1 = arc_unpack::extract::run(vec![arc_unpack::format::Archive::open(&path).unwrap()], &cfg, &opts(false), &sink).unwrap();
+    assert!(s1.problems.is_empty(), "{:?}", s1.problems);
+    assert_eq!(s1.skipped, 0);
+    let markers = std::fs::read_dir(env.p("progress")).unwrap().count();
+    assert_eq!(markers, 5, "one marker per data block");
+    check_main_output(&env.p("out"));
+    // Second run: everything is skipped (no "file exists" errors even without overwrite).
+    let s2 = arc_unpack::extract::run(vec![arc_unpack::format::Archive::open(&path).unwrap()], &cfg, &opts(false), &sink).unwrap();
+    assert!(s2.problems.is_empty(), "{:?}", s2.problems);
+    assert_eq!(s2.skipped, 5);
 }

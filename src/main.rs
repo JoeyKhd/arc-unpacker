@@ -338,6 +338,7 @@ fn go(run: RunArgs, out: Option<PathBuf>, overwrite: bool, writers: usize) -> Re
         host_dir,
         cancel: Default::default(),
         heavy_jobs: run.heavy_jobs,
+        done_dir: None,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();

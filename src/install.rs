@@ -316,6 +316,7 @@ fn run_role(
     out: &Path,
     overwrite: bool,
     opts: &InstallOptions,
+    done_dir: Option<PathBuf>,
     sink: &Sink,
 ) -> Result<Summary> {
     if archives.is_empty() {
@@ -334,6 +335,7 @@ fn run_role(
         stall_timeout: opts.stall_timeout,
         cancel: opts.cancel.clone(),
         heavy_jobs: opts.heavy_jobs,
+        done_dir,
     };
     std::fs::create_dir_all(&eopts.temp_dir)?;
     extract::run(reopened, cfg, &eopts, sink)
@@ -386,7 +388,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     let tools = by_role(Role::CodecTools);
     if !tools.is_empty() {
         sink(Event::Phase { name: "Extracting codec tools".into() });
-        let s = run_role(&tools, &cfg, &codec_dir, true, opts, sink)?;
+        let s = run_role(&tools, &cfg, &codec_dir, true, opts, None, sink)?;
         ensure!(s.problems.is_empty() && !s.cancelled, "codec tools failed: {}", s.problems.join("; "));
     }
 
@@ -396,7 +398,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     if !script_archives.is_empty() {
         sink(Event::Phase { name: "Setting aside installer scripts".into() });
         let dir = opts.cache_dir.join("scripts").join(opts.repack_dir.file_name().unwrap_or_default());
-        let s = run_role(&script_archives, &cfg, &dir, true, opts, sink)?;
+        let s = run_role(&script_archives, &cfg, &dir, true, opts, None, sink)?;
         if !s.problems.is_empty() {
             events::warn(sink, format!("installer scripts: {}", s.problems.join("; ")));
         }
@@ -413,7 +415,16 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
 
     sink(Event::Phase { name: "Installing game files".into() });
     std::fs::create_dir_all(&opts.target_dir)?;
-    let summary = run_role(&by_role(Role::Game), &cfg, &opts.target_dir, opts.overwrite, opts, sink)?;
+    // Resume: finished archives leave a marker per target folder; a retry skips them and
+    // overwrites whatever the failed one left half-written.
+    let target_key = sha1_smol::Sha1::from(opts.target_dir.to_string_lossy().to_lowercase()).digest().to_string();
+    let done_dir = opts.cache_dir.join("progress").join(&target_key[..12]);
+    let resuming = std::fs::read_dir(&done_dir).map(|mut d| d.next().is_some()).unwrap_or(false);
+    if resuming {
+        events::info(sink, "resuming an earlier install into this folder: finished archives are skipped");
+    }
+    let overwrite = opts.overwrite || resuming;
+    let summary = run_role(&by_role(Role::Game), &cfg, &opts.target_dir, overwrite, opts, Some(done_dir), sink)?;
     sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
     Ok(InstallReport { summary, codec_dir, scripts, scripts_dir, md5_checked })
 }
