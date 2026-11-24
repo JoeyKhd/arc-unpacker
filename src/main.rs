@@ -38,6 +38,13 @@ enum Cmd {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Extract the files embedded in an Inno Setup 5.5 installer (without running it).
+    ExtractSetup {
+        setup: PathBuf,
+        /// Output folder (installer paths such as {tmp}/x land in <out>/tmp/x). Omit to list.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
     /// Decode everything and verify CRCs without writing files.
     Test(RunArgs),
     /// Extract files into a folder.
@@ -136,6 +143,22 @@ fn real_main() -> Result<()> {
                     println!("wrote {}", p.display());
                 }
                 None => print!("{toml}"),
+            }
+            Ok(())
+        }
+        Cmd::ExtractSetup { setup, out } => {
+            let s = arc_unpack::inno::Setup::open(&setup)?;
+            println!("{}: {} files", s.version, s.files.len());
+            match out {
+                None => {
+                    for f in &s.files {
+                        println!("  {:>10}  {}", f.size, f.dest);
+                    }
+                }
+                Some(dir) => {
+                    let written = s.extract_all(&dir)?;
+                    println!("extracted {} files to {} (SHA-1 verified)", written.len(), dir.display());
+                }
             }
             Ok(())
         }
