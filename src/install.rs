@@ -199,6 +199,15 @@ pub fn scan(repack_dir: &Path, cfg: Option<&Config>) -> Result<Scan> {
     Ok(Scan { setup, archives, md5_file, codec_dir: cfg.map(|c| c.codec_dir()) })
 }
 
+/// `scan` after preparing the codecs (cached, so cheap after the first time), so that
+/// codec-tool archives are recognized. Falls back to a plain scan without an installer.
+pub fn scan_prepared(repack_dir: &Path, cache_dir: &Path) -> Result<Scan> {
+    let first = scan(repack_dir, None)?;
+    let Some(setup) = first.setup.clone() else { return Ok(first) };
+    let cfg = Config::load(&prepare_codecs(&setup, cache_dir, &events::null_sink())?)?;
+    scan(repack_dir, Some(&cfg))
+}
+
 /// Extracts the installer's codecs into the cache (once per installer) and returns the
 /// generated config path.
 pub fn prepare_codecs(setup: &Path, cache_dir: &Path, sink: &Sink) -> Result<PathBuf> {

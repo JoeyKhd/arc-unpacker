@@ -13,11 +13,12 @@ if (-not (rustup target list --installed | Select-String -SimpleMatch 'i686-pc-w
     if ($LASTEXITCODE -ne 0) { throw "rustup target add failed" }
 }
 
-Invoke-Cargo build --release --bin arc-unpack --bin cls-host
+Invoke-Cargo build --release --bin arc-unpack --bin arc-unpack-gui --bin cls-host
 Invoke-Cargo build --release --target i686-pc-windows-msvc --bin cls-host --bin unarc-host
 
 New-Item -ItemType Directory -Force dist -ErrorAction Stop | Out-Null
 Copy-Item target\release\arc-unpack.exe dist\ -Force -ErrorAction Stop
+Copy-Item target\release\arc-unpack-gui.exe dist\ -Force -ErrorAction Stop
 Copy-Item target\release\cls-host.exe dist\cls-host-x64.exe -Force -ErrorAction Stop
 Copy-Item target\i686-pc-windows-msvc\release\cls-host.exe dist\cls-host-x86.exe -Force -ErrorAction Stop
 Copy-Item target\i686-pc-windows-msvc\release\unarc-host.exe dist\unarc-host-x86.exe -Force -ErrorAction Stop
