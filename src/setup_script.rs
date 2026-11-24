@@ -64,8 +64,9 @@ pub const SS_POST_INSTALL: i64 = 2;
 pub const SS_DONE: i64 = 3;
 
 /// Components a default silent install selects (the first setup type's, plus fixed ones), plus
-/// optional components whose `*optional*` archive was downloaded (FitGirl names them
-/// `fg-optional-<component>...bin`; having downloaded one means wanting it).
+/// optional components whose archive was downloaded (FitGirl names them
+/// `fg-optional-<component>...bin`, and language packs `fg-selective-<language>.bin`; having
+/// downloaded one means wanting it).
 pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<String> {
     let default_type = setup.types.first().map(|t| t.name.to_ascii_lowercase());
     let mut out = BTreeSet::new();
@@ -74,16 +75,22 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
         let in_type = default_type
             .as_ref()
             .is_some_and(|d| c.types.split(',').any(|t| t.trim().eq_ignore_ascii_case(d)));
-        let downloaded = name.len() >= 3
-            && repack_files.iter().any(|f| {
-                let f = f.to_ascii_lowercase();
-                f.contains("optional") && f.contains(name.rsplit('\\').next().unwrap_or(&name))
-            });
-        if c.fixed || in_type || downloaded {
+        if c.fixed || in_type || downloaded_part(&name, repack_files) {
             out.insert(name);
         }
     }
     out
+}
+
+/// Whether the repack folder has an optional/selective archive for this component, e.g.
+/// `bonus` -> `fg-optional-bonus-content.bin`, `voice\french` -> `fg-selective-french.bin`.
+fn downloaded_part(component: &str, repack_files: &[String]) -> bool {
+    let leaf = component.rsplit('\\').next().unwrap_or(component).to_ascii_lowercase();
+    leaf.len() >= 3
+        && repack_files.iter().any(|f| {
+            let f = f.to_ascii_lowercase();
+            (f.contains("optional") || f.contains("selective")) && f.contains(&leaf)
+        })
 }
 
 /// Evaluates an Inno component expression ("a", "a\b", "a or not (b and c)").
@@ -688,6 +695,17 @@ mod tests {
         assert!(eval_components("voice\\rus or (text and not directx)", &sel).unwrap());
         assert!(eval_components("(bonus)", &sel).is_ok());
         assert!(eval_components("bonus and", &sel).is_err());
+    }
+
+    #[test]
+    fn downloaded_optional_parts() {
+        let files: Vec<String> =
+            ["fg-01.bin", "fg-optional-bonus-content.bin", "fg-selective-french.bin", "setup.exe"].iter().map(|s| s.to_string()).collect();
+        assert!(downloaded_part("bonus", &files));
+        assert!(downloaded_part("voice\\french", &files));
+        assert!(!downloaded_part("voice\\german", &files));
+        assert!(!downloaded_part("text", &files), "main parts aren't 'downloaded optional parts'");
+        assert!(!downloaded_part("fr", &files), "names this short would match too much");
     }
 
     #[test]
