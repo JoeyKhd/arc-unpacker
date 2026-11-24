@@ -5,6 +5,7 @@ param([string]$OutDir = 'dist')
 # Exit codes are checked explicitly: under Windows PowerShell 5.1, ErrorActionPreference=Stop
 # would turn cargo's progress messages on stderr into terminating errors.
 Set-Location $PSScriptRoot
+$td = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
 
 function Invoke-Cargo {
     & cargo @args
@@ -20,11 +21,11 @@ if (-not (rustup target list --installed | Select-String -SimpleMatch 'i686-pc-w
 Invoke-Cargo build --release --bin cls-host
 Invoke-Cargo build --release --target i686-pc-windows-msvc --bin cls-host --bin unarc-host
 
-$embed = Join-Path $PSScriptRoot 'target\embed'
+$embed = Join-Path $PSScriptRoot "$td\embed"
 New-Item -ItemType Directory -Force $embed -ErrorAction Stop | Out-Null
-Copy-Item target\release\cls-host.exe "$embed\cls-host-x64.exe" -Force -ErrorAction Stop
-Copy-Item target\i686-pc-windows-msvc\release\cls-host.exe "$embed\cls-host-x86.exe" -Force -ErrorAction Stop
-Copy-Item target\i686-pc-windows-msvc\release\unarc-host.exe "$embed\unarc-host-x86.exe" -Force -ErrorAction Stop
+Copy-Item $td\release\cls-host.exe "$embed\cls-host-x64.exe" -Force -ErrorAction Stop
+Copy-Item $td\i686-pc-windows-msvc\release\cls-host.exe "$embed\cls-host-x86.exe" -Force -ErrorAction Stop
+Copy-Item $td\i686-pc-windows-msvc\release\unarc-host.exe "$embed\unarc-host-x86.exe" -Force -ErrorAction Stop
 
 # 2. Main programs with the helpers embedded.
 $env:ARC_UNPACK_EMBED_DIR = $embed.Replace('\', '/')
@@ -32,7 +33,7 @@ Invoke-Cargo build --release --features embed-helpers --bin arc-unpack --bin arc
 Remove-Item Env:ARC_UNPACK_EMBED_DIR
 
 New-Item -ItemType Directory -Force $OutDir -ErrorAction Stop | Out-Null
-Copy-Item target\release\arc-unpack.exe $OutDir -Force -ErrorAction Stop
-Copy-Item target\release\arc-unpack-gui.exe $OutDir -Force -ErrorAction Stop
+Copy-Item $td\release\arc-unpack.exe $OutDir -Force -ErrorAction Stop
+Copy-Item $td\release\arc-unpack-gui.exe $OutDir -Force -ErrorAction Stop
 Copy-Item "$embed\*.exe" $OutDir -Force -ErrorAction Stop
 Write-Host "Built into $OutDir"
