@@ -77,7 +77,7 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
         let in_type = default_type
             .as_ref()
             .is_some_and(|d| c.types.split(',').any(|t| t.trim().eq_ignore_ascii_case(d)));
-        if c.fixed || in_type || downloaded_part(&name, repack_files) {
+        if c.fixed || in_type || downloaded_part(c, repack_files) {
             out.insert(name);
         }
     }
@@ -85,15 +85,23 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
 }
 
 /// Whether the repack folder has an optional/selective archive for this component, e.g.
-/// `bonus` -> `fg-optional-bonus-content.bin`, `voice\french` -> `fg-selective-french.bin`.
-fn downloaded_part(component: &str, repack_files: &[String]) -> bool {
+/// `bonus` -> `fg-optional-bonus-content.bin`, `local\esp` ("Spanish") -> `fg-selective-spanish.bin`.
+fn downloaded_part(component: &crate::inno::Component, repack_files: &[String]) -> bool {
     repack_files.iter().any(|f| part_file_matches(component, f))
 }
 
-/// Whether `file` is the optional/selective archive of `component` (by its last name part).
-fn part_file_matches(component: &str, file: &str) -> bool {
-    let leaf = component.rsplit('\\').next().unwrap_or(component).to_ascii_lowercase();
-    leaf.len() >= 3 && is_optional_archive(file) && file.to_ascii_lowercase().contains(&leaf)
+/// Whether `file` is the optional/selective archive of `component`: by the last part of its
+/// name (`voice\french` -> `...french...`), or by its description when that is one word, as
+/// FitGirl's language names are (`local\esp` "Spanish" -> `...spanish...`).
+fn part_file_matches(component: &crate::inno::Component, file: &str) -> bool {
+    if !is_optional_archive(file) {
+        return false;
+    }
+    let file = file.to_ascii_lowercase();
+    let leaf = component.name.rsplit('\\').next().unwrap_or(&component.name).to_ascii_lowercase();
+    let word: String = component.description.trim().to_ascii_lowercase();
+    let one_word = !word.starts_with('{') && word.len() >= 4 && word.chars().all(|c| c.is_ascii_alphabetic());
+    (leaf.len() >= 3 && file.contains(&leaf)) || (one_word && file.contains(&word))
 }
 
 /// Inno Setup's uninstaller (`unins000.exe`, `unins001.exe`, ...).
@@ -154,7 +162,7 @@ fn parts_of(components: &[crate::inno::Component], repack_files: &[String], sele
     let base = base_of(components);
     let mut skip = BTreeSet::new();
     for f in repack_files.iter().filter(|f| is_optional_archive(f)) {
-        let owners: Vec<String> = components.iter().map(|c| c.name.to_ascii_lowercase()).filter(|n| part_file_matches(n, f)).collect();
+        let owners: Vec<String> = components.iter().filter(|c| part_file_matches(c, f)).map(|c| c.name.to_ascii_lowercase()).collect();
         // An archive no component claims is installed, as the installer would.
         if !owners.is_empty() && owners.iter().all(|o| !selected.contains(o)) {
             skip.insert(f.to_ascii_lowercase());
@@ -895,14 +903,7 @@ pub fn choices(setup: &Setup, plan: &Plan, repack: &Path) -> Vec<Choice> {
         if out.iter().any(|x| x.name == name) || !(c.fixed || plan.queried.contains(&name)) {
             continue;
         }
-        let leaf = name.rsplit('\\').next().unwrap_or(&name).to_string();
-        let file = files
-            .iter()
-            .find(|f| {
-                let f = f.to_ascii_lowercase();
-                leaf.len() >= 3 && (f.contains("optional") || f.contains("selective")) && f.contains(&leaf)
-            })
-            .cloned();
+        let file = files.iter().find(|f| part_file_matches(c, f)).cloned();
         let label = if c.description.trim().is_empty() || c.description.starts_with("{cm:") { c.name.clone() } else { c.description.clone() };
         out.push(Choice { name: name.clone(), label, fixed: c.fixed, exclusive: c.exclusive, default: defaults.contains(&name), file });
     }
@@ -1041,13 +1042,21 @@ mod tests {
 
     #[test]
     fn downloaded_optional_parts() {
-        let files: Vec<String> =
-            ["fg-01.bin", "fg-optional-bonus-content.bin", "fg-selective-french.bin", "setup.exe"].iter().map(|s| s.to_string()).collect();
-        assert!(downloaded_part("bonus", &files));
-        assert!(downloaded_part("voice\\french", &files));
-        assert!(!downloaded_part("voice\\german", &files));
-        assert!(!downloaded_part("text", &files), "main parts aren't 'downloaded optional parts'");
-        assert!(!downloaded_part("fr", &files), "names this short would match too much");
+        let files: Vec<String> = ["fg-01.bin", "fg-optional-bonus-content.bin", "fg-selective-french.bin", "fg-optional-spanish-vo.bin", "setup.exe"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let c = |name: &str, description: &str| crate::inno::Component { description: description.into(), ..component(name, false) };
+        assert!(downloaded_part(&c("bonus", "Bonus Content"), &files));
+        assert!(downloaded_part(&c(r"voice\french", ""), &files));
+        assert!(!downloaded_part(&c(r"voice\german", "German"), &files));
+        assert!(!downloaded_part(&c("text", "Main game files"), &files), "main parts aren't 'downloaded optional parts'");
+        assert!(!downloaded_part(&c("fr", ""), &files), "names this short would match too much");
+        // FitGirl's short codes don't always appear in the file name; the language does.
+        assert!(downloaded_part(&c(r"local\fra", "French"), &files));
+        assert!(downloaded_part(&c(r"local\esp", "Spanish"), &files));
+        assert!(!downloaded_part(&c(r"local\ita", "Italian"), &files));
+        assert!(!downloaded_part(&c("credits", "Credits Video"), &files), "only one-word descriptions are matched");
     }
 
     fn component(name: &str, fixed: bool) -> crate::inno::Component {
