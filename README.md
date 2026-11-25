@@ -10,15 +10,7 @@
 
 **Installs FitGirl-style repacks 2.1× faster than their own installer across ten tested repacks (up to 3.9×), with byte-identical results.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/benchmark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/benchmark-light.svg">
-    <img src="docs/benchmark-light.svg" width="100%" alt="10 FitGirl repacks on the same PC. Original installers took 19 min 09 s in total, arc-unpack 9 min 03 s: 2.1 times faster, up to 3.9 times on one repack. 10 of 10 installs were byte-identical to the original installer's.">
-  </picture>
-</p>
-
-<sub>Each repack installed by its own <code>setup.exe</code> (install, then its default file check) and by arc-unpack (every file checked; the version per game is in Benchmarks), one at a time, same parts, file cache flushed before each run. Core i9-13900K, 32 GB DDR5, Samsung 990 PRO NVMe SSD. <a href="#benchmarks">More</a></sub>
+**[→ Benchmarks: every game we tested, its own installer vs arc-unpack](docs/BENCHMARKS.md)**
 
 <p align="center"><img src="docs/screenshot.png" alt="arc-unpack after an install: what was installed, how long it took, and the verified file count" width="640"></p>
 
@@ -31,17 +23,6 @@
 From a terminal: `arc-unpack install "<repack folder>" "<game folder>"`.
 
 > Use it only on archives you have the right to extract.
-
-## Benchmarks
-
-Ten FitGirl repacks, from 0.7 GB to 8.3 GB, each installed by its own installer and by arc-unpack on the same PC.
-
-- **2.1× faster overall:** 19 min 09 s → 9 min 03 s for all ten.
-- **1.3× to 3.9× per repack.** The gains are largest on repacks with several archives and post-processing steps. The smallest is a repack that is one 7.8 GB block, whose decoder alone keeps 22 of 32 threads busy.
-- **Byte-identical:** every file of all ten installs matched the original installer's.
-- **More checking, not less:** the original's default check covers the installed files. arc-unpack also checks the downloaded archives.
-
-Per-repack numbers and the method: [Benchmarks](docs/BENCHMARKS.md). Every run is kept in the [ledger](bench/ledger.jsonl), so each new version is compared on the same repacks.
 
 ## Why it's faster
 
