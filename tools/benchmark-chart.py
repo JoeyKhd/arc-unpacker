@@ -7,7 +7,14 @@ contrast against GitHub's page backgrounds (#ffffff and #0d1117).
 import pathlib
 import sys
 
-W, H = 860, 286
+# Measured, in seconds and percent (docs/BENCHMARKS.md).
+INSTALL, VERIFY = 199.8, 86.9      # original setup.exe: install, then its verify pass
+ARC = 74.3                         # arc-unpack, default settings (median of three runs)
+CPU_ORIGINAL, CPU_ARC = 31, 68     # average CPU use over the whole run
+FILES = 3489
+
+ORIGINAL = INSTALL + VERIFY
+W = 860
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif"
 
 THEMES = {
@@ -15,20 +22,29 @@ THEMES = {
     "dark": dict(ink="#f0f6fc", secondary="#9198a1", rule="#3d444d", gray="#57606a", in_gray="#f0f6fc", accent="#3987e5"),
 }
 
-# seconds
-INSTALL, VERIFY = 199.8, 86.9
-ORIGINAL = INSTALL + VERIFY
-DEFAULT, SKIPPED = 84.0, 75.0
+
+def span(seconds):
+    s = round(seconds)
+    return f"{s // 60} min {s % 60} s"
+
+
+SPEEDUP = f"{ORIGINAL / ARC:.1f}×"
 
 TILES = [
-    ("3.8×", "faster than the repack's", "own installer"),
-    ("3 min 32 s", "saved on a", "4 min 47 s install"),
-    ("3,489 files", "all byte-identical to the", "original installer's"),
-    ("31% → 75%", "average CPU use,", "original → arc-unpack"),
+    (SPEEDUP, "faster than the repack's", "own installer"),
+    (span(ORIGINAL - ARC), "saved on a", f"{span(ORIGINAL)} install"),
+    (f"{FILES:,} files", "all byte-identical to the", "original installer's"),
+    (f"{CPU_ORIGINAL}% → {CPU_ARC}%", "average CPU use,", "original → arc-unpack"),
+]
+
+LABELS = [
+    ("Original setup.exe", "install, then verify files"),
+    ("arc-unpack", "default: every check on"),
 ]
 
 X0, SCALE, BAR = 200, 1.75, 22
-ROWS = [140, 198, 256]
+ROWS = [140, 198]
+H = ROWS[-1] + 30
 
 
 def bar(x, y, w, fill, round_end=True):
@@ -42,28 +58,24 @@ def bar(x, y, w, fill, round_end=True):
 
 def svg(t):
     o = []
-    alt = ("Benchmark, same repack on the same PC. Original setup.exe: 4 min 47 s (install 3 min 20 s, then verify "
-           "1 min 27 s). arc-unpack with every check on: 1 min 24 s, 3.4 times faster. arc-unpack with the archive "
-           "check skipped: 1 min 15 s, 3.8 times faster. All 3,489 files byte-identical. Average CPU use 31% versus 75%.")
+    alt = (f"Benchmark, same repack on the same PC. Original setup.exe: {span(ORIGINAL)} (install {span(INSTALL)}, then "
+           f"verify {span(VERIFY)}). arc-unpack with default settings, every check on: {span(ARC)}, "
+           f"{ORIGINAL / ARC:.1f} times faster. All {FILES:,} files byte-identical. "
+           f"Average CPU use {CPU_ORIGINAL}% versus {CPU_ARC}%.")
     o.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="{alt}">')
     o.append(f'<title>{alt}</title>')
     o.append(f'<g font-family="{FONT}">')
 
     # stat tiles
     for i, (value, l1, l2) in enumerate(TILES):
-        x = i * 220
+        x = i * 215    # leaves room on the right for wider fallback fonts
         o.append(f'<text x="{x}" y="34" font-size="30" font-weight="600" fill="{t["ink"]}">{value}</text>')
         o.append(f'<text x="{x}" y="58" font-size="13" fill="{t["secondary"]}">{l1}</text>')
         o.append(f'<text x="{x}" y="75" font-size="13" fill="{t["secondary"]}">{l2}</text>')
     o.append(f'<rect x="0" y="98" width="{W}" height="1" fill="{t["rule"]}"/>')
 
     # row labels
-    labels = [
-        ("Original setup.exe", "install, then verify files"),
-        ("arc-unpack", "default: every check on"),
-        ("arc-unpack", "archive check skipped"),
-    ]
-    for c, (name, sub) in zip(ROWS, labels):
+    for c, (name, sub) in zip(ROWS, LABELS):
         o.append(f'<text x="0" y="{c - 2}" font-size="14" font-weight="600" fill="{t["ink"]}">{name}</text>')
         o.append(f'<text x="0" y="{c + 14}" font-size="12" fill="{t["secondary"]}">{sub}</text>')
 
@@ -84,14 +96,14 @@ def svg(t):
     w2 = VERIFY * SCALE - gap / 2
     o.append(bar(X0, c - BAR // 2, w1, t["gray"], round_end=False))
     o.append(bar(x2, c - BAR // 2, w2, t["gray"]))
-    o.append(f'<text x="{X0 + w1 / 2:.1f}" y="{c + 4}" font-size="12" text-anchor="middle" fill="{t["in_gray"]}">install · 3 min 20 s</text>')
-    o.append(f'<text x="{x2 + w2 / 2:.1f}" y="{c + 4}" font-size="12" text-anchor="middle" fill="{t["in_gray"]}">verify · 1 min 27 s</text>')
-    o.append(value(X0 + ORIGINAL * SCALE + 10, c, "4 min 47 s"))
+    o.append(f'<text x="{X0 + w1 / 2:.1f}" y="{c + 4}" font-size="12" text-anchor="middle" fill="{t["in_gray"]}">install · {span(INSTALL)}</text>')
+    o.append(f'<text x="{x2 + w2 / 2:.1f}" y="{c + 4}" font-size="12" text-anchor="middle" fill="{t["in_gray"]}">verify · {span(VERIFY)}</text>')
+    o.append(value(X0 + ORIGINAL * SCALE + 10, c, span(ORIGINAL)))
 
     # arc-unpack
-    for c, secs, text, extra in ((ROWS[1], DEFAULT, "1 min 24 s", "3.4× faster"), (ROWS[2], SKIPPED, "1 min 15 s", "3.8× faster")):
-        o.append(bar(X0, c - BAR // 2, secs * SCALE, t["accent"]))
-        o.append(value(X0 + secs * SCALE + 10, c, text, extra))
+    c = ROWS[1]
+    o.append(bar(X0, c - BAR // 2, ARC * SCALE, t["accent"]))
+    o.append(value(X0 + ARC * SCALE + 10, c, span(ARC), f"{SPEEDUP} faster"))
 
     o.append('</g>')
     o.append('</svg>')

@@ -6,7 +6,7 @@ Machine for all runs: Core i9-13900K (32 threads), 32 GB RAM, NVMe SSD, Windows 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="benchmark-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="benchmark-light.svg">
-    <img src="benchmark-light.svg" width="100%" alt="Original setup.exe: 4 min 47 s. arc-unpack: 1 min 24 s with every check on, 1 min 15 s with the archive check skipped. The table below has the same numbers.">
+    <img src="benchmark-light.svg" width="100%" alt="Original setup.exe: 4 min 47 s. arc-unpack with default settings: 1 min 14 s, 3.9 times faster. The table below has the same numbers.">
   </picture>
 </p>
 
@@ -19,15 +19,23 @@ A 5-archive repack (4.7 GB → 8.1 GB, 3,489 files). Its installer unpacks an op
 | `setup.exe /VERYSILENT` (bonus selected) | 199.8 s | | | unpacking and post-processing |
 | … then its default "verify files" pass (QuickSFV) | +86.9 s | | | MD5 of all 3,484 listed files |
 | **Original installer, total** | **286.7 s** | 1.0× | 31% | |
-| arc-unpack, steps one after another | 123 s | 2.3× | | unpacking, post-processing and MD5 of every file |
-| **arc-unpack `--no-verify`** | **75 s** | **3.8×** | 75% | the same, with early extraction and a second heavy job |
-| **arc-unpack, default** | **84 s** | **3.4×** | | the same, plus an MD5 check of the 5 downloaded archives |
+| **arc-unpack 0.1.0-beta.5, default** | **74.3 s** | **3.9×** | 68% | unpacking, post-processing, MD5 of every file, MD5 of the 5 downloaded archives |
 
-- **Throughput.** arc-unpack wrote 9.19 GB (the 8.1 GB game plus intermediate files the installer's tools consume and delete) at 122.8 MB/s in the 75 s run, and 109.5 MB/s in the 84 s run.
-- **Memory.** RAM in use peaked 15.8 GB above its starting level under the original installer, and 11.9 GB above it under arc-unpack (the 75 s run).
-- **Newer builds.** The current build installs the same repack in 82 s with default settings, measured through the window while a game-store download was running in the background.
+- **Three runs.** arc-unpack took 72.8 s, 74.3 s and 77.6 s; the table uses the median. The original installer was run once.
+- **Throughput.** arc-unpack wrote 9.19 GB (the 8.1 GB game plus intermediate files the installer's tools consume and delete) at 124 MB/s.
+- **Memory.** RAM in use peaked 15.8 GB above its starting level under the original installer, and 12.3 GB above it under arc-unpack.
+- **With the PC busy.** While a game-store download was running in the background, the same install took 82 s.
 
-**Correctness.** The arc-unpack install was compared file by file with the original installer's. All 3,489 files were byte-identical. The only files missing were Inno Setup's own uninstaller files. All 3,484 files on the repack's MD5 list matched in every arc-unpack run.
+**Correctness.** An arc-unpack install was compared file by file with the original installer's. All 3,489 files were byte-identical. The only files missing were Inno Setup's own uninstaller files. Every run since, including the three above, wrote the same 3,489 files and 8,104,388,627 bytes, with all 3,484 files on the repack's MD5 list matching.
+
+How it got here, on the same repack:
+
+| Version | Time | What changed |
+|---|---:|---|
+| Steps one after another | 123 s | the installer's script on the parallel engine, with the MD5 of every file done while writing |
+| beta.3 and beta.4, `--no-verify` | 75 s | early extraction and a second memory-heavy job |
+| beta.3 and beta.4, default | 84 s | the same, plus an MD5 check of the downloaded archives before the install |
+| **beta.5, default** | **74.3 s** | that check now runs during the install; the largest archive starts first |
 
 ## Everything fits inside the largest archive
 
@@ -40,7 +48,7 @@ One after another, the parts of this install add up:
 | A third archive (537 MB) | 13 s |
 | The installer's own tools and the two inner archives they produce | about 13 s |
 
-With early extraction they overlap. In the 75 s run the largest archive took 72 s, and everything else finished inside that window: the other four archives, 28 runs of the installer's tools, and the MD5 of every file.
+With early extraction they overlap. In the three beta.5 runs the largest archive took 71 s to 76 s of the 73 s to 78 s total, and everything else finished inside that window: the other four archives, 28 runs of the installer's tools, and every MD5 check.
 
 ## How close to the limit
 
@@ -53,10 +61,10 @@ Each stage of the largest archive was measured on its own, to see what's left to
 | … at 75% to 200% thread settings | 62–67 s |
 | … at 50% | 79.6 s |
 | All three stages connected, three runs | 72.1 s, 75.2 s, 76.1 s |
-| **The whole install** | **75 s** |
+| **The whole install** | **74 s** |
 
 - **xtool sets the pace.** It's the repack's own build, it keeps 18–19 of 32 threads busy at any thread setting from 75% up, and it needs about 62 s even when its input is instant.
-- **The install is within about 13 s of that.** Process priorities, larger buffers between stages and larger transfer buffers were all measured and made no difference.
+- **The install is within about 12 s of that.** Process priorities, larger buffers between stages and larger transfer buffers were all measured and made no difference.
 - **What could still help** is outside the decoding: unpacking each archive as soon as its download finishes.
 
 ## The decode engine alone
