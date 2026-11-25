@@ -15,4 +15,5 @@ pub mod perf;
 pub mod pipe;
 pub mod setup_script;
 pub mod progress;
+pub mod runtimes;
 pub mod stage;

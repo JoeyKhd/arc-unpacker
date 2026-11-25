@@ -71,6 +71,18 @@ The engine for one archive job:
 | Built-in | `storing`, `lzma` | In-process thread |
 | FreeArc built-in (`delta`, `dispack`, `4x4`, `tor`, …) | `unarc.dll` | Whole archive via `unarc-host-x86` |
 
+## Runtimes
+
+FitGirl's installers don't contain most runtimes. For each runtime component (`vc_2022_x64`, `dotnet48`, `physx`, ...), the setup wizard downloads the official installer (Inno Download Plugin, `IdpAddFileComp(url, file, component)`), and the Finish page offers to run it. DirectX's web installer comes inside setup.exe.
+
+arc-unpack reads the same information: the runtime components a default install includes, the links the script registers, and the installers setup.exe carries. It checks whether this PC has each runtime (Visual C++ and .NET by their registry keys, DirectX and PhysX by their system DLLs). Only the missing ones are offered, and only on request (`--runtimes`, or the checkbox in the window):
+
+- **The file:** taken from setup.exe if it's there, otherwise downloaded with Windows' `curl.exe` from the link the script registers.
+- **The check:** it runs only with a valid signature from Microsoft (NVIDIA for PhysX).
+- **The install:** silent, after the game, one runtime at a time. "Already installed" and "restart needed" count as success.
+
+`arc-unpack runtimes "<repack>"` lists them for a repack (only setup.exe is needed); `--install` installs the missing ones.
+
 ## Safety
 
 - **Untrusted archive paths.** `..`, absolute paths, drive letters, alternate data streams and device names are refused.
@@ -85,6 +97,7 @@ The engine for one archive job:
 arc-unpack install  <repack> <target>        # one-step install (asks for admin rights; --dry-run to preview)
 arc-unpack script   <repack>                 # what the installer's script would do (changes nothing)
 arc-unpack script   <repack> --disasm CurStepChanged   # its bytecode, for the curious
+arc-unpack runtimes <repack> [--install]     # runtimes the game needs, and whether this PC has them
 arc-unpack list     data-01.bin --files      # blocks, codec chains, sizes, files
 arc-unpack extract-setup setup.exe -o tools  # unpack an Inno Setup 5.5 installer's files (never runs it)
 arc-unpack import-arcini tools\tmp\arc.ini -o codecs.toml
@@ -98,6 +111,7 @@ arc-unpack extract  *.bin -c codecs.toml -o D:\Games\Title
 | `--components a,b` | `install`: components to install (default: the installer's defaults plus downloaded optional parts). Optional parts left out aren't installed; without the base game's component, the parts are added to the game already in the target folder. |
 | `--no-verify` | `install`: skip the MD5 check of the downloaded archives. |
 | `--no-script` | `install`: don't run the installer's script; extract every archive into the target. |
+| `--runtimes` | `install`: afterwards, install the runtimes the game needs that this PC is missing (downloads them; see Runtimes). |
 | `-j, --jobs N` | Jobs at once. Light jobs fill in around heavy ones. |
 | `--heavy-jobs N` | Memory-heavy jobs at once, machine-wide (default 2). The first always runs; the others start only while at least a quarter of RAM (and 8 GB) is free. |
 | `--writers N` | File writer threads per job. |
@@ -133,6 +147,7 @@ src/pascal.rs          Pascal Script (IFPS) bytecode interpreter
 src/setup_script.rs    the Inno Setup / ISDone functions an install script calls; plan, components, shortcuts
 src/inno.rs            read-only Inno Setup 5.5 Unicode reader (files, components, icons, compiled code)
 src/install.rs         one-step install: script run, early extraction, MD5 checks
+src/runtimes.rs        runtimes a game needs (DirectX, Visual C++, ...): detection, download, install
 src/format.rs          FreeArc container: footer, control blocks, directory, varints
 src/extract.rs         scheduling, splitting, writer pool, watchdog, path safety
 src/stage.rs           stage runners: built-ins, external programs, CLS hosts

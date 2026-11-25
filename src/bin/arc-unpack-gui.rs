@@ -129,6 +129,8 @@ struct Analysis {
     choices: Vec<Choice>,
     /// The base game's components (unticking all of them = add parts to an installed game).
     base: BTreeSet<String>,
+    /// Runtimes the game needs (DirectX, Visual C++, ...), with whether this PC has them.
+    runtimes: Vec<arc_unpack::runtimes::Runtime>,
     /// Why the script can't be used (then the archives are extracted directly).
     note: Option<String>,
 }
@@ -136,7 +138,7 @@ struct Analysis {
 fn analyze(repack: PathBuf) -> Result<Analysis, String> {
     let scan = install::scan(&repack, None).map_err(|e| format!("{e:#}"))?;
     let setup_exe = scan.setup.clone();
-    let mut a = Analysis { repack: repack.clone(), setup_exe: setup_exe.clone(), inno: None, script: None, scan: Arc::new(scan), choices: Vec::new(), base: BTreeSet::new(), note: None };
+    let mut a = Analysis { repack: repack.clone(), setup_exe: setup_exe.clone(), inno: None, script: None, scan: Arc::new(scan), choices: Vec::new(), base: BTreeSet::new(), runtimes: Vec::new(), note: None };
     let Some(exe) = setup_exe else {
         a.note = Some("No setup.exe here, so its install steps can't be run.".into());
         return Ok(a);
@@ -160,6 +162,7 @@ fn analyze(repack: PathBuf) -> Result<Analysis, String> {
     })();
     match usable {
         Ok((script, choices)) => {
+            a.runtimes = arc_unpack::runtimes::of_repack(&inno, Some(&script), &ss::repack_files(&repack));
             a.script = Some(Arc::new(script));
             a.choices = choices;
         }
@@ -293,6 +296,8 @@ struct App {
     check_started: Instant,
     limit_ram: bool,
     skip_check: bool,
+    /// Install the runtimes this PC is missing after the game (opt-in: it downloads).
+    install_runtimes: bool,
     progress: Progress,
     running: Option<Running>,
     outcome: Option<Outcome>,
@@ -326,6 +331,7 @@ impl App {
             check_started: Instant::now(),
             limit_ram: false,
             skip_check: false,
+            install_runtimes: false,
             progress: Progress::default(),
             running: None,
             outcome: None,
@@ -469,6 +475,7 @@ impl App {
             dry_run: false,
             script,
             components: script.then(|| self.selected.iter().cloned().collect()),
+            runtimes: self.install_runtimes && self.adding.is_none(),
         };
         let done_ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -836,6 +843,17 @@ impl App {
                 "This repack has no MD5 list for its .bin files."
             });
         });
+        // Only offered when this PC lacks something the game needs (most PCs have them all).
+        let missing = arc_unpack::runtimes::missing(&a.runtimes);
+        if !missing.is_empty() && !adding_parts(&a, &self.selected) {
+            let names = arc_unpack::runtimes::labels(&missing);
+            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.install_runtimes, format!("Also install missing runtimes: {names}")))
+                .on_hover_text(
+                    "This PC doesn't have them, and the game may not start without them. They're downloaded from Microsoft \
+                     (DirectX's installer comes with the repack), checked for Microsoft's signature, and installed silently \
+                     after the game. FitGirl's installer offers the same.",
+                );
+        }
 
         // The one primary action (gone once this install succeeded; picking another folder
         // brings it back).
@@ -991,6 +1009,9 @@ impl App {
                 }
                 for n in s.notes.iter().filter(|n| n.contains(install::BACKUP_DIR)) {
                     ui.label(RichText::new(n).weak());
+                }
+                for line in &report.runtimes {
+                    ui.colored_label(OK, line);
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {

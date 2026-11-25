@@ -85,6 +85,9 @@ pub struct InstallOptions {
     pub script: bool,
     /// Components to install (None: default selection plus downloaded optional parts).
     pub components: Option<Vec<String>>,
+    /// After the game: install the runtimes it needs that this PC is missing (DirectX, Visual
+    /// C++, ...), downloaded from the links the installer uses. See `runtimes`.
+    pub runtimes: bool,
 }
 
 pub struct InstallReport {
@@ -103,6 +106,8 @@ pub struct InstallReport {
     /// Desktop shortcuts the original installer would create (not created yet: see
     /// `setup_script::create_shortcuts`).
     pub shortcuts: Vec<crate::setup_script::Shortcut>,
+    /// What happened to each runtime installed after the game (one line each).
+    pub runtimes: Vec<String>,
 }
 
 pub fn default_cache_dir() -> PathBuf {
@@ -439,6 +444,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
             files_md5: 0,
             script_steps: 0,
             shortcuts: Vec::new(),
+        runtimes: Vec::new(),
         });
     }
 
@@ -555,6 +561,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
         files_md5,
         script_steps: 0,
         shortcuts: Vec::new(),
+        runtimes: Vec::new(),
     })
 }
 
@@ -671,6 +678,23 @@ fn install_scripted(
                 r
             }),
         }
+    })
+    .map(|mut r| {
+        // Runtimes the game needs, once the game itself is in place.
+        if opts.runtimes && r.summary.problems.is_empty() && !r.summary.cancelled {
+            let list = crate::runtimes::of_repack(inno, Some(script), &ss::repack_files(&opts.repack_dir));
+            let missing = crate::runtimes::missing(&list);
+            if missing.is_empty() {
+                r.runtimes.push("All the runtimes this game needs are already installed".into());
+            } else {
+                sink(Event::Phase { name: "Installing runtimes".into() });
+                let (done, problems) = crate::runtimes::install(inno, &missing, &opts.cache_dir.join("runtimes"), sink);
+                r.runtimes = done;
+                r.summary.problems.extend(problems.into_iter().map(|p| format!("runtime {p}")));
+                sink(Event::Phase { name: "Done".into() });
+            }
+        }
+        r
     })
 }
 
@@ -806,6 +830,7 @@ fn run_scripted(
         files_md5,
         script_steps,
         shortcuts,
+        runtimes: Vec::new(),
     })
 }
 
@@ -837,6 +862,7 @@ fn empty_report(codec_dir: PathBuf) -> InstallReport {
         files_md5: 0,
         script_steps: 0,
         shortcuts: Vec::new(),
+        runtimes: Vec::new(),
     }
 }
 

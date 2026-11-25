@@ -51,6 +51,15 @@ enum Cmd {
         #[arg(long)]
         disasm: Option<String>,
     },
+    /// List the runtimes a repack's game needs (DirectX, Visual C++, ...) and whether this PC has
+    /// them; with --install, install the missing ones (as `install --runtimes` does).
+    Runtimes {
+        /// The repack folder (with setup.exe)
+        repack: PathBuf,
+        /// Download and install the missing ones (needs an administrator terminal).
+        #[arg(long)]
+        install: bool,
+    },
     /// Extract the files embedded in an Inno Setup 5.5 installer (without running it).
     ExtractSetup {
         setup: PathBuf,
@@ -163,6 +172,44 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Runtimes { repack, install } => {
+            // (Only setup.exe is needed: the .bin files may be gone after installing.)
+            let setup_exe = repack.join("setup.exe");
+            anyhow::ensure!(setup_exe.is_file(), "no setup.exe in {}", repack.display());
+            let setup = arc_unpack::inno::Setup::open(&setup_exe)?;
+            let script = arc_unpack::pascal::Script::load(&setup.code).ok();
+            let list = arc_unpack::runtimes::of_repack(&setup, script.as_ref(), &arc_unpack::setup_script::repack_files(&repack));
+            if list.is_empty() {
+                println!("This repack doesn't install any runtimes.");
+                return Ok(());
+            }
+            for r in &list {
+                let state = match (r.installed, r.available) {
+                    (true, _) => "installed on this PC",
+                    (false, true) => "missing",
+                    (false, false) => "missing, and the installer has no way to get it",
+                };
+                println!("  {:28} {state}", r.label);
+            }
+            let missing = arc_unpack::runtimes::missing(&list);
+            if !install || missing.is_empty() {
+                return Ok(());
+            }
+            anyhow::ensure!(arc_unpack::guard::is_elevated(), "installing runtimes needs an administrator terminal");
+            let (sink, term) = arc_unpack::progress::terminal();
+            let (done, problems) = arc_unpack::runtimes::install(&setup, &missing, &arc_unpack::install::default_cache_dir().join("runtimes"), &sink);
+            term.finish();
+            for d in &done {
+                println!("{d}");
+            }
+            for p in &problems {
+                eprintln!("problem: {p}");
+            }
+            if !problems.is_empty() {
+                std::process::exit(2);
+            }
+            Ok(())
+        }
         Cmd::Script { repack, target, disasm } => {
             let setup_exe = if repack.is_file() { repack.clone() } else { repack.join("setup.exe") };
             let repack = if repack.is_file() { repack.parent().map(PathBuf::from).unwrap_or_default() } else { repack };
@@ -189,6 +236,20 @@ fn real_main() -> Result<()> {
             }
             if let Some(e) = &plan.error {
                 println!("\nThe script stopped: {e}");
+            }
+            let setup = arc_unpack::inno::Setup::open(&setup_exe)?;
+            let script = arc_unpack::pascal::Script::load(&setup.code).ok();
+            let runtimes = arc_unpack::runtimes::of_repack(&setup, script.as_ref(), &arc_unpack::setup_script::repack_files(&repack));
+            if !runtimes.is_empty() {
+                println!("\nRuntimes the game needs (`install --runtimes` installs the missing ones):");
+                for r in &runtimes {
+                    let state = match (r.installed, r.available) {
+                        (true, _) => "installed on this PC",
+                        (false, true) => "missing",
+                        (false, false) => "missing, and the installer has no way to get it",
+                    };
+                    println!("  {:28} {state}", r.label);
+                }
             }
             println!("\n(dry run: extraction is only simulated, so steps that check for extracted files may be missing)");
             Ok(())
@@ -269,6 +330,11 @@ struct InstallArgs {
     /// added to the game already installed in TARGET.
     #[arg(long, value_delimiter = ',')]
     components: Option<Vec<String>>,
+    /// After the game, install the runtimes it needs that this PC is missing (DirectX, Visual
+    /// C++, .NET, PhysX): downloaded from the links the installer uses (DirectX's installer is
+    /// bundled), checked for a Microsoft or NVIDIA signature, run silently.
+    #[arg(long)]
+    runtimes: bool,
     /// Wait for Enter before exiting (used when relaunched in its own elevated window).
     #[arg(long, hide = true)]
     keep_open: bool,
@@ -291,7 +357,7 @@ fn install(a: InstallArgs) -> Result<()> {
             args.extend(["--components".into(), c.join(",")]);
         }
         for (flag, on) in
-            [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune), ("--no-script", a.no_script)]
+            [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune), ("--no-script", a.no_script), ("--runtimes", a.runtimes)]
         {
             if on {
                 args.push(flag.into());
@@ -332,6 +398,7 @@ fn install(a: InstallArgs) -> Result<()> {
         dry_run: a.dry_run,
         script: !a.no_script,
         components: a.components,
+        runtimes: a.runtimes,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();
@@ -364,6 +431,9 @@ fn install(a: InstallArgs) -> Result<()> {
             }
             if r.md5_checked > 0 {
                 println!("{} archives matched the repack's MD5 list", r.md5_checked);
+            }
+            for line in &r.runtimes {
+                println!("runtime {line}");
             }
             if !r.scripts.is_empty() {
                 println!("\nThe installer would run these scripts afterwards (not run; review them first):");
