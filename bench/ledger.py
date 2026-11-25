@@ -195,8 +195,10 @@ def cmd_add(args):
 # ------------------------------------------------------------------------------- tables
 
 def version_key(v):
-    parts = re.split(r"[.\-]", v.replace("beta", "b."))
-    return [int(p) if p.isdigit() else p for p in parts if p]
+    # "0.1.0-beta.8-dev" (a development build) sorts before the release "0.1.0-beta.8".
+    dev = v.endswith("-dev")
+    parts = re.split(r"[.\-]", v.removesuffix("-dev").replace("beta", "b."))
+    return [int(p) if p.isdigit() else p for p in parts if p] + [-1 if dev else 0]
 
 
 def fmt_time(s):
