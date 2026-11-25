@@ -143,7 +143,7 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                 let spec = ExtSpec {
                     label: format!("{label} [{}]", dll.file_name().unwrap_or_default().to_string_lossy()),
                     argv: vec![host.to_string_lossy().into_owned(), dll.to_string_lossy().into_owned(), method.clone()],
-                    workdir: dll.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    workdir: dll.parent().map(Path::to_path_buf),
                     input_file: false,
                     output_file: false,
                     header: false,
@@ -196,7 +196,8 @@ pub fn pe_machine(path: &Path) -> Result<u16> {
 struct ExtSpec {
     label: String,
     argv: Vec<String>,
-    workdir: PathBuf,
+    /// None: a fresh empty folder per process (see `config::External::workdir`).
+    workdir: Option<PathBuf>,
     input_file: bool,
     output_file: bool,
     header: bool,
@@ -205,12 +206,12 @@ struct ExtSpec {
     rank: usize,
 }
 
-fn command(spec: &ExtSpec, input_path: &Path, output_path: &Path, tune: bool) -> Command {
+fn command(spec: &ExtSpec, input_path: &Path, output_path: &Path, workdir: &Path, tune: bool) -> Command {
     let sub = |a: &str| a.replace("{input}", &input_path.to_string_lossy()).replace("{output}", &output_path.to_string_lossy());
     let mut cmd = Command::new(sub(&spec.argv[0]));
     cmd.args(spec.argv[1..].iter().map(|a| sub(a)));
-    if !spec.workdir.as_os_str().is_empty() {
-        cmd.current_dir(&spec.workdir);
+    if !workdir.as_os_str().is_empty() {
+        cmd.current_dir(workdir);
     }
     apply_child_flags(&mut cmd, tune);
     cmd
@@ -300,6 +301,8 @@ struct ChildOut {
     tail: Arc<Mutex<Vec<u8>>>,
     checked: bool,
     reg: Registry,
+    /// The process's own working folder, removed with this stream.
+    _own_dir: Option<RemoveDir>,
 }
 
 impl Read for ChildOut {
@@ -356,7 +359,8 @@ fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
     let input = tee_if_requested(&spec, input)?;
     if !spec.header && !spec.input_file && !spec.output_file {
         // Fast path: stdin -> codec -> stdout, read directly by the next stage.
-        let mut cmd = command(&spec, Path::new(""), Path::new(""), ctx.tune);
+        let own_dir = own_workdir(&spec, ctx)?;
+        let mut cmd = command(&spec, Path::new(""), Path::new(""), workdir_of(&spec, &own_dir), ctx.tune);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
         let sp = spawn_child(&spec, cmd, ctx)?;
         let stdin = sp.stdin.unwrap();
@@ -368,6 +372,7 @@ fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
             tail: sp.stderr_tail,
             checked: false,
             reg: ctx.reg.clone(),
+            _own_dir: own_dir,
         }));
     }
 
@@ -407,12 +412,13 @@ fn run_process(spec: &ExtSpec, mut input: Stream, w: &mut PipeWriter, ctx: &Ctx)
     let tin = ctx.temp_dir.join(format!("arcunp-{id}.in"));
     let tout = ctx.temp_dir.join(format!("arcunp-{id}.out"));
     let _cleanup = Cleanup(vec![tin.clone(), tout.clone()]);
+    let own_dir = own_workdir(spec, ctx)?;
     if spec.input_file {
         let mut f = io::BufWriter::with_capacity(IO_BUF, std::fs::File::create(&tin).context("create input temp file")?);
         io::copy(&mut input, &mut f).context("writing codec input temp file")?;
         f.flush()?;
     }
-    let mut cmd = command(spec, &tin, &tout, ctx.tune);
+    let mut cmd = command(spec, &tin, &tout, workdir_of(spec, &own_dir), ctx.tune);
     cmd.stdin(if spec.input_file { Stdio::null() } else { Stdio::piped() });
     cmd.stdout(if spec.output_file { Stdio::null() } else { Stdio::piped() });
     let sp = spawn_child(spec, cmd, ctx)?;
@@ -441,6 +447,29 @@ impl Drop for Cleanup {
             let _ = std::fs::remove_file(p);
         }
     }
+}
+
+struct RemoveDir(PathBuf);
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Like FreeArc, an external process without a configured working folder gets its own empty
+/// one: some codecs (the Razor stdio build) keep a fixed-name temp file there and crash when
+/// two processes share it.
+fn own_workdir(spec: &ExtSpec, ctx: &Ctx) -> Result<Option<RemoveDir>> {
+    if spec.workdir.is_some() {
+        return Ok(None);
+    }
+    let dir = ctx.temp_dir.join(format!("arcunp-{}-{}.cwd", std::process::id(), unique()));
+    std::fs::create_dir_all(&dir).with_context(|| format!("create working folder {}", dir.display()))?;
+    Ok(Some(RemoveDir(dir)))
+}
+
+fn workdir_of<'a>(spec: &'a ExtSpec, own: &'a Option<RemoveDir>) -> &'a Path {
+    own.as_ref().map(|d| d.0.as_path()).or(spec.workdir.as_deref()).unwrap_or(Path::new(""))
 }
 
 pub(crate) fn unique() -> u64 {

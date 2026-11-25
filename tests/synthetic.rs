@@ -202,6 +202,10 @@ header = false
 [methods.dialog]
 cmd = '"{filter}" --dialog'
 header = false
+
+[methods.lockcwd]
+cmd = '"{filter}" --lockcwd'
+header = false
 "#
         );
         std::fs::create_dir_all(env.p("codecs")).unwrap();
@@ -356,6 +360,23 @@ fn path_traversal_is_refused() {
     assert_eq!(o.status.code(), Some(2));
     assert!(text(&o).contains("refusing path with '..'"), "{}", text(&o));
     assert!(!env.p("evil.txt").exists());
+}
+
+/// Codec processes running at once each get their own working folder, as under FreeArc: the
+/// Razor stdio build keeps a fixed-name temp file there and crashes when two share one.
+#[test]
+fn concurrent_codecs_get_separate_working_folders() {
+    let env = Env::new();
+    let blocks = (0..4u32)
+        .map(|i| B { method: "lockcwd", files: vec![file(["l/0.bin", "l/1.bin", "l/2.bin", "l/3.bin"][i as usize], pseudo_random(400_000, 10 + i))], encode: xor })
+        .collect();
+    env.write_archive("lock.arc", blocks, true);
+    let o = env.run(&["extract", "lock.arc", "-o", "out", "-c", "codecs.toml", "-j", "4"]);
+    assert!(o.status.success(), "{}", text(&o));
+    for i in 0..4u32 {
+        assert_file(&env.p("out"), &format!("l/{i}.bin"), &pseudo_random(400_000, 10 + i));
+    }
+    assert!(!env.p("codecs/testfilter.lock").exists());
 }
 
 #[test]

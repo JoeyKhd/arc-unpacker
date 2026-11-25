@@ -5,6 +5,8 @@
 //!   testfilter --fail-now      exit with code 3 immediately, without reading anything
 //!   testfilter --hang          consume stdin, then hang forever
 //!   testfilter --dialog        show a modal error MessageBox (like some real codecs), then exit 4
+//!   testfilter --lockcwd       XOR stdin -> stdout while holding a fixed-name file in the working
+//!                              folder; exit 5 if it's already there (like the Razor stdio build)
 use std::io::{Read, Write};
 
 fn xor(buf: &mut [u8]) {
@@ -35,6 +37,18 @@ fn main() {
         ["--fail-now"] => {
             eprintln!("testfilter: failing before reading");
             std::process::exit(3);
+        }
+        ["--lockcwd"] => {
+            let lock = std::path::Path::new("testfilter.lock");
+            if std::fs::OpenOptions::new().write(true).create_new(true).open(lock).is_err() {
+                eprintln!("testfilter: another process is using this working folder");
+                std::process::exit(5);
+            }
+            let mut buf = read_all();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            xor(&mut buf);
+            std::io::stdout().lock().write_all(&buf).unwrap();
+            let _ = std::fs::remove_file(lock);
         }
         ["--hang"] => {
             read_all();

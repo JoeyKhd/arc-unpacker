@@ -48,7 +48,7 @@ pub struct MethodSpec {
     /// Text used for {options} when the method has no params (arc.ini `default`).
     #[serde(default)]
     pub default: String,
-    /// Working directory for the process (default: codec_dir).
+    /// Working directory for the process (default: a fresh empty folder per process, like FreeArc).
     pub workdir: Option<PathBuf>,
     /// Keep this codec on the fastest core class (P-cores on hybrid CPUs).
     #[serde(default)]
@@ -70,7 +70,9 @@ pub enum Codec {
 #[derive(Debug, Clone)]
 pub struct External {
     pub argv: Vec<String>,
-    pub workdir: PathBuf,
+    /// Set in the config. Otherwise each process runs in a fresh empty folder, as FreeArc runs
+    /// external compressors in a temporary folder (some keep fixed-name temp files there).
+    pub workdir: Option<PathBuf>,
     pub input_file: bool,
     pub output_file: bool,
     pub header: bool,
@@ -251,11 +253,7 @@ fn external(cmd: &str, spec: &MethodSpec, m: &Method, dir: &Path) -> Result<Exte
             }
         }
     }
-    let workdir = match &spec.workdir {
-        Some(w) if w.is_relative() => dir.join(w),
-        Some(w) => w.clone(),
-        None => dir.to_path_buf(),
-    };
+    let workdir = spec.workdir.as_ref().map(|w| if w.is_relative() { dir.join(w) } else { w.clone() });
     Ok(External { argv, workdir, input_file, output_file, header: spec.header, performance_cores: spec.performance_cores })
 }
 
