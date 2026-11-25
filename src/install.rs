@@ -160,7 +160,7 @@ fn classify(a: &Archive, tools: &HashSet<String>) -> Role {
 }
 
 fn read_md5_list(path: &Path) -> BTreeMap<String, String> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = std::fs::read(path).map(|b| md5_list_text(&b)).unwrap_or_default();
     text.lines()
         .filter_map(|l| {
             let l = l.trim();
@@ -878,7 +878,7 @@ fn md5_keys_on_disk(inno: &crate::inno::Setup, target: &Path) -> Option<HashSet<
         let Ok(text) = std::fs::read(target.join(rel)) else { continue };
         let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
         base.pop();
-        parse_installed_md5(&String::from_utf8_lossy(&text), &base, &mut list);
+        parse_installed_md5(&md5_list_text(&text), &base, &mut list);
     }
     (!list.is_empty()).then(|| list.into_keys().collect())
 }
@@ -1315,9 +1315,36 @@ fn md5_list_from_setup(inno: &crate::inno::Setup) -> Result<Option<Md5List>> {
         }
         let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
         base.pop();
-        parse_installed_md5(&String::from_utf8_lossy(&inno.read(f)?), &base, &mut list);
+        parse_installed_md5(&md5_list_text(&inno.read(f)?), &base, &mut list);
     }
     Ok((!list.is_empty()).then_some(list))
+}
+
+/// The text of an MD5 list. FitGirl's lists are made on a Russian Windows: names that aren't
+/// plain ASCII are in its ANSI code page, 1251, not UTF-8 (RimWorld's "Russian (Русский).tar").
+/// Lines that are valid UTF-8 are taken as they are, the others are read as code page 1251.
+pub(crate) fn md5_list_text(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    bytes
+        .split_inclusive(|&b| b == b'\n')
+        .map(|line| std::str::from_utf8(line).map(str::to_owned).unwrap_or_else(|_| cp1251(line)))
+        .collect()
+}
+
+fn cp1251(bytes: &[u8]) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    let Ok(len) = i32::try_from(bytes.len()) else { return String::from_utf8_lossy(bytes).into_owned() };
+    // SAFETY: `bytes` is `len` bytes long; the second call writes at most `n` units into `wide`.
+    let n = unsafe { MultiByteToWideChar(1251, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut wide = vec![0u16; n as usize];
+    let n = unsafe { MultiByteToWideChar(1251, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n) };
+    String::from_utf16_lossy(&wide[..n.max(0) as usize])
 }
 
 fn parse_installed_md5(text: &str, base: &[&str], list: &mut Md5List) {
@@ -1385,9 +1412,9 @@ pub fn find_installed(inno: &crate::inno::Setup, target: &Path) -> Result<Instal
     let (mut files, mut have, mut list_found) = (0, HashSet::new(), true);
     for f in lists {
         let rel = f.app_relative().unwrap_or_default();
-        let ours = String::from_utf8_lossy(&inno.read(f)?).into_owned();
+        let ours = md5_list_text(&inno.read(f)?);
         // The game's own copy of the list; people often delete `_Redist` after installing.
-        let on_disk = std::fs::read(target.join(crate::inno::safe_dest(rel)?)).ok().map(|b| hash_lines(&String::from_utf8_lossy(&b)));
+        let on_disk = std::fs::read(target.join(crate::inno::safe_dest(rel)?)).ok().map(|b| hash_lines(&md5_list_text(&b)));
         if let Some(on_disk) = &on_disk {
             ensure!(
                 hash_lines(&ours).is_subset(on_disk),
@@ -1433,7 +1460,7 @@ pub fn find_installed(inno: &crate::inno::Setup, target: &Path) -> Result<Instal
     let mut parts = std::collections::BTreeSet::new();
     for f in inno.files.iter().filter(|f| f.has_data() && !f.components.is_empty()) {
         if f.app_relative().is_some_and(|r| r.to_ascii_lowercase().ends_with(".addon")) {
-            let lines = hash_lines(&String::from_utf8_lossy(&inno.read(f)?));
+            let lines = hash_lines(&md5_list_text(&inno.read(f)?));
             if !lines.is_empty() && lines.is_subset(&have) {
                 parts.extend(component_words(&f.components));
             }
@@ -1458,7 +1485,7 @@ fn merge_part_lists(inno: &crate::inno::Setup, target: &Path, selected: &std::co
         let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
         base.pop();
         let mut list = Md5List::new();
-        parse_installed_md5(&String::from_utf8_lossy(&addon), &base, &mut list);
+        parse_installed_md5(&md5_list_text(&addon), &base, &mut list);
         keys.extend(list.into_keys());
         let game_list = inno.files.iter().filter_map(|g| g.app_relative()).find(|r| r.to_ascii_lowercase().ends_with(".md5") && dir_of(r) == dir_of(rel));
         // (No list when `_Redist` was deleted after installing: nothing to merge into.)
@@ -1466,7 +1493,7 @@ fn merge_part_lists(inno: &crate::inno::Setup, target: &Path, selected: &std::co
             && let Ok(mut text) = std::fs::read(target.join(crate::inno::safe_dest(list_rel)?))
         {
             let path = target.join(crate::inno::safe_dest(list_rel)?);
-            if !hash_lines(&String::from_utf8_lossy(&addon)).is_subset(&hash_lines(&String::from_utf8_lossy(&text))) {
+            if !hash_lines(&md5_list_text(&addon)).is_subset(&hash_lines(&md5_list_text(&text))) {
                 text.extend_from_slice(&addon);
                 std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
             }
@@ -1684,6 +1711,26 @@ mod tests {
         assert_eq!(m.get("data-01.bin").unwrap(), "0123456789abcdef0123456789abcdef");
         assert_eq!(m.get("data-02.bin").unwrap(), "ffffffffffffffffffffffffffffffff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn md5_lists_in_code_page_1251() {
+        // RimWorld's fitgirl.md5: ASCII lines, and Cyrillic names in code page 1251.
+        let mut bytes = b"\xef\xbb\xbf0123456789abcdef0123456789abcdef *..\\Data\\Core\\About.xml\r\n".to_vec();
+        bytes.extend_from_slice(b"2791a01a58fc95edd73f1812840669d2 *..\\Data\\Core\\Languages\\Russian (\xd0\xf3\xf1\xf1\xea\xe8\xe9).tar\r\n");
+        bytes.extend_from_slice(b"7a1e8599571ee9838bf3be2f41273f86 *..\\Data\\Biotech\\Languages\\Ukrainian (\xd3\xea\xf0\xe0\xbf\xed\xf1\xfc\xea\xe0).tar\r\n");
+        let text = md5_list_text(&bytes);
+        assert!(text.starts_with("0123456789abcdef"));
+        assert!(text.contains(r"Languages\Russian (Русский).tar"));
+        assert!(text.contains(r"Languages\Ukrainian (Українська).tar"));
+        let mut list = Md5List::new();
+        parse_installed_md5(&text, &["_Redist"], &mut list);
+        assert!(list.contains_key(&extract::md5_key(r"Data\Biotech\Languages\Ukrainian (Українська).tar")));
+        // Cities: Skylines: a dash in code page 1251 (0x96).
+        let dash = md5_list_text(b"00000000000000000000000000000000 *..\\Files\\Radio\\Music\\GoldFM\\Etta James \x96 At Last.ogg\n");
+        assert!(dash.ends_with("Etta James – At Last.ogg\n"));
+        // UTF-8 lists are unchanged.
+        assert_eq!(md5_list_text("a *Español.txt\n".as_bytes()), "a *Español.txt\n");
     }
 
     #[test]
