@@ -8,15 +8,17 @@
 
 # arc-unpacker
 
-**Installs FitGirl-style repacks up to 3.8× faster than their own installer, with the same result.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
+**Installs FitGirl-style repacks up to 3.8× faster than their own installer, with a byte-identical result.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
 
-| Same repack, same PC | Time | Speed-up |
-|---|---:|---:|
-| Original `setup.exe`, default options (install, then verify files) | 4 min 47 s | 1.0× |
-| **arc-unpack**, default (checks the downloads, installs, verifies every file) | **1 min 24 s** | **3.4×** |
-| **arc-unpack**, archive check skipped | **1 min 15 s** | **3.8×** |
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/benchmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/benchmark-light.svg">
+    <img src="docs/benchmark-light.svg" width="100%" alt="Benchmark, same repack on the same PC. Original setup.exe: 4 min 47 s (install 3 min 20 s, then verify 1 min 27 s). arc-unpack with every check on: 1 min 24 s, 3.4 times faster. arc-unpack with the archive check skipped: 1 min 15 s, 3.8 times faster. All 3,489 files byte-identical. Average CPU use 31% versus 75%.">
+  </picture>
+</p>
 
-<sub>A 5-archive repack, 4.7 GB → 8.1 GB, with audio rebuilt by the repack's own tools. The installed folder was <b>byte-for-byte identical</b> to the original installer's. Core i9-13900K, 32 GB RAM, NVMe, file cache flushed before each run. <a href="docs/BENCHMARKS.md">Full benchmarks</a></sub>
+<sub>Same repack, same PC: 5 archives, 4.7 GB → 8.1 GB, audio rebuilt by the repack's own tools. Core i9-13900K, 32 GB RAM, NVMe, file cache flushed before each run. <a href="#benchmarks">The numbers</a></sub>
 
 <p align="center"><img src="docs/screenshot.png" alt="arc-unpack after an install: what was installed, how long it took, and the verified file count" width="640"></p>
 
@@ -29,6 +31,23 @@
 From a terminal: `arc-unpack install "<repack folder>" "<game folder>"`.
 
 > Use it only on archives you have the right to extract.
+
+## Benchmarks
+
+| Same repack, same PC | Time | Speed-up |
+|---|---:|---:|
+| Original `setup.exe`, default (install, then verify files) | 4 min 47 s | 1.0× |
+| Original `setup.exe`, verify turned off | 3 min 20 s | 1.4× |
+| **arc-unpack**, default (checks the downloads, installs, verifies every file) | **1 min 24 s** | **3.4×** |
+| **arc-unpack**, archive check skipped (still verifies every file) | **1 min 15 s** | **3.8×** |
+
+- **Same result.** All 3,489 installed files are byte-identical to the original installer's.
+- **More checks in less time.** arc-unpack's slowest setting checks more than the original does, and is still 2.4× faster than the original with its verify step turned off.
+- **The whole install takes as long as its largest archive.** That archive needs 72 s. The other four archives, 28 tool runs and an MD5 of every file all happen inside the same 75 s.
+- **Close to the decompressor's limit.** The repack's own xtool needs about 62 s for that archive even with its input ready, so little is left to gain on this repack.
+- **A second repack, decoding only:** 17 min 26 s → 11 min 23 s (1.5×).
+
+Method, raw numbers and how to reproduce them: [Benchmarks](docs/BENCHMARKS.md).
 
 ## Why it's faster
 
