@@ -8,7 +8,7 @@
 
 # arc-unpacker
 
-**Installs FitGirl-style repacks 2.2× faster than their own installer across 28 tested repacks (up to 3.9×), with byte-identical results.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
+**Installs FitGirl-style repacks 2.2× faster than their own installer across 38 tested repacks (up to 3.9×), with byte-identical results.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
 
 **[→ Benchmarks: every game we tested, its own installer vs arc-unpack](docs/BENCHMARKS.md)**
 
