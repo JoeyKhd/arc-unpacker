@@ -3,7 +3,7 @@
 
 use crate::config::{Codec, Stage};
 use crate::pipe::{PipeWriter, pipe};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -149,6 +149,7 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                 rank += 1;
                 external(spec, stream, ctx)?
             }
+            Codec::FourByFour(inner) => four_by_four(inner.clone(), stream, ctx, label)?,
             Codec::Cls { dll, method, performance_cores } => {
                 let host = cls_host_for(dll, &ctx.host_dir)?;
                 let spec = ExtSpec {
@@ -167,6 +168,123 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
         };
     }
     Ok(stream)
+}
+
+/// FreeArc's 4x4 (C_4x4.cpp): an int32 version (0), then blocks of [original size int32 (-1 =
+/// stored as is), packed size int32, packed data], each compressed on its own with the inner
+/// method. Blocks are decoded through the inner chain several at a time and written in order;
+/// each must come out at its recorded size.
+fn four_by_four(inner: Vec<Stage>, input: Stream, ctx: &Ctx, label: String) -> Result<Stream> {
+    use std::collections::BTreeMap;
+    let (mut w, r) = pipe(8);
+    let ctx2 = ctx.clone();
+    ctx.reg.worker(label.clone(), move || {
+        let mut input = input;
+        let mut v = [0u8; 4];
+        if !read_full(&mut input, &mut v)? {
+            w.finish()?;
+            return Ok(());
+        }
+        ensure!(i32::from_le_bytes(v) == 0, "4x4: unknown format version {}", i32::from_le_bytes(v));
+        type Done = (Mutex<BTreeMap<u64, std::result::Result<Vec<u8>, String>>>, std::sync::Condvar);
+        let done: Arc<Done> = Arc::new((Mutex::new(BTreeMap::new()), std::sync::Condvar::new()));
+        let mut workers = Vec::new();
+        let mut jobs: Option<crossbeam_channel::Sender<(u64, i32, Vec<u8>)>> = None;
+        let (mut next_out, mut index, mut ahead) = (0u64, 0u64, 1usize);
+        // Writes finished blocks in order; with `wait`, until block `upto` has been written.
+        let emit = |next_out: &mut u64, upto: u64, w: &mut crate::pipe::PipeWriter| -> Result<()> {
+            loop {
+                let block = {
+                    let mut d = done.0.lock().unwrap();
+                    loop {
+                        if let Some(b) = d.remove(next_out) {
+                            break Some(b);
+                        }
+                        if *next_out >= upto {
+                            break None;
+                        }
+                        d = done.1.wait(d).unwrap();
+                    }
+                };
+                match block {
+                    Some(Ok(data)) => {
+                        w.write_all(&data).context("4x4 output")?;
+                        *next_out += 1;
+                    }
+                    Some(Err(e)) => bail!("4x4 block {next_out}: {e}"),
+                    None => return Ok(()),
+                }
+            }
+        };
+        let mut head = [0u8; 8];
+        while read_full(&mut input, &mut head)? {
+            let orig = i32::from_le_bytes(head[..4].try_into().unwrap());
+            let packed = i32::from_le_bytes(head[4..].try_into().unwrap());
+            ensure!(packed >= 0 && orig >= -1, "4x4: bad block header");
+            let mut data = vec![0u8; packed as usize];
+            ensure!(read_full(&mut input, &mut data)?, "4x4: stream cut short");
+            if jobs.is_none() {
+                // Blocks in flight: as many as cores, within about 1.5 GB of buffers.
+                let block = (orig.max(packed) as u64).max(1 << 20);
+                let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                ahead = ((3u64 << 29) / (2 * block)).clamp(1, threads.min(16) as u64) as usize;
+                let (tx, rx) = crossbeam_channel::bounded::<(u64, i32, Vec<u8>)>(ahead);
+                for _ in 0..ahead {
+                    let (rx, done, inner, ctx) = (rx.clone(), done.clone(), inner.clone(), ctx2.clone());
+                    workers.push(std::thread::spawn(move || {
+                        for (i, orig, data) in rx.iter() {
+                            let r = if orig == -1 {
+                                Ok(data)
+                            } else {
+                                decode_block(&inner, data, orig as usize, &ctx).map_err(|e| format!("{e:#}"))
+                            };
+                            done.0.lock().unwrap().insert(i, r);
+                            done.1.notify_all();
+                        }
+                    }));
+                }
+                jobs = Some(tx);
+            }
+            // Keep at most `ahead` blocks beyond the one being written.
+            if index >= next_out + 2 * ahead as u64 {
+                emit(&mut next_out, index - 2 * ahead as u64 + 1, &mut w)?;
+            }
+            jobs.as_ref().unwrap().send((index, orig, data)).map_err(|_| anyhow!("4x4 workers stopped"))?;
+            index += 1;
+            emit(&mut next_out, 0, &mut w)?;
+        }
+        drop(jobs);
+        let r = emit(&mut next_out, index, &mut w);
+        for h in workers {
+            let _ = h.join();
+        }
+        r?;
+        w.finish()?;
+        Ok(())
+    });
+    Ok(Box::new(r))
+}
+
+/// One 4x4 block through the inner chain; it must decode to exactly `size` bytes.
+fn decode_block(inner: &[Stage], data: Vec<u8>, size: usize, ctx: &Ctx) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(size);
+    let mut s = build(inner, Box::new(io::Cursor::new(data)), size as u64, ctx)?;
+    s.read_to_end(&mut out).context("decoding a 4x4 block")?;
+    ensure!(out.len() == size, "4x4 block decoded to {} bytes, expected {size}", out.len());
+    Ok(out)
+}
+
+/// Fills `buf`; false at a clean end of stream before the first byte.
+fn read_full(input: &mut Stream, buf: &mut [u8]) -> io::Result<bool> {
+    let mut got = 0;
+    while got < buf.len() {
+        match input.read(&mut buf[got..])? {
+            0 if got == 0 => return Ok(false),
+            0 => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stream cut short")),
+            n => got += n,
+        }
+    }
+    Ok(true)
 }
 
 /// Picks cls-host-x86.exe or cls-host-x64.exe to match the DLL's architecture.
@@ -359,10 +477,14 @@ impl Read for Tee {
 
 /// Benchmarking aids: a copy of a codec's input, so the codec can be replayed alone.
 /// `ARC_UNPACK_TEE_XTOOL=<file>`: xtool's input. `ARC_UNPACK_TEE_DIR=<dir>`: every codec's
-/// input, as `<dir>\<stage rank>-<label>-<id>.in` (rank 0 = the first decoder of the chain).
+/// input, as `<dir>\<stage rank>-<label>-<id>.in` (rank 0 = the first decoder of the chain);
+/// `ARC_UNPACK_TEE_ONLY=<text>` limits that to codecs whose label contains the text.
 fn tee_if_requested(spec: &ExtSpec, input: Stream) -> Result<Stream> {
     let is_xtool = Path::new(&spec.argv[0]).file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().starts_with("xtool"));
+    // `ARC_UNPACK_TEE_ONLY=<text>`: only codecs whose label contains it.
+    let wanted = std::env::var("ARC_UNPACK_TEE_ONLY").map_or(true, |only| spec.label.contains(only.as_str()));
     let path = match (std::env::var_os("ARC_UNPACK_TEE_DIR"), std::env::var_os("ARC_UNPACK_TEE_XTOOL")) {
+        (Some(_), _) if !wanted => return Ok(input),
         (Some(dir), _) => {
             let name: String = spec.label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
             PathBuf::from(dir).join(format!("{}-{}-{}-{}.in", spec.rank, name, std::process::id(), unique()))
@@ -458,16 +580,29 @@ fn xtool_split(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx
     crate::xtsplit::run(header, rest, workers, spawn, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
 }
 
+/// The extension written right after a placeholder in a command ("{output}.mp3" -> ".mp3").
+fn placeholder_ext(argv: &[String], ph: &str) -> String {
+    argv.iter()
+        .find_map(|a| a.find(ph).map(|i| a[i + ph.len()..].chars().take_while(|c| *c == '.' || c.is_ascii_alphanumeric()).collect()))
+        .unwrap_or_default()
+}
+
 /// Runs one codec process to completion, writing its output into `w`. Handles every combination
 /// of stdin/temp-file input and stdout/temp-file output.
 fn run_process(spec: &ExtSpec, mut input: Stream, w: &mut PipeWriter, ctx: &Ctx) -> Result<()> {
     let id = format!("{}-{}", std::process::id(), unique());
     let tin = ctx.temp_dir.join(format!("arcunp-{id}.in"));
     let tout = ctx.temp_dir.join(format!("arcunp-{id}.out"));
-    let _cleanup = Cleanup(vec![tin.clone(), tout.clone()]);
+    // "{input}.mpz" in the command: the file is the placeholder's path plus that extension.
+    let with_ext = |base: &Path, ph: &str| {
+        let ext = placeholder_ext(&spec.argv, ph);
+        PathBuf::from(format!("{}{ext}", base.display()))
+    };
+    let (in_file, out_file) = (with_ext(&tin, "{input}"), with_ext(&tout, "{output}"));
+    let _cleanup = Cleanup(vec![tin.clone(), tout.clone(), in_file.clone(), out_file.clone()]);
     let own_dir = own_workdir(spec, ctx)?;
     if spec.input_file {
-        let mut f = io::BufWriter::with_capacity(IO_BUF, std::fs::File::create(&tin).context("create input temp file")?);
+        let mut f = io::BufWriter::with_capacity(IO_BUF, std::fs::File::create(&in_file).context("create input temp file")?);
         io::copy(&mut input, &mut f).context("writing codec input temp file")?;
         f.flush()?;
     }
@@ -487,7 +622,7 @@ fn run_process(spec: &ExtSpec, mut input: Stream, w: &mut PipeWriter, ctx: &Ctx)
         return Err(exit_error(&spec.label, status, &sp.stderr_tail));
     }
     if spec.output_file {
-        let mut f = std::fs::File::open(&tout).context("codec did not create its output file")?;
+        let mut f = std::fs::File::open(&out_file).context("codec did not create its output file")?;
         io::copy(&mut f, w)?;
     }
     Ok(())
@@ -529,4 +664,44 @@ pub(crate) fn unique() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Codec, Config};
+
+    #[test]
+    fn four_by_four_resolves_its_inner_method() {
+        let cfg = Config::default();
+        let st = cfg.resolve("4x4:b16mb:t4:lzma:1mb").unwrap();
+        match &st[0].codec {
+            Codec::FourByFour(inner) => assert_eq!(inner[0].method.full(), "lzma:1mb"),
+            c => panic!("{c:?}"),
+        }
+        // Tornado has no decoder here: the block still goes to unarc.dll.
+        assert!(!cfg.missing("4x4:tor:16mb:c3").is_empty());
+        assert!(cfg.missing("4x4:b128mb:storing").is_empty());
+    }
+
+    #[test]
+    fn four_by_four_blocks_come_out_in_order() {
+        let mut data = 0i32.to_le_bytes().to_vec();
+        let mut expect = Vec::new();
+        for i in 0..40u8 {
+            let block: Vec<u8> = (0..(1000 + i as usize * 37)).map(|j| (j as u8).wrapping_mul(i)).collect();
+            // Every third block stored as is (original size -1), the rest through the inner method.
+            let orig = if i % 3 == 0 { -1 } else { block.len() as i32 };
+            data.extend_from_slice(&orig.to_le_bytes());
+            data.extend_from_slice(&(block.len() as i32).to_le_bytes());
+            data.extend_from_slice(&block);
+            expect.extend_from_slice(&block);
+        }
+        let stages = Config::default().resolve("4x4:b1mb:storing").unwrap();
+        let ctx = Ctx { temp_dir: std::env::temp_dir(), host_dir: std::env::temp_dir(), tune: false, reg: Registry::default() };
+        let mut out = Vec::new();
+        build(&stages, Box::new(io::Cursor::new(data)), expect.len() as u64, &ctx).unwrap().read_to_end(&mut out).unwrap();
+        assert!(ctx.reg.join().is_empty());
+        assert_eq!(out, expect);
+    }
 }

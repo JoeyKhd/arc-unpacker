@@ -70,7 +70,8 @@ The engine for one archive job:
 | External program | `arc.ini` / `[methods.x] cmd = …` | Child process, piped or through temp files |
 | CLS DLL | `cls-<name>.dll` | `cls-host-x86/x64`, matched to the DLL's architecture |
 | Built-in | `storing`, `lzma` | In-process thread |
-| FreeArc built-in (`delta`, `dispack`, `4x4`, `tor`, …) | `unarc.dll` | Whole archive via `unarc-host-x86` |
+| FreeArc `4x4` | built in | Its blocks decoded several at a time through the inner method (`4x4:b16mb:mpz`, `4x4:b128mb:mpzz`) |
+| Other FreeArc built-ins (`delta`, `dispack`, `tor`, …) | `unarc.dll` | Whole archive via `unarc-host-x86`, in its own working folder |
 
 ## Runtimes
 
@@ -86,6 +87,7 @@ arc-unpack reads the same information: the runtime components a default install 
 
 ## Safety
 
+- **unarc.dll only where needed.** FreeArc's old unarc.dll handles archives that need its built-in codecs. On Cities: Skylines' bonus content it corrupted a PDF in more than half the runs, even alone, while arc-unpack's own engine decoded the same block correctly every time; that archive only went to unarc.dll for its `4x4` block, which arc-unpack now decodes itself. Each unarc.dll job runs in its own working folder (hard links to the codec folder), because some codecs keep fixed-name temp files where they run.
 - **Untrusted archive paths.** `..`, absolute paths, drive letters, alternate data streams and device names are refused.
 - **No orphans.** Every codec process lives in a kill-on-exit job object.
 - **No stuck dialogs.** Codec error dialogs are closed automatically and their text is reported.

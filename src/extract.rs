@@ -397,7 +397,7 @@ fn method_is_heavy(chain: &str, block_size: u64, cfg: &Config) -> bool {
             return declared.map(|need| need > 1 << 30).unwrap_or(block_size > 2 << 30);
         }
         // Any other CLS codec has an unknown appetite: heavy when the block is big.
-        let cls = cfg.resolve(&m.full()).is_ok_and(|st| st.iter().any(|s| matches!(s.codec, crate::config::Codec::Cls { .. })));
+        let cls = cfg.resolve(&m.full()).is_ok_and(|st| Config::flatten(&st).iter().any(|s| matches!(s.codec, crate::config::Codec::Cls { .. })));
         cls && block_size > 1 << 30
     })
 }
@@ -409,9 +409,10 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
     for job in jobs {
         match job.kind {
             JobKind::Block(i) => {
-                for st in cfg.resolve(&job.archive.blocks[i].method).unwrap_or_default() {
-                    if let crate::config::Codec::Cls { dll, .. } = st.codec {
-                        dlls.insert(dll);
+                let stages = cfg.resolve(&job.archive.blocks[i].method).unwrap_or_default();
+                for st in Config::flatten(&stages) {
+                    if let crate::config::Codec::Cls { dll, .. } = &st.codec {
+                        dlls.insert(dll.clone());
                     }
                 }
             }
@@ -632,11 +633,53 @@ impl Drop for RemoveDirOnDrop {
     }
 }
 
+/// Mirrors `src` into `dst` with hard links (copies where linking fails), for a private working
+/// folder. Gives up on folders with more than a few thousand files (the shared one is used then).
+fn mirror_codecs(src: &Path, dst: &Path) -> Result<PathBuf> {
+    fn walk(src: &Path, dst: &Path, budget: &mut usize) -> Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            anyhow::ensure!(*budget > 0, "too many files to mirror");
+            *budget -= 1;
+            let to = dst.join(e.file_name());
+            if e.file_type()?.is_dir() {
+                walk(&e.path(), &to, budget)?;
+            } else if std::fs::hard_link(e.path(), &to).is_err() {
+                std::fs::copy(e.path(), &to)?;
+            }
+        }
+        Ok(())
+    }
+    let mut budget = 4000;
+    walk(src, dst, &mut budget)?;
+    Ok(dst.to_path_buf())
+}
+
 fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &Sink) -> Result<BlockResult> {
     use std::io::BufRead;
     let dll = cfg.unarc_dll().context("no unarc configured")?;
     let host = stage::helper_exe(&["unarc-host-x86.exe"], &opts.host_dir)?;
     let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    // A work folder per job: FreeArc's external codecs use fixed temp-file names in it, so two
+    // unarc jobs sharing one would overwrite each other's files.
+    let work = opts.temp_dir.join(format!("unarc-{}-{}", std::process::id(), stage::unique()));
+    std::fs::create_dir_all(&work).with_context(|| format!("create {}", work.display()))?;
+    let _work_cleanup = RemoveDirOnDrop(work.clone());
+    // unarc.dll starts its external codecs (rz, precomp, ...) in its current folder, and the CLS
+    // proxies it loads start their helpers (cls-srep_x64.exe, ...) in the proxy's own folder. Some
+    // keep fixed-name temp files there (the Razor rz-1.03.7-stdio build, precomp's ~temp files):
+    // two unarc jobs sharing the codec folder overwrite each other's (a CRC error in a file). So
+    // each job runs from a private copy of the codec folder made of hard links: unarc.dll, the
+    // proxies, their helpers and the codecs. CreateProcess finds unarc's external codecs (rzw.exe,
+    // xtool\...) relative to the current folder.
+    let (codecs, dll) = match mirror_codecs(&cfg.codec_dir(), &work.join("codecs")) {
+        Ok(private) => {
+            let dll = dll.file_name().map(|n| private.join(n)).filter(|p| p.is_file()).unwrap_or(dll);
+            (private, dll)
+        }
+        Err(_) => (cfg.codec_dir(), dll),
+    };
     let mut cmd = std::process::Command::new(host);
     cmd.arg(&dll).arg(if opts.out_dir.is_some() { "x" } else { "t" }).arg(abs(&archive.path));
     cmd.arg(if opts.overwrite { "-o+" } else { "-o-" });
@@ -646,14 +689,8 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     if let Some(out) = &opts.out_dir {
         cmd.arg(format!("-dp{}", abs(out).display()));
     }
-    // A work folder per job: FreeArc's external codecs use fixed temp-file names in it, so two
-    // unarc jobs sharing one would overwrite each other's files.
-    let work = opts.temp_dir.join(format!("unarc-{}-{}", std::process::id(), stage::unique()));
-    std::fs::create_dir_all(&work).with_context(|| format!("create {}", work.display()))?;
-    let _work_cleanup = RemoveDirOnDrop(work.clone());
     cmd.arg(format!("-w{}", abs(&work).display()));
-    // CreateProcess finds unarc's external codecs (rzw.exe, xtool\...) relative to the current dir.
-    cmd.current_dir(cfg.codec_dir());
+    cmd.current_dir(&codecs);
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     stage::apply_child_flags(&mut cmd, opts.tune);
     let child = cmd.spawn().context("start unarc-host-x86.exe")?;

@@ -61,11 +61,17 @@ pub fn translate_cmd(s: &Section) -> String {
     let stdin = s.unpackcmd.contains(" <stdin>");
     let stdout = s.unpackcmd.contains(" <stdout>");
     let mut cmd = s.unpackcmd.replacen(" <stdin>", "", 1).replacen(" <stdout>", "", 1);
+    // A file name's extension matters to some codecs (mpz.exe writes "$$arcdatafile$$.mp3"):
+    // anything but FreeArc's default ".tmp" is kept, and the temp file gets it too.
+    let placeholder = |file: &str, base: &str, ph: &str| match file.strip_prefix(base) {
+        Some(ext) if !ext.is_empty() && !ext.eq_ignore_ascii_case(".tmp") => format!("{ph}{ext}"),
+        _ => ph.to_string(),
+    };
     if !stdin {
-        cmd = cmd.replace(&s.packedfile, "{input}");
+        cmd = cmd.replace(&s.packedfile, &placeholder(&s.packedfile, "$$arcpackedfile$$", "{input}"));
     }
     if !stdout {
-        cmd = cmd.replace(&s.datafile, "{output}");
+        cmd = cmd.replace(&s.datafile, &placeholder(&s.datafile, "$$arcdatafile$$", "{output}"));
     }
     cmd
 }
@@ -157,6 +163,16 @@ mod tests {
         assert!(s[0].header);
         assert!(!s[2].header);
         assert_eq!(translate_cmd(&s[0]), "ccm123 d {input} {output}");
+        // Extensions other than .tmp stay: mpz.exe decides by them.
+        let mpz = Section {
+            name: "mpz".into(),
+            unpackcmd: "mpz.exe d $$arcpackedfile$$.mpz $$arcdatafile$$.mp3".into(),
+            packedfile: "$$arcpackedfile$$.mpz".into(),
+            datafile: "$$arcdatafile$$.mp3".into(),
+            default: String::new(),
+            header: false,
+        };
+        assert_eq!(translate_cmd(&mpz), "mpz.exe d {input}.mpz {output}.mp3");
         assert_eq!(translate_cmd(&s[2]), "srep -d {options}- -");
         assert_eq!(s[3].unpackcmd, "");
     }

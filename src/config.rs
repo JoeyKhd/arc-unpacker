@@ -65,6 +65,9 @@ pub enum Codec {
     Lzma(LzmaParams),
     External(External),
     Cls { dll: PathBuf, method: String, performance_cores: bool },
+    /// FreeArc's built-in 4x4: independent blocks, each compressed with the inner method (these
+    /// stages, in compression order). Decoded natively, blocks in parallel.
+    FourByFour(Vec<Stage>),
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +129,18 @@ impl Config {
         Ok(out)
     }
 
+    /// The stages of `stages` and those inside them (4x4's inner method).
+    pub fn flatten(stages: &[Stage]) -> Vec<&Stage> {
+        let mut out = Vec::new();
+        for s in stages {
+            out.push(s);
+            if let Codec::FourByFour(inner) = &s.codec {
+                out.extend(Self::flatten(inner));
+            }
+        }
+        out
+    }
+
     /// Lists methods in `chain` that have no usable decoder, with the reason.
     pub fn missing(&self, chain: &str) -> Vec<String> {
         parse_chain(chain)
@@ -167,6 +182,17 @@ impl Config {
             match m.name.as_str() {
                 "storing" => Codec::Storing,
                 "lzma" => Codec::Lzma(LzmaParams::from_method(&m)),
+                "4x4" => {
+                    // FreeArc (C_4x4.cpp parse_4x4): 4x4's own options start with a digit or have
+                    // one second ("b16mb", "t4", "16mb"); the first other one starts the inner method.
+                    let digit = |p: &String| p.as_bytes().first().is_some_and(u8::is_ascii_digit) || p.as_bytes().get(1).is_some_and(u8::is_ascii_digit);
+                    let at = m.params.iter().position(|p| !digit(p));
+                    let Some(at) = at else { bail!("4x4 without an inner method") };
+                    let inner = Method { name: m.params[at].clone(), params: m.params[at + 1..].to_vec() };
+                    let mut stages = Vec::new();
+                    self.resolve_into(inner, &mut stages, depth + 1)?;
+                    Codec::FourByFour(stages)
+                }
                 _ => bail!("no decoder (add [methods.{}] to the config or put cls-{}.dll in {})", m.name, m.name, dir.display()),
             }
         };
