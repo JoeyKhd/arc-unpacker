@@ -12,7 +12,7 @@
 
 **[→ Benchmarks: every game we tested, its own installer vs arc-unpack](docs/BENCHMARKS.md)**
 
-<p align="center"><img src="docs/screenshot.png" alt="arc-unpack after an install: what was installed, how long it took, and the verified file count" width="640"></p>
+<p align="center"><img src="docs/screenshot.png" alt="arc-unpack after an install: what was installed, how long it took, and the verified file count" width="720"></p>
 
 ## Use it
 
