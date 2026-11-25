@@ -1,4 +1,4 @@
-<p align="center"><img src="benchmarks.svg" alt="arc-unpack installs the tested repacks faster than their own installers; the table below has every game" width="100%"></p>
+<p align="center"><img src="benchmarks.svg" alt="arc-unpacker benchmarks: every tested repack, its own installer against arc-unpack" width="100%"></p>
 
 # Benchmarks
 
@@ -53,4 +53,4 @@
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
 
-Every run is kept in [`bench/ledger.jsonl`](../bench/ledger.jsonl), so a new version only needs measuring on the games it should change. To measure, run `.\bench\compare.ps1 -Repacks <folders> -SkipOriginal` from an administrator PowerShell, then `python bench\ledger.py add bench\results\*.json`. `python bench\ledger.py docs` then updates this table, the banner above and the README's headline, and `python bench\ledger.py table` shows every version side by side.
+Every run is kept in [`bench/ledger.jsonl`](../bench/ledger.jsonl), so a new version only needs measuring on the games it should change. To measure, run `.\bench\compare.ps1 -Repacks <folders> -SkipOriginal` from an administrator PowerShell, then `python bench\ledger.py add bench\results\*.json`. `python bench\ledger.py docs` then updates this table and the README's headline, and `python bench\ledger.py table` shows every version side by side.

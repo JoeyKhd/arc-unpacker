@@ -1,20 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="260" viewBox="0 0 1280 260" role="img" aria-label="arc-unpack installs 38 tested repacks 2.2× faster than their own installers: 51 min against 113 min in total, all byte-identical">
-  <rect width="1280" height="260" rx="20" fill="#0a0a0a"/>
-  <rect x="0.5" y="0.5" width="1279" height="259" rx="19.5" fill="none" stroke="#27272a"/>
-  <g transform="translate(52 24) scale(0.085)"><g stroke-width="8" stroke-linejoin="round" transform="translate(256 258) scale(1.14) translate(-253 -259)"><polygon points="118,188 216,138 314,188 216,238" fill="#ffffff" stroke="#ffffff"/><polygon points="104,202 206,254 206,380 104,328" fill="#a1a1aa" stroke="#a1a1aa"/><polygon points="226,256 376,180 376,210 226,286" fill="#ffffff" stroke="#ffffff"/><polygon points="226,302 402,212 402,242 226,332" fill="#22c55e" stroke="#22c55e"/><polygon points="226,348 360,280 360,310 226,378" fill="#ffffff" stroke="#ffffff"/></g></g>
-  <g font-family="'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif">
-    <text x="104" y="52" font-size="15" font-weight="600" fill="#a1a1aa" letter-spacing="1.5">ARC-UNPACKER BENCHMARKS</text>
-    <text x="62" y="170" font-size="104" font-weight="700" fill="#fafafa" letter-spacing="-3">2.2×</text>
-    <text x="308" y="132" font-size="24" fill="#a1a1aa">faster than the repacks'</text>
-    <text x="308" y="164" font-size="24" fill="#a1a1aa">own installers</text>
-    <text x="64" y="222" font-size="17" fill="#a1a1aa"><tspan fill="#fafafa" font-weight="600">38</tspan> repacks tested<tspan dx="14" fill="#52525b">·</tspan><tspan dx="14" fill="#fafafa" font-weight="600">all</tspan> byte-identical<tspan dx="14" fill="#52525b">·</tspan><tspan dx="14">up to </tspan><tspan fill="#fafafa" font-weight="600">3.9×</tspan></text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="220" viewBox="0 0 1280 220" role="img" aria-label="arc-unpacker benchmarks: every tested repack, its own installer against arc-unpack">
+  <defs>
+    <clipPath id="frame"><rect width="1280" height="220" rx="20"/></clipPath>
+    <linearGradient id="white-stream" gradientUnits="userSpaceOnUse" x1="860" y1="0" x2="1280" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.16"/>
+    </linearGradient>
+    <linearGradient id="green-stream" gradientUnits="userSpaceOnUse" x1="820" y1="0" x2="1280" y2="0">
+      <stop offset="0" stop-color="#22c55e" stop-opacity="0"/>
+      <stop offset="1" stop-color="#22c55e" stop-opacity="0.95"/>
+    </linearGradient>
+  </defs>
 
-    <text x="760" y="52" font-size="15" font-weight="600" fill="#a1a1aa" letter-spacing="1.5">TOTAL INSTALL TIME, 38 REPACKS</text>
-    <text x="760" y="96" font-size="16" fill="#a1a1aa">Their own installers</text>
-    <path d="M760,108 h396 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-396 z" fill="#71717a"/>
-    <text x="1174" y="125" font-size="17" font-weight="600" fill="#fafafa">113 min</text>
-    <text x="760" y="174" font-size="16" font-weight="600" fill="#fafafa">arc-unpack</text>
-    <path d="M760,186 h177 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-177 z" fill="#22c55e"/>
-    <text x="955" y="203" font-size="17" font-weight="600" fill="#fafafa">51 min</text>
+  <rect width="1280" height="220" rx="20" fill="#0a0a0a"/>
+
+  <!-- The mark's streams, continued across the banner -->
+  <g clip-path="url(#frame)">
+    <polygon points="860,192 1300,-32 1300,4 860,228" fill="url(#white-stream)"/>
+    <polygon points="820,264 1300,19 1300,55 820,300" fill="url(#green-stream)"/>
+    <polygon points="940,254 1300,70 1300,106 940,290" fill="url(#white-stream)"/>
+  </g>
+  <rect x="0.5" y="0.5" width="1279" height="219" rx="19.5" fill="none" stroke="#27272a"/>
+
+  <!-- Mark (docs/logo.svg) -->
+  <g transform="translate(44 12) scale(0.38)">
+    <g stroke-width="8" stroke-linejoin="round" transform="translate(256 258) scale(1.14) translate(-253 -259)">
+      <polygon points="118,188 216,138 314,188 216,238" fill="#ffffff" stroke="#ffffff"/>
+      <polygon points="104,202 206,254 206,380 104,328" fill="#a1a1aa" stroke="#a1a1aa"/>
+      <polygon points="226,256 376,180 376,210 226,286" fill="#ffffff" stroke="#ffffff"/>
+      <polygon points="226,302 402,212 402,242 226,332" fill="#22c55e" stroke="#22c55e"/>
+      <polygon points="226,348 360,280 360,310 226,378" fill="#ffffff" stroke="#ffffff"/>
+    </g>
+  </g>
+
+  <g font-family="'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <text x="236" y="104" font-size="52" font-weight="700" fill="#fafafa" letter-spacing="-1">Benchmarks</text>
+    <text x="238" y="144" font-size="23" fill="#a1a1aa">Every tested repack: its own installer against arc-unpack</text>
   </g>
 </svg>
