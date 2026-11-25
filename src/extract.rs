@@ -718,8 +718,9 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     }
     sink(Event::JobProgress { id, done: total });
     let mut problems = Vec::new();
-    if !errors.trim().is_empty() {
-        problems.push(format!("unarc.dll reported: {}", errors.trim()));
+    let reported = unarc_errors(&errors);
+    if !reported.is_empty() {
+        problems.push(format!("unarc.dll reported: {}", reported.join("; ")));
     }
     // unarc.dll wrote these files itself, so they weren't hashed on the way to disk: check the
     // listed ones now, while other archives are still decoding, instead of in a pass at the end.
@@ -729,6 +730,17 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     let files = archive.entries.iter().filter(|e| !e.is_dir).count() as u64;
     let codecs = vec![CodecCpu { label: "unarc.dll".into(), cpu_secs: cpu, wall_secs: wall }];
     Ok(BlockResult { files_ok: files, files_unverified: 0, problems, codecs })
+}
+
+/// The errors unarc.dll itself reported. External codecs it runs (bcm, rz, ...) share the
+/// helper's stderr and print progress there ("Decompressing $$arcpackedfile$$.tmp", "CRC = ...");
+/// that chatter isn't an error when unarc finished successfully.
+fn unarc_errors(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("unarc error") || l.starts_with("unarc-host:"))
+        .collect()
 }
 
 fn codec_report(reg: &Registry) -> Vec<CodecCpu> {
@@ -973,6 +985,14 @@ pub fn human(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codec_chatter_is_not_an_unarc_error() {
+        let bcm = "Decompressing $$arcpackedfile$$.tmp:\n518979242 -> 519055360 in 11.2s\nCRC = 3f1c0a9e\n";
+        assert!(unarc_errors(bcm).is_empty());
+        let both = format!("{bcm}unarc error -2: CRC error in data\n");
+        assert_eq!(unarc_errors(&both), vec!["unarc error -2: CRC error in data"]);
+    }
 
     #[test]
     fn heavy_is_decided_by_codec() {
