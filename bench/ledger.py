@@ -206,9 +206,10 @@ def fmt_time(s):
     return f"{s // 60} min {s % 60:02d} s" if s >= 60 else f"{s} s"
 
 
-def cmd_doc_table(rows, names):
-    """The table in docs/BENCHMARKS.md: one row per repack, fastest gain first, with the
-    arc-unpack version each row was measured with (only re-measured repacks change)."""
+def doc_rows(rows, names):
+    """One row per repack, fastest gain first: (speed-up, name, packed bytes, original seconds,
+    arc-unpack seconds, arc-unpack version, identical to the original), from the newest
+    arc-unpack version each repack was measured with (only re-measured repacks change)."""
     out = []
     for rid in {r["repack"] for r in rows}:
         mine = [r for r in rows if r["repack"] == rid]
@@ -217,26 +218,115 @@ def cmd_doc_table(rows, names):
         if not orig or not vs:
             continue
         v = max(vs, key=version_key)
-        arc = [r["seconds"] for r in mine if r["tool"] == "arc-unpack" and r["version"] == v and r.get("ok")]
-        o, a = statistics.median(orig), statistics.median(arc)
-        out.append((o / a, names.get(rid) or rid[:12], mine[0]["packed_bytes"], o, a, v))
+        runs = [r for r in mine if r["tool"] == "arc-unpack" and r["version"] == v and r.get("ok")]
+        o, a = statistics.median(orig), statistics.median([r["seconds"] for r in runs])
+        same = all(r.get("identical_to_original") for r in runs)
+        out.append((o / a, names.get(rid) or rid[:12], mine[0]["packed_bytes"], o, a, v, same))
     out.sort(key=lambda x: (-round(x[0], 1), x[1].lower()))
-    print("| Game | Download | Original installer | arc-unpack | Faster | Version |")
-    print("|---|---:|---:|---:|---:|---|")
-    for speed, name, packed, o, a, v in out:
-        print(f"| {name} | {packed / 1e9:.1f} GB | {fmt_time(o)} | {fmt_time(a)} | **{speed:.1f}×** | {v} |")
+    return out
+
+
+def doc_table(out):
+    """The table in docs/BENCHMARKS.md."""
+    lines = ["| Game | Download | Original installer | arc-unpack | Faster | Version |", "|---|---:|---:|---:|---:|---|"]
+    for speed, name, packed, o, a, v, _ in out:
+        lines.append(f"| {name} | {packed / 1e9:.1f} GB | {fmt_time(o)} | {fmt_time(a)} | **{speed:.1f}×** | {v} |")
     so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
-    print(f"| **All {len(out)}** | | **{fmt_time(so)}** | **{fmt_time(sa)}** | **{so / sa:.1f}×** | |")
+    lines.append(f"| **All {len(out)}** | | **{fmt_time(so)}** | **{fmt_time(sa)}** | **{so / sa:.1f}×** | |")
+    return "\n".join(lines)
+
+
+# The mark of docs/logo.svg (without its tile), for banners.
+MARK = (
+    '<g stroke-width="8" stroke-linejoin="round" transform="translate(256 258) scale(1.14) translate(-253 -259)">'
+    '<polygon points="118,188 216,138 314,188 216,238" fill="#ffffff" stroke="#ffffff"/>'
+    '<polygon points="104,202 206,254 206,380 104,328" fill="#a1a1aa" stroke="#a1a1aa"/>'
+    '<polygon points="226,256 376,180 376,210 226,286" fill="#ffffff" stroke="#ffffff"/>'
+    '<polygon points="226,302 402,212 402,242 226,332" fill="#22c55e" stroke="#22c55e"/>'
+    '<polygon points="226,348 360,280 360,310 226,378" fill="#ffffff" stroke="#ffffff"/></g>'
+)
+
+
+def banner_svg(out):
+    """docs/benchmarks.svg: the overall speed-up as the one big figure, three supporting
+    figures, and total install time as two bars (the comparison in grey, arc-unpack in the
+    accent colour, both labelled; the full data is the table under the banner)."""
+    n = len(out)
+    so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
+    hero = f"{so / sa:.1f}×"
+    best = max(x[0] for x in out)
+    same = sum(1 for x in out if x[6])
+    identical = "all byte-identical" if same == n else f"{same} of {n} byte-identical"
+    minutes = lambda sec: f"{round(sec / 60)} min"
+    x0, full, thick = 760, 400, 22
+    wa = max(8, round(full * sa / so))
+    # A bar from the baseline x0: square there, 4px rounded at its end.
+    bar = lambda y, w, fill: (f'<path d="M{x0},{y} h{w - 4} a4,4 0 0 1 4,4 v{thick - 8} a4,4 0 0 1 -4,4 h{4 - w} z" fill="{fill}"/>')
+    hero_w = 104 * (0.56 * sum(c.isdigit() for c in hero) + 0.27 * hero.count(".") + 0.69) + 28
+    tx = 64 + round(hero_w)
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="260" viewBox="0 0 1280 260" role="img" aria-label="arc-unpack installs {n} tested repacks {hero} faster than their own installers: {minutes(sa)} against {minutes(so)} in total, {identical}">
+  <rect width="1280" height="260" rx="20" fill="#0a0a0a"/>
+  <rect x="0.5" y="0.5" width="1279" height="259" rx="19.5" fill="none" stroke="#27272a"/>
+  <g transform="translate(52 24) scale(0.085)">{MARK}</g>
+  <g font-family="'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <text x="104" y="52" font-size="15" font-weight="600" fill="#a1a1aa" letter-spacing="1.5">ARC-UNPACKER BENCHMARKS</text>
+    <text x="62" y="170" font-size="104" font-weight="700" fill="#fafafa" letter-spacing="-3">{hero}</text>
+    <text x="{tx}" y="132" font-size="24" fill="#a1a1aa">faster than the repacks'</text>
+    <text x="{tx}" y="164" font-size="24" fill="#a1a1aa">own installers</text>
+    <text x="64" y="222" font-size="17" fill="#a1a1aa"><tspan fill="#fafafa" font-weight="600">{n}</tspan> repacks tested<tspan dx="14" fill="#52525b">·</tspan><tspan dx="14" fill="#fafafa" font-weight="600">{identical.split(" ", 1)[0] if same == n else same}</tspan> {identical.split(" ", 1)[1] if same == n else f"of {n} byte-identical"}<tspan dx="14" fill="#52525b">·</tspan><tspan dx="14">up to </tspan><tspan fill="#fafafa" font-weight="600">{best:.1f}×</tspan></text>
+
+    <text x="{x0}" y="52" font-size="15" font-weight="600" fill="#a1a1aa" letter-spacing="1.5">TOTAL INSTALL TIME, {n} REPACKS</text>
+    <text x="{x0}" y="96" font-size="16" fill="#a1a1aa">Their own installers</text>
+    {bar(108, full, "#71717a")}
+    <text x="{x0 + full + 14}" y="125" font-size="17" font-weight="600" fill="#fafafa">{minutes(so)}</text>
+    <text x="{x0}" y="174" font-size="16" font-weight="600" fill="#fafafa">arc-unpack</text>
+    {bar(186, wa, "#22c55e")}
+    <text x="{x0 + wa + 14}" y="203" font-size="17" font-weight="600" fill="#fafafa">{minutes(sa)}</text>
+  </g>
+</svg>
+"""
+
+
+def cmd_docs(args):
+    """Brings docs/BENCHMARKS.md (table, counts), docs/benchmarks.svg and the README headline up
+    to date with the ledger."""
+    out = doc_rows(doc_ledger(), load_names())
+    n = len(out)
+    so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
+    overall, best = f"{so / sa:.1f}", f"{max(x[0] for x in out):.1f}"
+    repo = LEDGER.parent.parent
+    doc = repo / "docs" / "BENCHMARKS.md"
+    s = doc.read_text(encoding="utf-8")
+    start = s.index("| Game |")
+    end = s.index("\n\n", start)
+    s = s[:start] + doc_table(out) + s[end:]
+    s = re.sub(r"^\d+ FitGirl repacks, each installed", f"{n} FitGirl repacks, each installed", s, count=1, flags=re.M)
+    s = re.sub(r"all \d+ installs were byte-identical", f"all {n} installs were byte-identical", s)
+    doc.write_text(s, encoding="utf-8", newline="\n")
+    (repo / "docs" / "benchmarks.svg").write_text(banner_svg(out), encoding="utf-8", newline="\n")
+    readme = repo / "README.md"
+    r = readme.read_text(encoding="utf-8")
+    r = re.sub(r"Installs FitGirl-style repacks [\d.]+× faster than their own installer across \d+ tested repacks \(up to [\d.]+×\)",
+               f"Installs FitGirl-style repacks {overall}× faster than their own installer across {n} tested repacks (up to {best}×)", r, count=1)
+    r = re.sub(r"\*\*Tested end to end\*\* on \d+ repacks", f"**Tested end to end** on {n} repacks", r, count=1)
+    readme.write_text(r, encoding="utf-8", newline="\n")
+    print(f"{n} repacks, {overall}× overall, up to {best}×")
+
+
+def doc_ledger():
+    """The default-settings runs of the machine with the most repacks."""
+    ledger = [r for r in load() if r.get("settings") == "default"]
+    machines = {}
+    for r in ledger:
+        machines.setdefault(r["machine"], set()).add(r["repack"])
+    machine = max(machines, key=lambda m: len(machines[m]))
+    return [r for r in ledger if r["machine"] == machine]
 
 
 def cmd_table(args):
     ledger = [r for r in load() if r.get("settings") == "default"]
     if args.doc:
-        machines = {}
-        for r in ledger:
-            machines.setdefault(r["machine"], set()).add(r["repack"])
-        machine = max(machines, key=lambda m: len(machines[m]))
-        cmd_doc_table([r for r in ledger if r["machine"] == machine], load_names())
+        print(doc_table(doc_rows(doc_ledger(), load_names())))
         return
     names = load_names() if args.names else {}
     label = lambda rid: names.get(rid) or ("repack " + rid.replace("md5list:", "")[:8])
@@ -312,10 +402,11 @@ def main():
     t = sub.add_parser("table", help="print the comparison tables")
     t.add_argument("--names", action="store_true", help="show the game names kept in names.local.json")
     t.add_argument("--doc", action="store_true", help="print the table for docs/BENCHMARKS.md (names, newest version per game)")
+    sub.add_parser("docs", help="update docs/BENCHMARKS.md, docs/benchmarks.svg and the README headline from the ledger")
     i = sub.add_parser("id", help="print a repack's IDs")
     i.add_argument("folder")
     args = p.parse_args()
-    {"add": cmd_add, "table": cmd_table, "id": cmd_id}[args.cmd](args)
+    {"add": cmd_add, "table": cmd_table, "docs": cmd_docs, "id": cmd_id}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="arc-unpacker">
+  <!-- A block whose right side leaves as parallel streams. -->
+  <rect width="512" height="512" rx="116" fill="#0a0a0a"/>
+  <g stroke-width="8" stroke-linejoin="round" transform="translate(256 258) scale(1.14) translate(-253 -259)">
+    <polygon points="118,188 216,138 314,188 216,238" fill="#ffffff" stroke="#ffffff"/>
+    <polygon points="104,202 206,254 206,380 104,328" fill="#a1a1aa" stroke="#a1a1aa"/>
+    <polygon points="226,256 376,180 376,210 226,286" fill="#ffffff" stroke="#ffffff"/>
+    <polygon points="226,302 402,212 402,242 226,332" fill="#22c55e" stroke="#22c55e"/>
+    <polygon points="226,348 360,280 360,310 226,378" fill="#ffffff" stroke="#ffffff"/>
+  </g>
+</svg>

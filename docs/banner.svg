@@ -1,70 +1,48 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="arc-unpacker: fast, parallel installer for FreeArc-based repacks">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0b1020"/>
-      <stop offset="1" stop-color="#18203a"/>
+    <clipPath id="frame"><rect width="1280" height="320" rx="20"/></clipPath>
+    <linearGradient id="white-stream" gradientUnits="userSpaceOnUse" x1="820" y1="0" x2="1280" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.16"/>
     </linearGradient>
-    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fbbf24"/>
-      <stop offset="1" stop-color="#f97316"/>
+    <linearGradient id="green-stream" gradientUnits="userSpaceOnUse" x1="780" y1="0" x2="1280" y2="0">
+      <stop offset="0" stop-color="#22c55e" stop-opacity="0"/>
+      <stop offset="1" stop-color="#22c55e" stop-opacity="0.95"/>
     </linearGradient>
-    <linearGradient id="fill" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#22d3ee"/>
-      <stop offset="1" stop-color="#34d399"/>
-    </linearGradient>
-    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
-      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
-    </pattern>
-    <radialGradient id="glow" cx="0.82" cy="0.45" r="0.45">
-      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.16"/>
-      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
-    </radialGradient>
   </defs>
 
-  <rect width="1280" height="320" rx="20" fill="url(#bg)"/>
-  <rect width="1280" height="320" rx="20" fill="url(#grid)"/>
-  <rect width="1280" height="320" rx="20" fill="url(#glow)"/>
+  <rect width="1280" height="320" rx="20" fill="#0a0a0a"/>
 
-  <!-- Mark: an archive opening into parallel streams -->
-  <g transform="translate(72 96)">
-    <rect width="96" height="96" rx="22" fill="url(#mark)"/>
-    <rect x="18" y="24" width="44" height="10" rx="5" fill="#ffffff"/>
-    <rect x="18" y="43" width="60" height="10" rx="5" fill="#ffffff" fill-opacity="0.92"/>
-    <rect x="18" y="62" width="34" height="10" rx="5" fill="#ffffff" fill-opacity="0.84"/>
+  <!-- The mark's streams, continued across the banner -->
+  <g clip-path="url(#frame)">
+    <polygon points="820,262 1300,17 1300,61 820,306" fill="url(#white-stream)"/>
+    <polygon points="780,346 1300,81 1300,125 780,390" fill="url(#green-stream)"/>
+    <polygon points="900,349 1300,145 1300,189 900,393" fill="url(#white-stream)"/>
+  </g>
+  <rect x="0.5" y="0.5" width="1279" height="319" rx="19.5" fill="none" stroke="#27272a"/>
+
+  <!-- Mark: a block whose right side leaves as parallel streams (docs/logo.svg) -->
+  <g transform="translate(29 31) scale(0.5)">
+    <g stroke-width="8" stroke-linejoin="round" transform="translate(256 258) scale(1.14) translate(-253 -259)">
+      <polygon points="118,188 216,138 314,188 216,238" fill="#ffffff" stroke="#ffffff"/>
+      <polygon points="104,202 206,254 206,380 104,328" fill="#a1a1aa" stroke="#a1a1aa"/>
+      <polygon points="226,256 376,180 376,210 226,286" fill="#ffffff" stroke="#ffffff"/>
+      <polygon points="226,302 402,212 402,242 226,332" fill="#22c55e" stroke="#22c55e"/>
+      <polygon points="226,348 360,280 360,310 226,378" fill="#ffffff" stroke="#ffffff"/>
+    </g>
   </g>
 
   <g font-family="'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif">
-    <text x="196" y="146" font-size="62" font-weight="800" fill="#ffffff" letter-spacing="-1">arc-unpacker</text>
-    <text x="198" y="190" font-size="24" fill="#a9b3d1">Fast, parallel installer for FreeArc-based repacks</text>
+    <text x="280" y="148" font-size="64" font-weight="700" fill="#fafafa" letter-spacing="-1.5">arc-unpacker</text>
+    <text x="282" y="192" font-size="25" fill="#a1a1aa">Fast, parallel installer for FreeArc-based repacks</text>
 
-    <g font-size="15" font-weight="600" fill="#cbd5f5">
-      <rect x="198" y="214" width="66" height="30" rx="15" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
-      <text x="231" y="234" text-anchor="middle">Rust</text>
-      <rect x="274" y="214" width="128" height="30" rx="15" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
-      <text x="338" y="234" text-anchor="middle">Windows x64</text>
-      <rect x="412" y="214" width="150" height="30" rx="15" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.18"/>
-      <text x="487" y="234" text-anchor="middle">One-click GUI</text>
-    </g>
-
-    <!-- Every codec stage runs at once -->
-    <g transform="translate(800 78)" font-size="15" fill="#8e9ac0">
-      <text x="0" y="17">lzma</text>
-      <rect x="84" y="4" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
-      <rect x="84" y="4" width="262" height="16" rx="8" fill="url(#fill)"/>
-
-      <text x="0" y="59">srep</text>
-      <rect x="84" y="46" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
-      <rect x="84" y="46" width="214" height="16" rx="8" fill="url(#fill)"/>
-
-      <text x="0" y="101">xtool</text>
-      <rect x="84" y="88" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
-      <rect x="84" y="88" width="168" height="16" rx="8" fill="url(#fill)"/>
-
-      <text x="0" y="143">files</text>
-      <rect x="84" y="130" width="320" height="16" rx="8" fill="#ffffff" fill-opacity="0.07"/>
-      <rect x="84" y="130" width="126" height="16" rx="8" fill="url(#fill)"/>
-
-      <text x="84" y="184" font-size="14" fill="#6f7aa0" letter-spacing="0.5">every stage runs at once</text>
+    <g font-size="15" font-weight="600" fill="#d4d4d8">
+      <rect x="282" y="218" width="188" height="32" rx="16" fill="none" stroke="#3f3f46"/>
+      <text x="376" y="239" text-anchor="middle">Byte-identical installs</text>
+      <rect x="482" y="218" width="158" height="32" rx="16" fill="none" stroke="#3f3f46"/>
+      <text x="561" y="239" text-anchor="middle">Checks every file</text>
+      <rect x="652" y="218" width="126" height="32" rx="16" fill="none" stroke="#3f3f46"/>
+      <text x="715" y="239" text-anchor="middle">Windows x64</text>
     </g>
   </g>
 </svg>
