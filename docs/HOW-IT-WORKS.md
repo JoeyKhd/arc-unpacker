@@ -15,6 +15,18 @@ The script runs under rules:
 - It can only write and delete inside the game folder and its own temporary folder.
 - The repack folder is read-only to it.
 - It can only start programs from those folders, plus `cmd.exe`.
+- It never starts the uninstaller. FitGirl's scripts run it to clean up after a failed step, and in a game folder made by the original installer that would remove the whole game.
+
+## Optional parts
+
+FitGirl's scripts extract every archive that is in the repack folder; the components only decide a few small files. arc-unpack decides per archive instead:
+
+- **A part is an archive plus the steps after it,** up to the next repack archive: those steps process what it extracted. Leaving an archive out leaves its steps out too, including any file moves or deletes the script makes in the game folder meanwhile. Changes to the installer's own temporary files (codec settings) still happen, since later parts need them.
+- **Unticked parts are left out.**
+- **Untick the base game to add parts to an installed game.** The chosen folder must have this repack's game installed, by arc-unpack or by the original installer: every file on the repack's list must be there, and the game's own copy of the list must match (or, if `_Redist` was deleted, a few files are checked by MD5). Only the ticked parts' archives are needed; the main `.bin` files can be gone.
+- **Adding a part** runs only that part's steps, adds its file list (`*.addon`) to the game's `_Redist\fitgirl.md5` the way the installer does, and checks the part's files against it. Game files a part replaces (a language pack, say) are moved to `_arc-unpack-backup\<part>` first.
+
+From a terminal, list the parts to add without the base game's component: `arc-unpack install "<repack>" "<game folder>" --components bonus`.
 
 Preview what an installer will do without changing anything:
 
@@ -83,7 +95,7 @@ arc-unpack extract  *.bin -c codecs.toml -o D:\Games\Title
 
 | Flag | Meaning |
 |---|---|
-| `--components a,b` | `install`: components to install (default: the installer's defaults plus downloaded optional parts). |
+| `--components a,b` | `install`: components to install (default: the installer's defaults plus downloaded optional parts). Optional parts left out aren't installed; without the base game's component, the parts are added to the game already in the target folder. |
 | `--no-verify` | `install`: skip the MD5 check of the downloaded archives. |
 | `--no-script` | `install`: don't run the installer's script; extract every archive into the target. |
 | `-j, --jobs N` | Jobs at once. Light jobs fill in around heavy ones. |

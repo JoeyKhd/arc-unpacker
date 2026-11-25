@@ -264,7 +264,9 @@ struct InstallArgs {
     #[arg(long)]
     no_script: bool,
     /// Components to install, comma-separated (like setup.exe's /COMPONENTS). Default: what a
-    /// default install selects, plus optional parts whose archives were downloaded.
+    /// default install selects, plus optional parts whose archives were downloaded. Optional
+    /// parts left out aren't installed. Without the base game's component, the listed parts are
+    /// added to the game already installed in TARGET.
     #[arg(long, value_delimiter = ',')]
     components: Option<Vec<String>>,
     /// Wait for Enter before exiting (used when relaunched in its own elevated window).

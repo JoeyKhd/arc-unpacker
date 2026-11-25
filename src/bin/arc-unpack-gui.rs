@@ -46,6 +46,8 @@ struct Flags {
     /// `--screenshot <file.png>`: save the window when it's ready (or, with --auto-install,
     /// `<file>-installing.png` mid-install and `<file>-done.png` at the end), then close.
     screenshot: Option<PathBuf>,
+    /// `--select a,b`: tick exactly these components once the repack is read.
+    select: Option<BTreeSet<String>>,
 }
 
 impl Flags {
@@ -57,6 +59,9 @@ impl Flags {
                 Some("--install-to") => f.target = args.next().map(|v| v.to_string_lossy().into_owned()),
                 Some("--auto-install") => f.auto_install = true,
                 Some("--screenshot") => f.screenshot = args.next().map(PathBuf::from),
+                Some("--select") => {
+                    f.select = args.next().map(|v| v.to_string_lossy().split(',').map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect())
+                }
                 _ => f.repack = f.repack.take().or_else(|| repack_dir_of(PathBuf::from(&a))),
             }
         }
@@ -122,6 +127,8 @@ struct Analysis {
     script: Option<Arc<Script>>,
     scan: Arc<Scan>,
     choices: Vec<Choice>,
+    /// The base game's components (unticking all of them = add parts to an installed game).
+    base: BTreeSet<String>,
     /// Why the script can't be used (then the archives are extracted directly).
     note: Option<String>,
 }
@@ -129,7 +136,7 @@ struct Analysis {
 fn analyze(repack: PathBuf) -> Result<Analysis, String> {
     let scan = install::scan(&repack, None).map_err(|e| format!("{e:#}"))?;
     let setup_exe = scan.setup.clone();
-    let mut a = Analysis { repack: repack.clone(), setup_exe: setup_exe.clone(), inno: None, script: None, scan: Arc::new(scan), choices: Vec::new(), note: None };
+    let mut a = Analysis { repack: repack.clone(), setup_exe: setup_exe.clone(), inno: None, script: None, scan: Arc::new(scan), choices: Vec::new(), base: BTreeSet::new(), note: None };
     let Some(exe) = setup_exe else {
         a.note = Some("No setup.exe here, so its install steps can't be run.".into());
         return Ok(a);
@@ -158,8 +165,25 @@ fn analyze(repack: PathBuf) -> Result<Analysis, String> {
         }
         Err(e) => a.note = Some(format!("The installer's own steps can't be run ({e:#}); the archives will be extracted directly.")),
     }
+    a.base = ss::base_components(&inno);
     a.inno = Some(inno);
     Ok(a)
+}
+
+/// "1 step" / "35 steps".
+fn steps(n: usize) -> String {
+    if n == 1 { "1 step".into() } else { format!("{n} steps") }
+}
+
+/// Whether this selection only adds parts to an installed game (no base-game component ticked).
+fn adding_parts(a: &Analysis, selected: &BTreeSet<String>) -> bool {
+    !a.base.is_empty() && a.base.is_disjoint(selected)
+}
+
+/// The ticked optional parts, by their labels ("Bonus Soundtrack, Artbook").
+fn part_labels(a: &Analysis, selected: &BTreeSet<String>) -> String {
+    let labels: Vec<&str> = a.choices.iter().filter(|c| !a.base.contains(&c.name) && selected.contains(&c.name)).map(|c| c.label.as_str()).collect();
+    if labels.is_empty() { "nothing".into() } else { labels.join(", ") }
 }
 
 /// What the current selection needs from the folder and the disk.
@@ -169,9 +193,15 @@ struct Check {
     need: u64,
     steps: usize,
     error: Option<String>,
+    /// Archives this selection takes.
+    parts: ss::Parts,
+    /// Repack archives the selection extracts.
+    archives: usize,
+    /// Adding parts: the game installed in the chosen folder, or why it isn't usable.
+    installed: Option<Result<install::InstalledGame, String>>,
 }
 
-fn check(a: &Analysis, selected: &BTreeSet<String>) -> Check {
+fn check(a: &Analysis, selected: &BTreeSet<String>, target: &str) -> Check {
     let (Some(inno), Some(script), Some(exe)) = (&a.inno, &a.script, &a.setup_exe) else {
         let (need, _) = install::needed_size(&a.scan, None);
         return Check { need, ..Default::default() };
@@ -180,7 +210,9 @@ fn check(a: &Analysis, selected: &BTreeSet<String>) -> Check {
         Ok(plan) => {
             let pf = ss::preflight(&plan, &a.repack);
             let (need, _) = install::needed_size(&a.scan, Some(&pf));
-            Check { missing: pf.missing, need, steps: plan.steps.len(), error: plan.error }
+            let installed = plan.parts.only_optional.then(|| install::find_installed(inno, Path::new(target.trim())).map_err(|e| format!("{e:#}")));
+            let archives = pf.needed.len();
+            Check { missing: pf.missing, need, steps: plan.steps.len(), error: plan.error, parts: plan.parts, archives, installed }
         }
         Err(e) => Check { error: Some(format!("{e:#}")), ..Default::default() },
     }
@@ -251,8 +283,12 @@ struct App {
     analyzing: Option<(String, Receiver<Result<Analysis, String>>)>,
     selected: BTreeSet<String>,
     check: Option<Check>,
-    checking: Option<(BTreeSet<String>, Receiver<Check>)>,
-    checked_for: Option<BTreeSet<String>>,
+    checking: Option<((BTreeSet<String>, String), Receiver<Check>)>,
+    checked_for: Option<(BTreeSet<String>, String)>,
+    /// `--select`: the parts to tick once the repack is read.
+    preset: Option<BTreeSet<String>>,
+    /// The parts being added to an installed game (for the result's title), if that's the run.
+    adding: Option<String>,
     /// When the running check started (its result is only dimmed if it takes a moment).
     check_started: Instant,
     limit_ram: bool,
@@ -285,6 +321,8 @@ impl App {
             check: None,
             checking: None,
             checked_for: None,
+            preset: flags.select,
+            adding: None,
             check_started: Instant::now(),
             limit_ram: false,
             skip_check: false,
@@ -355,32 +393,36 @@ impl App {
             self.analyzing = None;
             if !stale {
                 if let Ok(a) = &r {
-                    self.selected = a.choices.iter().filter(|c| c.fixed || c.default).map(|c| c.name.clone()).collect();
+                    self.selected = match &self.preset {
+                        Some(p) => p.clone(),
+                        None => a.choices.iter().filter(|c| c.fixed || c.default).map(|c| c.name.clone()).collect(),
+                    };
                 }
                 self.analysis = Some(r.map(Arc::new));
             }
         }
-        if let Some((sel, rx)) = &self.checking
+        let key = (self.selected.clone(), self.target.trim().to_string());
+        if let Some((for_key, rx)) = &self.checking
             && let Ok(c) = rx.try_recv()
         {
-            if *sel == self.selected {
+            if *for_key == key {
                 self.check = Some(c);
-                self.checked_for = Some(sel.clone());
+                self.checked_for = Some(for_key.clone());
             }
             self.checking = None;
         }
-        // Re-check what the selection needs whenever it changes.
+        // Re-check what the selection needs whenever it (or the game folder) changes.
         if let Some(Ok(a)) = &self.analysis
             && self.checking.is_none()
-            && self.checked_for.as_ref() != Some(&self.selected)
+            && self.checked_for.as_ref() != Some(&key)
         {
             let (tx, rx) = unbounded();
-            let (a, sel, c) = (a.clone(), self.selected.clone(), ctx.clone());
+            let (a, sel, target, c) = (a.clone(), key.0.clone(), key.1.clone(), ctx.clone());
             std::thread::spawn(move || {
-                let _ = tx.send(check(&a, &sel));
+                let _ = tx.send(check(&a, &sel, &target));
                 c.request_repaint();
             });
-            self.checking = Some((self.selected.clone(), rx));
+            self.checking = Some((key, rx));
             self.check_started = Instant::now();
         }
     }
@@ -405,6 +447,10 @@ impl App {
             repaint.request_repaint();
         });
         let script = matches!(&self.analysis, Some(Ok(a)) if a.script.is_some());
+        self.adding = match (&self.analysis, &self.check) {
+            (Some(Ok(a)), Some(c)) if c.parts.only_optional => Some(part_labels(a, &self.selected)),
+            _ => None,
+        };
         let opts = InstallOptions {
             repack_dir: PathBuf::from(self.repack.trim()),
             target_dir: PathBuf::from(self.target.trim()),
@@ -676,15 +722,25 @@ impl App {
         if !a.choices.is_empty() {
             ui.label(RichText::new("What to install").strong());
             let mut toggled: Option<(String, bool, bool)> = None;
+            let adding = adding_parts(&a, &self.selected);
+            let installed_parts = match &self.check {
+                Some(Check { installed: Some(Ok(g)), .. }) if adding => g.parts.clone(),
+                _ => BTreeSet::new(),
+            };
             for c in &a.choices {
                 ui.horizontal(|ui| {
-                    let mut on = c.fixed || self.selected.contains(&c.name);
-                    let resp = ui.add_enabled(!busy && !c.fixed, egui::Checkbox::new(&mut on, &c.label));
+                    let mut on = self.selected.contains(&c.name);
+                    let mut resp = ui.add_enabled(!busy, egui::Checkbox::new(&mut on, &c.label));
+                    if a.base.contains(&c.name) {
+                        resp = resp.on_hover_text("Untick to add only the parts below to a game that's already installed");
+                    }
                     if resp.changed() {
                         toggled = Some((c.name.clone(), on, c.exclusive));
                     }
-                    if c.fixed {
-                        ui.label(RichText::new("required").weak());
+                    if a.base.contains(&c.name) {
+                        ui.label(RichText::new(if adding { "not reinstalled: adding parts to the installed game" } else { "base game" }).weak());
+                    } else if installed_parts.contains(&c.name) {
+                        ui.label(RichText::new("already installed").weak());
                     } else if let Some(f) = &c.file {
                         ui.label(RichText::new(format!("downloaded · {f}")).weak());
                     }
@@ -730,7 +786,12 @@ impl App {
                     .map(|p| p.as_os_str().to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let fits = free.is_none_or(|f| f > c.need + (1 << 30));
-                if !c.missing.is_empty() {
+                let adding = c.parts.only_optional;
+                if let (true, Some(Err(e))) = (adding, &c.installed) {
+                    ui.colored_label(tint(BAD, ui), format!("{e}. Choose the folder the game is installed in, or tick the base game."));
+                } else if adding && c.archives == 0 {
+                    ui.colored_label(tint(WARN, ui), "Tick the parts to add to the installed game.");
+                } else if !c.missing.is_empty() {
                     let (s, it) = if c.missing.len() == 1 { ("", "it") } else { ("s", "them") };
                     ui.colored_label(
                         tint(BAD, ui),
@@ -744,7 +805,11 @@ impl App {
                         format!("Needs {}, but only {} is free on {drive}", human(c.need), human(free.unwrap_or(0))),
                     );
                 } else {
-                    let mut line = format!("All needed files are here · needs {}", human(c.need));
+                    let mut line = if adding {
+                        format!("Game found · adds {} · needs {}", part_labels(&a, &self.selected), human(c.need))
+                    } else {
+                        format!("All needed files are here · needs {}", human(c.need))
+                    };
                     if let Some(f) = free {
                         line.push_str(&format!(" · {} free on {drive}", human(f)));
                     }
@@ -778,7 +843,8 @@ impl App {
         let installed = matches!(&self.outcome, Some(Outcome::Done { report, .. }) if report.summary.problems.is_empty() && !report.summary.cancelled);
         if !busy && !installed {
             let can = ready && !self.target.trim().is_empty();
-            let button = egui::Button::new(RichText::new("Install").size(18.0).strong())
+            let adding = matches!(&self.check, Some(c) if c.parts.only_optional);
+            let button = egui::Button::new(RichText::new(if adding { "Add to installed game" } else { "Install" }).size(18.0).strong())
                 .fill(if can { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.bg_fill });
             let clicked = ui
                 .with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
@@ -792,7 +858,12 @@ impl App {
                 && c.steps > 0
                 && can
             {
-                ui.label(RichText::new(format!("Runs the installer's {} steps into {}", c.steps, self.target.trim())).weak());
+                let line = if c.parts.only_optional {
+                    format!("Runs {} in {}", steps(c.steps), self.target.trim())
+                } else {
+                    format!("Runs the installer's {} into {}", steps(c.steps), self.target.trim())
+                };
+                ui.label(RichText::new(line).weak());
             }
         }
     }
@@ -898,7 +969,7 @@ impl App {
                 let (title, color) = if s.cancelled {
                     ("Cancelled".to_string(), WARN)
                 } else if ok {
-                    ("Installed".to_string(), OK)
+                    (self.adding.as_ref().map(|p| format!("Added {p}")).unwrap_or_else(|| "Installed".to_string()), OK)
                 } else {
                     (format!("Finished with {} problem{}", s.problems.len(), if s.problems.len() == 1 { "" } else { "s" }), BAD)
                 };
@@ -917,6 +988,9 @@ impl App {
                 }
                 for p in &s.problems {
                     ui.colored_label(BAD, p);
+                }
+                for n in s.notes.iter().filter(|n| n.contains(install::BACKUP_DIR)) {
+                    ui.label(RichText::new(n).weak());
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {

@@ -87,12 +87,80 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
 /// Whether the repack folder has an optional/selective archive for this component, e.g.
 /// `bonus` -> `fg-optional-bonus-content.bin`, `voice\french` -> `fg-selective-french.bin`.
 fn downloaded_part(component: &str, repack_files: &[String]) -> bool {
+    repack_files.iter().any(|f| part_file_matches(component, f))
+}
+
+/// Whether `file` is the optional/selective archive of `component` (by its last name part).
+fn part_file_matches(component: &str, file: &str) -> bool {
     let leaf = component.rsplit('\\').next().unwrap_or(component).to_ascii_lowercase();
-    leaf.len() >= 3
-        && repack_files.iter().any(|f| {
-            let f = f.to_ascii_lowercase();
-            (f.contains("optional") || f.contains("selective")) && f.contains(&leaf)
-        })
+    leaf.len() >= 3 && is_optional_archive(file) && file.to_ascii_lowercase().contains(&leaf)
+}
+
+/// Inno Setup's uninstaller (`unins000.exe`, `unins001.exe`, ...).
+fn is_uninstaller(program: &str) -> bool {
+    let name = Path::new(program.trim_matches('"')).file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    name.strip_prefix("unins").and_then(|r| r.strip_suffix(".exe")).is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether a repack file is an optional part (FitGirl: `fg-optional-*.bin`, language packs
+/// `fg-selective-*.bin`) rather than part of the base game.
+pub fn is_optional_archive(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("optional") || n.contains("selective")
+}
+
+/// Which of a repack's archives an install takes. FitGirl's scripts extract every archive that
+/// is in the repack folder, so this is decided here: a normal install leaves out the optional
+/// parts the user unticked; adding parts to an installed game takes only the ticked parts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Parts {
+    /// Optional-part archives (lower-case file names) to leave out.
+    pub skip: BTreeSet<String>,
+    /// Add parts to a game that is already installed: leave out every archive that isn't an
+    /// optional part.
+    pub only_optional: bool,
+}
+
+impl Parts {
+    /// Whether the install leaves this repack archive out (with the steps that process it).
+    pub fn skips(&self, archive_name: &str) -> bool {
+        let n = archive_name.to_ascii_lowercase();
+        if is_optional_archive(&n) { self.skip.contains(&n) } else { self.only_optional }
+    }
+}
+
+/// The components that make up the base game: the installer's fixed ones (FitGirl's "Main game
+/// files"). Installers without a fixed component have no base game to leave out.
+pub fn base_components(setup: &Setup) -> BTreeSet<String> {
+    base_of(&setup.components)
+}
+
+fn base_of(components: &[crate::inno::Component]) -> BTreeSet<String> {
+    components
+        .iter()
+        .filter(|c| c.fixed && crate::install::english_or_neutral(&c.languages))
+        .map(|c| c.name.to_ascii_lowercase())
+        .collect()
+}
+
+/// The archives a selection takes: an optional part whose components are all unticked is left
+/// out; with no base-game component selected, only the selected parts are added, to a game
+/// that is already installed.
+pub fn parts_for(setup: &Setup, repack_files: &[String], selected: &BTreeSet<String>) -> Parts {
+    parts_of(&setup.components, repack_files, selected)
+}
+
+fn parts_of(components: &[crate::inno::Component], repack_files: &[String], selected: &BTreeSet<String>) -> Parts {
+    let base = base_of(components);
+    let mut skip = BTreeSet::new();
+    for f in repack_files.iter().filter(|f| is_optional_archive(f)) {
+        let owners: Vec<String> = components.iter().map(|c| c.name.to_ascii_lowercase()).filter(|n| part_file_matches(n, f)).collect();
+        // An archive no component claims is installed, as the installer would.
+        if !owners.is_empty() && owners.iter().all(|o| !selected.contains(o)) {
+            skip.insert(f.to_ascii_lowercase());
+        }
+    }
+    Parts { skip, only_optional: !base.is_empty() && base.is_disjoint(selected) }
 }
 
 /// Evaluates an Inno component expression ("a", "a\b", "a or not (b and c)").
@@ -150,6 +218,13 @@ pub struct InnoHost<'a> {
     pub writes: Vec<(usize, PathBuf)>,
     /// Component names the script asked about (IsComponentSelected), lowercase.
     pub queried: BTreeSet<String>,
+    /// Which repack archives to take (see `Parts`).
+    pub parts: Parts,
+    /// Inside a left-out part: from a skipped repack archive to the next repack archive, the
+    /// steps process the skipped archive's files, so they are left out too.
+    skipping: bool,
+    /// Steps left out this way, in order.
+    pub skipped: Vec<Step>,
 }
 
 impl<'a> InnoHost<'a> {
@@ -164,6 +239,9 @@ impl<'a> InnoHost<'a> {
             dry: false,
             writes: Vec::new(),
             queried: BTreeSet::new(),
+            parts: Parts::default(),
+            skipping: false,
+            skipped: Vec::new(),
         }
     }
 
@@ -246,6 +324,18 @@ impl<'a> InnoHost<'a> {
     }
 
     fn step(&mut self, step: Step) -> Result<bool> {
+        // Each repack archive starts a part: its extraction and the steps after it, up to the
+        // next repack archive, which process its files.
+        if let Step::Extract { archive, .. } = &step {
+            let src = normalize(&self.folders.src).unwrap_or_default();
+            if normalize(archive).is_some_and(|a| starts_with_ci(&a, &src)) {
+                self.skipping = archive.file_name().is_some_and(|n| self.parts.skips(&n.to_string_lossy()));
+            }
+        }
+        if self.skipping {
+            self.skipped.push(step);
+            return Ok(true);
+        }
         let ok = self.runner.run(&step)?;
         self.steps.push(step);
         Ok(ok)
@@ -255,6 +345,12 @@ impl<'a> InnoHost<'a> {
         // FitGirl's installers flush the system file cache to free RAM first: it only costs time.
         if Path::new(program).file_name().is_some_and(|n| n.eq_ignore_ascii_case("FlushFileCache.exe")) {
             return Ok(true);
+        }
+        // FitGirl's scripts run `{uninstallexe} /VERYSILENT` to clean up after a failed step. In
+        // a game folder the original installer made, that would remove the whole game.
+        if is_uninstaller(program) || args.split(['"', ' ', '&', '|']).any(is_uninstaller) {
+            self.refuse(format!("running the uninstaller {program} (the script's clean-up after a failure)"));
+            return Ok(false);
         }
         let Some(program) = self.runnable(program) else {
             self.refuse(format!("running {program} (outside the game, temp and repack folders)"));
@@ -326,9 +422,10 @@ impl Host for InnoHost<'_> {
         if key.starts_with("CLASS:") {
             return Ok(None);
         }
-        // Dry run: pretend file changes in the game folder worked (the temp folder is real).
+        // Dry run, or inside a left-out part: pretend file changes in the game folder worked
+        // (the temp folder is real: its codec settings still apply to later parts).
         const CHANGES: &[&str] = &["DELETEFILE", "DELTREE", "FORCEDIRECTORIES", "CREATEDIR", "REMOVEDIR", "RENAMEFILE", "FILECOPY"];
-        if self.dry && CHANGES.contains(&key) {
+        if (self.dry || self.skipping) && CHANGES.contains(&key) {
             let tmp = normalize(&self.folders.tmp).unwrap_or_default();
             let target = if key == "FILECOPY" { s(1) } else { s(0) };
             if !normalize(Path::new(&target)).is_some_and(|p| starts_with_ci(&p, &tmp)) {
@@ -697,6 +794,10 @@ pub struct Plan {
     /// The scratch `{tmp}` the plan ran with (deleted again); step paths inside it map to the
     /// real run's `{tmp}`.
     pub tmp: PathBuf,
+    /// Which repack archives the selection takes.
+    pub parts: Parts,
+    /// Steps left out with the archives the selection doesn't take.
+    pub skipped: Vec<Step>,
 }
 
 /// Runs the install script against a scratch temp folder with nothing extracted or run.
@@ -723,7 +824,9 @@ pub fn plan_with(
     let tmp = std::env::temp_dir().join(format!("arcunp-plan-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     fill_plan_tmp(setup, &tmp)?;
-    let selected = selected.unwrap_or_else(|| default_components(setup, &repack_files(repack)));
+    let files = repack_files(repack);
+    let selected = selected.unwrap_or_else(|| default_components(setup, &files));
+    let parts = parts_for(setup, &files, &selected);
     let components = setup
         .components
         .iter()
@@ -739,6 +842,7 @@ pub fn plan_with(
     let mut runner = PlanOnly;
     let mut host = InnoHost::new(folders, setup, selected, &mut runner);
     host.dry = true;
+    host.parts = parts.clone();
     let mut vm = Vm::new(script);
     let mut error = None;
     for step in [SS_INSTALL, SS_POST_INSTALL, SS_DONE] {
@@ -755,6 +859,8 @@ pub fn plan_with(
         messages: std::mem::take(&mut host.messages),
         error,
         tmp: tmp.clone(),
+        parts,
+        skipped: std::mem::take(&mut host.skipped),
     };
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(plan)
@@ -942,6 +1048,42 @@ mod tests {
         assert!(!downloaded_part("voice\\german", &files));
         assert!(!downloaded_part("text", &files), "main parts aren't 'downloaded optional parts'");
         assert!(!downloaded_part("fr", &files), "names this short would match too much");
+    }
+
+    fn component(name: &str, fixed: bool) -> crate::inno::Component {
+        crate::inno::Component { name: name.into(), description: String::new(), types: "full".into(), languages: String::new(), fixed, exclusive: false }
+    }
+
+    #[test]
+    fn parts_follow_the_selection() {
+        let comps = [component("text", true), component("bonus", false), component(r"voice\french", false), component("directx", false)];
+        let files: Vec<String> = ["fg-01.bin", "fg-optional-bonus-content.bin", "fg-selective-french.bin", "fg-optional-extra.bin"].iter().map(|s| s.to_string()).collect();
+        let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
+        // Everything ticked: nothing left out, a normal install.
+        let p = parts_of(&comps, &files, &sel(&["text", "bonus", r"voice\french"]));
+        assert_eq!(p, Parts::default());
+        // An unticked part's archive is left out; an archive no component claims stays in.
+        let p = parts_of(&comps, &files, &sel(&["text", r"voice\french"]));
+        assert_eq!(p.skip, sel(&["fg-optional-bonus-content.bin"]));
+        assert!(!p.only_optional);
+        assert!(p.skips("FG-OPTIONAL-BONUS-CONTENT.BIN") && !p.skips("fg-01.bin") && !p.skips("fg-optional-extra.bin"));
+        // Base game unticked: only the ticked parts are added; the base game's archives are left out.
+        let p = parts_of(&comps, &files, &sel(&["bonus"]));
+        assert!(p.only_optional);
+        assert!(p.skips("fg-01.bin") && !p.skips("fg-optional-bonus-content.bin") && p.skips("fg-selective-french.bin"));
+        // An installer without a fixed component has no base game to leave out.
+        let p = parts_of(&[component("text", false), component("bonus", false)], &files, &sel(&["bonus"]));
+        assert!(!p.only_optional);
+    }
+
+    #[test]
+    fn uninstaller_is_recognised() {
+        for yes in [r"C:\Games\X\unins000.exe", "unins001.exe", r#""C:\Games\X\UNINS000.EXE""#] {
+            assert!(is_uninstaller(yes), "{yes}");
+        }
+        for no in ["uninstall.exe", "unins.exe", "unins000.dat", "x2.exe", r"C:\Games\unins000\game.exe"] {
+            assert!(!is_uninstaller(no), "{no}");
+        }
     }
 
     #[cfg(windows)]

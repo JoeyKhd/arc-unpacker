@@ -269,8 +269,11 @@ pub fn prepare_codecs(setup: &Path, cache_dir: &Path, sink: &Sink) -> Result<Pat
 
 /// Checks the archives against the repack's MD5 list. Returns how many were fully checked
 /// (fewer if the rest of the check was skipped through `skip`).
-fn verify_md5(scan: &Scan, cancel: &AtomicBool, skip: &AtomicBool, sink: &Sink) -> Result<usize> {
-    let todo: Vec<&ScannedArchive> = scan.archives.iter().filter(|a| a.md5.is_some()).collect();
+/// Checks the downloaded archives against the repack's MD5 list: all of them, or with `only`,
+/// the ones the install uses (see `norm_path`).
+fn verify_md5(scan: &Scan, only: Option<&HashSet<String>>, cancel: &AtomicBool, skip: &AtomicBool, sink: &Sink) -> Result<usize> {
+    let todo: Vec<&ScannedArchive> =
+        scan.archives.iter().filter(|a| a.md5.is_some() && only.is_none_or(|o| o.contains(&norm_path(&a.archive.path)))).collect();
     if todo.is_empty() {
         events::warn(sink, "no MD5 list found next to the archives; skipping verification");
         return Ok(0);
@@ -442,7 +445,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     let mut md5_checked = 0;
     if opts.verify_md5 {
         sink(Event::Phase { name: "Verifying archives".into() });
-        md5_checked = verify_md5(&scan, &opts.cancel, &opts.skip_verify, sink)?;
+        md5_checked = verify_md5(&scan, None, &opts.cancel, &opts.skip_verify, sink)?;
     }
 
     let by_role = |r: Role| scan.archives.iter().filter(|a| a.role == r).collect::<Vec<_>>();
@@ -518,7 +521,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     if !summary.cancelled
         && let Some(inno) = &inno
     {
-        match install_setup_files(inno, &opts.target_dir, sink, None) {
+        match install_setup_files(inno, &opts.target_dir, sink, None, false) {
             Ok(n) => setup_files = n,
             Err(e) => summary.problems.push(format!("files from setup.exe: {e:#}")),
         }
@@ -574,6 +577,16 @@ fn install_scripted(
         None => ss::default_components(inno, &ss::repack_files(&opts.repack_dir)),
     };
     events::info(sink, format!("running the installer's own install script; components: {}", selected.iter().cloned().collect::<Vec<_>>().join(", ")));
+    // Optional parts the selection leaves out, and whether this only adds parts to a game that
+    // is already installed (no base-game component selected).
+    let parts = ss::parts_for(inno, &ss::repack_files(&opts.repack_dir), &selected);
+    if parts.only_optional {
+        let game = find_installed(inno, &target)?;
+        events::info(sink, format!("adding parts to the game installed in {} ({} files)", target.display(), game.files));
+    }
+    if !parts.skip.is_empty() {
+        events::info(sink, format!("not installing (unticked): {}", parts.skip.iter().cloned().collect::<Vec<_>>().join(", ")));
+    }
 
     // What the script will do with this selection: which repack archives it needs (all must be
     // here), how much space they take, and what can be extracted early.
@@ -584,6 +597,14 @@ fn install_scripted(
             None
         }
     };
+    if parts.only_optional
+        && let Some(p) = &plan
+    {
+        ensure!(
+            p.steps.iter().any(|s| matches!(s, ss::Step::Extract { .. })),
+            "nothing to add: the selected parts' archives aren't in the repack folder"
+        );
+    }
     let needed = plan.as_ref().map(|p| ss::preflight(p, &opts.repack_dir));
     if let Some(pf) = &needed {
         ensure!(
@@ -618,9 +639,12 @@ fn install_scripted(
     sink(Event::Phase { name: "Installing".into() });
     sink(Event::Total { compressed: packed, output: need });
     let damaged: Mutex<Option<String>> = Mutex::new(None);
+    // Only the archives this install uses are checked (not left-out parts, nor the base game's
+    // archives when adding parts).
+    let uses: Option<HashSet<String>> = needed.as_ref().map(|pf| pf.needed.iter().map(|p| norm_path(p)).collect());
     std::thread::scope(|threads| {
         let check = opts.verify_md5.then(|| {
-            threads.spawn(|| match verify_md5(scan, &opts.cancel, &opts.skip_verify, sink) {
+            threads.spawn(|| match verify_md5(scan, uses.as_ref(), &opts.cancel, &opts.skip_verify, sink) {
                 Ok(n) => n,
                 Err(e) => {
                     if !opts.cancel.load(Ordering::Relaxed) {
@@ -631,7 +655,7 @@ fn install_scripted(
                 }
             })
         });
-        let report = run_scripted(opts, setup_exe, inno, script, sink, &target, selected, plan.as_ref());
+        let report = run_scripted(opts, setup_exe, inno, script, sink, &target, selected, &parts, plan.as_ref());
         let md5_checked = check.map(|c| c.join().unwrap_or(0)).unwrap_or(0);
         let damaged = damaged.lock().unwrap().take();
         match (report, damaged) {
@@ -660,6 +684,7 @@ fn run_scripted(
     sink: &Sink,
     target: &Path,
     selected: std::collections::BTreeSet<String>,
+    parts: &crate::setup_script::Parts,
     plan: Option<&crate::setup_script::Plan>,
 ) -> Result<InstallReport> {
     use crate::setup_script::{self as ss, Folders, InnoHost};
@@ -687,8 +712,11 @@ fn run_scripted(
     // game folder, while earlier steps run; at their step they are moved into place.
     let staging = staging_dir(&target);
     let _ = std::fs::remove_dir_all(&staging);
+    // (Not when adding parts: their archives replace game files one at a time, with backups.)
     let prefetch = match plan {
-        Some(p) if std::env::var_os("ARC_UNPACK_NO_PREFETCH").is_none() => plan_prefetches(p, &abs(&opts.repack_dir), &target, &staging),
+        Some(p) if !parts.only_optional && std::env::var_os("ARC_UNPACK_NO_PREFETCH").is_none() => {
+            plan_prefetches(p, &abs(&opts.repack_dir), &target, &staging)
+        }
         _ => Vec::new(),
     };
 
@@ -704,16 +732,18 @@ fn run_scripted(
         prefetch,
         changes: HashMap::new(),
         steps_total: plan.map(|p| p.steps.len()).unwrap_or(0),
+        backup: parts.only_optional.then(|| target.join(BACKUP_DIR)),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
+    host.parts = parts.clone();
     let mut vm = crate::pascal::Vm::new(script);
     let mut script_error = None;
     let mut setup_files = 0;
     // Inno's order: ssInstall, then its [Files], then ssPostInstall (where repacks unpack), ssDone.
     for step in [ss::SS_INSTALL, ss::SS_POST_INSTALL, ss::SS_DONE] {
         if step == ss::SS_POST_INSTALL {
-            match install_setup_files(inno, &target, sink, Some(&selected)) {
+            match install_setup_files(inno, &target, sink, Some(&selected), parts.only_optional) {
                 Ok(n) => setup_files = n,
                 Err(e) => script_error = Some(format!("files from setup.exe: {e:#}")),
             }
@@ -738,13 +768,25 @@ fn run_scripted(
         summary.problems.push(format!("the installer's script stopped: {e}"));
     }
 
+    // Adding parts: the merge of the parts' file lists into the game's was left out with the
+    // base game's archives; done here. Only the parts' files are checked then.
+    let mut part_keys = None;
+    if parts.only_optional && !summary.cancelled && summary.problems.is_empty() {
+        match merge_part_lists(inno, &target, &selected) {
+            Ok(k) => part_keys = Some(k),
+            Err(e) => summary.problems.push(format!("adding the parts' files to the game's file list: {e:#}")),
+        }
+    }
     let mut files_md5 = 0;
     if !summary.cancelled
         && let Some(list) = &md5
     {
         sink(Event::Phase { name: "Checking files".into() });
         // Check what the installed list (after the script merged optional parts) names.
-        let wanted = md5_keys_on_disk(inno, &target);
+        let wanted = match part_keys {
+            Some(k) => Some(k),
+            None => md5_keys_on_disk(inno, &target),
+        };
         let entries: Vec<(&String, &ExpectedMd5)> = list.iter().filter(|(k, _)| wanted.as_ref().is_none_or(|w| w.contains(*k))).collect();
         let check = check_md5_list(&entries, &target, None, &opts.cancel);
         files_md5 = check.ok;
@@ -772,13 +814,16 @@ fn run_scripted(
 pub fn needed_size(scan: &Scan, needed: Option<&crate::setup_script::Preflight>) -> (u64, u64) {
     // Script paths can carry doubled separators ("R:\\fg-01.bin" from "{src}\\..." with
     // {src} = "R:\\"): compare normalized, case-insensitively.
-    let norm = |p: &Path| {
-        let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-        p.components().collect::<PathBuf>().to_string_lossy().to_lowercase()
-    };
-    let needed: Option<Vec<String>> = needed.map(|n| n.needed.iter().map(|x| norm(x)).collect());
-    let wanted = |a: &&ScannedArchive| needed.as_ref().is_none_or(|n| n.contains(&norm(&a.archive.path)));
+    let needed: Option<Vec<String>> = needed.map(|n| n.needed.iter().map(|x| norm_path(x)).collect());
+    let wanted = |a: &&ScannedArchive| needed.as_ref().is_none_or(|n| n.contains(&norm_path(&a.archive.path)));
     scan.archives.iter().filter(wanted).fold((0, 0), |(t, c), a| (t + a.archive.total_size(), c + a.archive.len))
+}
+
+/// A path for comparing: absolute, normalized (script paths can carry doubled separators) and
+/// lower case.
+fn norm_path(p: &Path) -> String {
+    let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    p.components().collect::<PathBuf>().to_string_lossy().to_lowercase()
 }
 
 fn empty_report(codec_dir: PathBuf) -> InstallReport {
@@ -812,6 +857,9 @@ fn md5_keys_on_disk(inno: &crate::inno::Setup, target: &Path) -> Option<HashSet<
     (!list.is_empty()).then(|| list.into_keys().collect())
 }
 
+/// Adding parts: where game files a part replaces are kept (inside the game folder).
+pub const BACKUP_DIR: &str = "_arc-unpack-backup";
+
 /// Carries out the script's steps with arc-unpack's engine.
 struct ScriptRunner<'a> {
     opts: &'a InstallOptions,
@@ -828,6 +876,8 @@ struct ScriptRunner<'a> {
     changes: HashMap<String, usize>,
     /// Steps in the plan (0 if unknown).
     steps_total: usize,
+    /// Adding parts: game files an archive replaces are moved under here first.
+    backup: Option<PathBuf>,
 }
 
 /// A repack archive the script will extract later, extracted early into a staging folder.
@@ -1071,6 +1121,20 @@ impl ScriptRunner<'_> {
         }
         let cfg = self.config(arc_ini)?;
         let a = Archive::open(archive)?;
+        if let Some(root) = &self.backup {
+            let stem = archive.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "part".into());
+            let mut dir = root.join(&stem);
+            for i in 2.. {
+                if !dir.exists() {
+                    break;
+                }
+                dir = root.join(format!("{stem}-{i}"));
+            }
+            let moved = back_up_replaced(&a, out, base, &self.app, &dir)?;
+            if moved > 0 {
+                self.summary.notes.push(format!("{moved} game files {stem} replaces were moved to {}", dir.display()));
+            }
+        }
         // A part of the archive: extract everything next to the target, then move that part in.
         let stage = base.map(|_| out.join(format!(".arc-unpack-part-{}", self.n)));
         let dest = stage.clone().unwrap_or_else(|| out.to_path_buf());
@@ -1253,6 +1317,166 @@ fn parse_installed_md5(text: &str, base: &[&str], list: &mut Md5List) {
     }
 }
 
+/// The checksum lines of an MD5 list, normalised (lower case, trimmed), for comparing lists.
+fn hash_lines(text: &str) -> HashSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter_map(|l| {
+            let (hash, rest) = (l.get(..32)?, l.get(32..)?);
+            parse_hex16(hash)?;
+            Some(format!("{} {}", hash.to_ascii_lowercase(), rest.trim().to_ascii_lowercase()))
+        })
+        .collect()
+}
+
+/// The component names in an Inno component expression ("bonus", "voice\french or text").
+fn component_words(expr: &str) -> impl Iterator<Item = String> + '_ {
+    expr.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .map(str::to_ascii_lowercase)
+        .filter(|w| !w.is_empty() && !matches!(w.as_str(), "and" | "or" | "not"))
+}
+
+/// A game folder with this repack's game already installed.
+#[derive(Debug, Clone)]
+pub struct InstalledGame {
+    /// Files the game's own list names (all present).
+    pub files: usize,
+    /// Optional components whose file lists are already merged into the game's list.
+    pub parts: std::collections::BTreeSet<String>,
+    /// Whether the game folder still has its file list (`_Redist\fitgirl.md5`).
+    pub list: bool,
+}
+
+/// Checks that `target` has this repack's game installed, by its own installer or by
+/// arc-unpack (both leave the repack's file list, `_Redist\fitgirl.md5`): the list is there,
+/// matches this repack's, and every file it names exists. Adding optional parts needs that.
+pub fn find_installed(inno: &crate::inno::Setup, target: &Path) -> Result<InstalledGame> {
+    let is_list = |f: &&crate::inno::SetupFile| {
+        f.has_data() && english_or_neutral(&f.languages) && f.app_relative().is_some_and(|r| r.to_ascii_lowercase().ends_with(".md5"))
+    };
+    let lists: Vec<&crate::inno::SetupFile> = inno.files.iter().filter(is_list).collect();
+    ensure!(!lists.is_empty(), "this repack has no file list, so an installed copy of its game can't be recognised");
+    let (mut files, mut have, mut list_found) = (0, HashSet::new(), true);
+    for f in lists {
+        let rel = f.app_relative().unwrap_or_default();
+        let ours = String::from_utf8_lossy(&inno.read(f)?).into_owned();
+        // The game's own copy of the list; people often delete `_Redist` after installing.
+        let on_disk = std::fs::read(target.join(crate::inno::safe_dest(rel)?)).ok().map(|b| hash_lines(&String::from_utf8_lossy(&b)));
+        if let Some(on_disk) = &on_disk {
+            ensure!(
+                hash_lines(&ours).is_subset(on_disk),
+                "{} has a different version of this game: its file list doesn't match this repack's",
+                target.display()
+            );
+        }
+        let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+        base.pop();
+        let mut list = Md5List::new();
+        parse_installed_md5(&ours, &base, &mut list);
+        let mut missing: Vec<&str> = list.values().filter(|e| !target.join(&e.path).is_file()).map(|e| e.path.as_str()).collect();
+        missing.sort();
+        ensure!(missing.len() < list.len(), "the game isn't installed in {}", target.display());
+        ensure!(
+            missing.is_empty(),
+            "{} of the game's {} files are missing from {} (e.g. {}): install the base game first",
+            missing.len(),
+            list.len(),
+            target.display(),
+            missing.first().unwrap_or(&"")
+        );
+        if on_disk.is_none() {
+            // No list to compare: check a few of the game's smallest files instead (quick), so a
+            // different version of the game isn't mistaken for this one.
+            let mut sized: Vec<(u64, &ExpectedMd5)> =
+                list.values().map(|e| (std::fs::metadata(target.join(&e.path)).map(|m| m.len()).unwrap_or(0), e)).collect();
+            sized.sort_by_key(|(len, e)| (*len, e.path.clone()));
+            for (_, e) in sized.iter().filter(|(len, _)| *len > 0).take(8) {
+                let got = extract::md5_of_file(&target.join(&e.path))?;
+                ensure!(
+                    got == e.md5,
+                    "{} has a different version of this game: {} doesn't match this repack's file list",
+                    target.display(),
+                    e.path
+                );
+            }
+            list_found = false;
+        }
+        files += list.len();
+        have.extend(on_disk.unwrap_or_default());
+    }
+    let mut parts = std::collections::BTreeSet::new();
+    for f in inno.files.iter().filter(|f| f.has_data() && !f.components.is_empty()) {
+        if f.app_relative().is_some_and(|r| r.to_ascii_lowercase().ends_with(".addon")) {
+            let lines = hash_lines(&String::from_utf8_lossy(&inno.read(f)?));
+            if !lines.is_empty() && lines.is_subset(&have) {
+                parts.extend(component_words(&f.components));
+            }
+        }
+    }
+    Ok(InstalledGame { files, parts, list: list_found })
+}
+
+/// Adding parts: FitGirl's installer merges each installed part's file list (`*.addon`) into
+/// the game's (`copy /b fitgirl.md5+*.addon`) as its very last step, which belongs to the base
+/// game's archives and is left out. The same merge, byte for byte (a list already merged is
+/// left alone). Returns the merged lists' entries, to check the part's files against.
+fn merge_part_lists(inno: &crate::inno::Setup, target: &Path, selected: &std::collections::BTreeSet<String>) -> Result<HashSet<String>> {
+    let mut keys = HashSet::new();
+    let dir_of = |rel: &str| rel.rsplit_once(['\\', '/']).map(|(d, _)| d.to_ascii_lowercase()).unwrap_or_default();
+    for f in inno.files.iter().filter(|f| f.has_data() && english_or_neutral(&f.languages) && !f.components.is_empty()) {
+        let Some(rel) = f.app_relative() else { continue };
+        if !rel.to_ascii_lowercase().ends_with(".addon") || !crate::setup_script::eval_components(&f.components, selected).unwrap_or(false) {
+            continue;
+        }
+        let addon = inno.read(f)?;
+        let mut base: Vec<&str> = rel.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+        base.pop();
+        let mut list = Md5List::new();
+        parse_installed_md5(&String::from_utf8_lossy(&addon), &base, &mut list);
+        keys.extend(list.into_keys());
+        let game_list = inno.files.iter().filter_map(|g| g.app_relative()).find(|r| r.to_ascii_lowercase().ends_with(".md5") && dir_of(r) == dir_of(rel));
+        // (No list when `_Redist` was deleted after installing: nothing to merge into.)
+        if let Some(list_rel) = game_list
+            && let Ok(mut text) = std::fs::read(target.join(crate::inno::safe_dest(list_rel)?))
+        {
+            let path = target.join(crate::inno::safe_dest(list_rel)?);
+            if !hash_lines(&String::from_utf8_lossy(&addon)).is_subset(&hash_lines(&String::from_utf8_lossy(&text))) {
+                text.extend_from_slice(&addon);
+                std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+            }
+        }
+        let _ = std::fs::remove_file(target.join(crate::inno::safe_dest(rel)?));
+    }
+    Ok(keys)
+}
+
+/// Adding parts: game files an archive would replace are moved into `backup` first (same paths
+/// relative to the game folder), so they can be put back by hand. Returns how many were moved.
+fn back_up_replaced(archive: &Archive, out: &Path, base: Option<&str>, game: &Path, backup: &Path) -> Result<usize> {
+    let mut moved = 0;
+    let prefix = base.map(|b| format!("{}/", b.replace('\\', "/").trim_matches('/').to_ascii_lowercase()));
+    for e in archive.entries.iter().filter(|e| !e.is_dir) {
+        let rel = match &prefix {
+            // Only this part of the archive is extracted, without the prefix.
+            Some(p) if e.path.to_ascii_lowercase().starts_with(p.as_str()) => &e.path[p.len()..],
+            Some(_) => continue,
+            None => e.path.as_str(),
+        };
+        let dest = extract::safe_join(out, rel)?;
+        if !dest.is_file() {
+            continue;
+        }
+        let inside = dest.strip_prefix(game).map(Path::to_path_buf).unwrap_or_else(|_| PathBuf::from(rel));
+        let to = backup.join(inside);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&dest, &to).with_context(|| format!("move {} to {}", dest.display(), to.display()))?;
+        moved += 1;
+    }
+    Ok(moved)
+}
+
 fn parse_hex16(s: &str) -> Option<[u8; 16]> {
     let mut out = [0u8; 16];
     for (i, o) in out.iter_mut().enumerate() {
@@ -1384,11 +1608,18 @@ fn install_setup_files(
     target: &Path,
     sink: &Sink,
     selected: Option<&std::collections::BTreeSet<String>>,
+    parts_only: bool,
 ) -> Result<usize> {
     let mut skipped = Vec::new();
     let written = inno.extract_with(|f| {
         let Some(rel) = f.app_relative() else { return Ok(None) };
         if !english_or_neutral(&f.languages) {
+            return Ok(None);
+        }
+        // Adding parts: only the parts' own files. Their file lists (`*.addon`) are merged into
+        // the game's list afterwards, and the base game's files are left as they are (also when
+        // the player deleted some, such as `_Redist`).
+        if parts_only && (f.components.is_empty() || rel.to_ascii_lowercase().ends_with(".addon")) {
             return Ok(None);
         }
         if let Some(sel) = selected
@@ -1427,6 +1658,38 @@ mod tests {
         assert_eq!(m.get("data-01.bin").unwrap(), "0123456789abcdef0123456789abcdef");
         assert_eq!(m.get("data-02.bin").unwrap(), "ffffffffffffffffffffffffffffffff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_lists_compare_by_line() {
+        let a = hash_lines("; header\r\n0123456789ABCDEF0123456789ABCDEF *..\\Game\\A.dat\r\nnot a line\r\n");
+        let b = hash_lines("0123456789abcdef0123456789abcdef *..\\game\\a.dat\nffffffffffffffffffffffffffffffff *..\\x\n");
+        assert_eq!(a.len(), 1);
+        assert!(a.is_subset(&b));
+        assert!(!b.is_subset(&a));
+    }
+
+    #[test]
+    fn replaced_files_are_backed_up() {
+        use crate::format::Entry;
+        let root = std::env::temp_dir().join(format!("arcunp-backup-{}", std::process::id()));
+        let (game, backup) = (root.join("game"), root.join("game").join(BACKUP_DIR).join("fg-selective-french"));
+        std::fs::create_dir_all(game.join("Data")).unwrap();
+        std::fs::write(game.join("Data").join("voice.pck"), b"english").unwrap();
+        std::fs::write(game.join("keep.txt"), b"untouched").unwrap();
+        let entry = |p: &str, is_dir: bool| Entry { path: p.into(), size: 1, mtime: 0, is_dir, crc: 0 };
+        let archive = |entries| Archive { path: PathBuf::new(), len: 0, blocks: Vec::new(), entries, standard_crc: true };
+        // Only files the archive holds and the game already has are moved, keeping their paths.
+        let a = archive(vec![entry("Data", true), entry("Data/voice.pck", false), entry("new.txt", false)]);
+        assert_eq!(back_up_replaced(&a, &game, None, &game, &backup).unwrap(), 1);
+        assert!(!game.join("Data").join("voice.pck").exists());
+        assert_eq!(std::fs::read(backup.join("Data").join("voice.pck")).unwrap(), b"english");
+        assert!(game.join("keep.txt").is_file());
+        // A part of an archive (ExtractedPath): its prefix is dropped, other paths are ignored.
+        let a = archive(vec![entry("Sub/keep.txt", false), entry("Other/keep.txt", false)]);
+        assert_eq!(back_up_replaced(&a, &game, Some("Sub"), &game, &backup).unwrap(), 1);
+        assert_eq!(std::fs::read(backup.join("keep.txt")).unwrap(), b"untouched");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
