@@ -5,7 +5,8 @@
 //!     unpackcmd, datafile, packedfile, default, header;
 //!   - "{compressor}" is replaced by the method name;
 //!   - " <stdin>" / " <stdout>" switch that side to a pipe, otherwise the literal file names
-//!     `packedfile` (input) / `datafile` (output) are used inside a temp folder.
+//!     `packedfile` (input) / `datafile` (output) are used inside a temp folder;
+//!   - a `cls-<name>.dll` next to arc.ini takes precedence over arc.ini's section for <name>.
 
 use anyhow::Result;
 use std::fmt::Write as _;
@@ -111,6 +112,13 @@ pub fn to_toml(arc_ini: &Path) -> Result<String> {
             writeln!(t, "\n# '{}' is defined again later in arc.ini; FreeArc uses the first definition", s.name)?;
             continue;
         }
+        // Repack arc.ini files are often shared templates. When the installer ships
+        // cls-<name>.dll, FreeArc decodes the method with it, whatever arc.ini says (a missing
+        // program, or no unpackcmd at all).
+        if cls.iter().any(|c| c[4..c.len() - 4] == s.name.to_ascii_lowercase()) {
+            writeln!(t, "\n# '{}' is also in arc.ini, but cls-{}.dll decodes it, as in FreeArc", s.name, s.name.to_ascii_lowercase())?;
+            continue;
+        }
         writeln!(t, "\n[methods.{}]", toml_str(&s.name))?;
         if s.unpackcmd.trim().is_empty() {
             writeln!(t, "# arc.ini has no unpackcmd: FreeArc passes the data through unchanged")?;
@@ -169,5 +177,26 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn cls_dll_takes_precedence_over_arc_ini() {
+        let dir = std::env::temp_dir().join(format!("arc-unpack-arcini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A template arc.ini: one method with a program the installer doesn't ship, one with no
+        // unpackcmd; the installer ships CLS DLLs for both (any letter case).
+        let ini = "[External compressor:mpzz]\r\nheader = 0\r\nunpackcmd = oggre_dec.exe {options} $$arcpackedfile$$.tmp $$arcdatafile$$.tmp\r\n\r\n[External compressor:msc]\r\nheader = 0\r\npackcmd = msc c -v {options} $$arcdatafile$$.tmp $$arcpackedfile$$.tmp\r\n\r\n[External compressor:rzs]\r\nheader = 0\r\nunpackcmd = rz.exe d - - <stdin> <stdout>\r\n";
+        std::fs::write(dir.join("arc.ini"), ini).unwrap();
+        std::fs::write(dir.join("cls-mpzz.dll"), b"").unwrap();
+        std::fs::write(dir.join("CLS-MSC.dll"), b"").unwrap();
+        let toml_text = to_toml(&dir.join("arc.ini")).unwrap();
+        let cfg: crate::config::Config = toml::from_str(&toml_text).unwrap();
+        for m in ["mpzz", "msc:raw=0:tak=9"] {
+            let st = cfg.resolve(m).unwrap();
+            assert!(matches!(&st[0].codec, crate::config::Codec::Cls { .. }), "{m}: {:?}", st[0].codec);
+        }
+        // Methods without a DLL still come from arc.ini.
+        assert!(matches!(&cfg.resolve("rzs").unwrap()[0].codec, crate::config::Codec::External(_)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
