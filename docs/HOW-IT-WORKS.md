@@ -50,6 +50,7 @@ If a script needs a function arc-unpack doesn't provide, the install stops with 
 - **Checking while writing.** Every file named in the repack's MD5 list is hashed as it's written. Files changed by a later step are re-checked from disk at the end. There's no second read of the whole game.
 - **Checking the downloads while installing.** The `.bin` files are hashed against the repack's list while they're being decoded, not in a pass before. A damaged archive stops the install with its name.
 - **Shorter waits inside xtool.** xtool, the precompressor most repacks use, coordinates its threads with `Sleep(1)`, which lasts about 15 ms at Windows' default timer resolution. A 10 KB plugin placed next to xtool ([`xtool-timer/`](../xtool-timer/src/lib.rs)) requests 1 ms inside xtool's own process. It registers no codecs and changes nothing else. On PCs that already run a 1 ms timer it makes no difference. Set `ARC_UNPACK_NO_XTOOL_TIMER=1` to leave it out.
+- **xtool on several processes.** xtool restores its data in chunks of about 400 MB, one chunk at a time, and a chunk only ends when its slowest stream ends. When a few large images fill a chunk (PNGs rebuilt with preflate), most of its threads wait: on Factorio's main archive, xtool kept about 5 of 32 threads busy for 300 s. arc-unpack reads xtool's stream itself and gives each chunk to its own xtool process, several at once (as many as the CPU and free memory allow), then puts their output back in order. xtool still restores every byte, so the output is identical; that archive now takes 135 s. Streams in another layout, or whose chunks depend on each other (deduplicated streams), go to one xtool as before, and the log says why. `ARC_UNPACK_XTOOL_WORKERS=N` sets the number of processes (1 turns this off).
 - **Every codec stage at once.** A chain like `xtool + precomp + srep + lolz` runs as four concurrent processes connected by large pipes, instead of one after another.
 - **Memory-aware scheduling.** Jobs are classed by codec: the lolz family and large srep blocks are memory-heavy, the rest are light and run alongside. The largest archive gets its slot first, because it decides when the install ends. A second heavy job only starts while plenty of RAM is free, and the limit is machine-wide, so two runs at once can't exhaust RAM or corrupt each other.
 - **Fast output.** A pool of writer threads creates, preallocates and timestamps files while decoding continues.
@@ -106,6 +107,8 @@ arc-unpack test     *.bin -c codecs.toml     # decode and verify, write nothing
 arc-unpack extract  *.bin -c codecs.toml -o D:\Games\Title
 ```
 
+To measure a single codec: run `test` or `install` with `ARC_UNPACK_TEE_DIR=<folder>`, which saves every codec's input there, then `arc-unpack replay -c codecs.toml -m <method> <saved input>` runs that codec alone through the same engine and prints its time and the output's MD5. The logs show each codec's CPU time, including the programs it starts (a CLS proxy's decoder, unarc.dll's external codecs).
+
 | Flag | Meaning |
 |---|---|
 | `--components a,b` | `install`: components to install (default: the installer's defaults plus downloaded optional parts). Optional parts left out aren't installed; without the base game's component, the parts are added to the game already in the target folder. |
@@ -151,6 +154,7 @@ src/runtimes.rs        runtimes a game needs (DirectX, Visual C++, ...): detecti
 src/format.rs          FreeArc container: footer, control blocks, directory, varints
 src/extract.rs         scheduling, splitting, writer pool, watchdog, path safety
 src/stage.rs           stage runners: built-ins, external programs, CLS hosts
+src/xtsplit.rs         xtool's stream cut into chunks for several xtool processes
 src/config.rs          codecs.toml, method resolution, FreeArc option templates
 src/guard.rs           job objects, dialog handling, cross-process locks, elevation, RAM checks
 xtool-timer/           the xtool timer plugin (its own tiny crate)

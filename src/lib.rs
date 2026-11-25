@@ -17,3 +17,4 @@ pub mod setup_script;
 pub mod progress;
 pub mod runtimes;
 pub mod stage;
+pub mod xtsplit;

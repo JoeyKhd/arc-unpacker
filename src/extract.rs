@@ -657,6 +657,7 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     stage::apply_child_flags(&mut cmd, opts.tune);
     let child = cmd.spawn().context("start unarc-host-x86.exe")?;
+    let job = crate::perf::CpuJob::track(&child);
     if opts.tune {
         crate::perf::tune_child(&child, false);
     }
@@ -709,7 +710,7 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     let _ = canceller.join();
     let errors = err_thread.join().unwrap_or_default();
     let wall = started.elapsed().as_secs_f64();
-    let cpu = crate::perf::cpu_seconds(&child.lock().unwrap());
+    let cpu = job.as_ref().and_then(|j| j.cpu_seconds()).or_else(|| crate::perf::cpu_seconds(&child.lock().unwrap()));
     if opts.cancel.load(Ordering::Relaxed) {
         bail!("cancelled");
     }

@@ -31,6 +31,22 @@ enum Cmd {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+    /// Benchmarking: decode a file through a method chain from a config, e.g. a codec's input
+    /// saved with ARC_UNPACK_TEE_DIR through that codec alone. Prints time, size and MD5.
+    #[command(hide = true)]
+    Replay {
+        /// codecs.toml with the method
+        #[arg(short, long)]
+        config: PathBuf,
+        /// Method chain in compression order, e.g. "xt2png"
+        #[arg(short, long)]
+        method: String,
+        /// Input file
+        input: PathBuf,
+        /// Also write the output here
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
     /// Convert a FreeArc arc.ini (from the installer's tools folder) into codecs.toml.
     ImportArcini {
         arc_ini: PathBuf,
@@ -159,6 +175,52 @@ fn real_main() -> Result<()> {
             }
             anyhow::ensure!(bad == 0, "{bad} method(s) have no decoder");
             println!("all methods have decoders");
+            Ok(())
+        }
+        Cmd::Replay { config, method, input, out } => {
+            use std::io::{Read, Write};
+            let cfg = Config::load(&config)?;
+            let stages = cfg.resolve(&method)?;
+            let reg = arc_unpack::stage::Registry::default();
+            let ctx = arc_unpack::stage::Ctx {
+                temp_dir: std::env::temp_dir(),
+                host_dir: std::env::current_exe()?.parent().map(PathBuf::from).unwrap_or_default(),
+                tune: true,
+                reg: reg.clone(),
+            };
+            let file = std::fs::File::open(&input).with_context(|| format!("open {}", input.display()))?;
+            let started = Instant::now();
+            let mut output = arc_unpack::stage::build(&stages, Box::new(std::io::BufReader::with_capacity(1 << 20, file)), 0, &ctx)?;
+            let mut sink = match &out {
+                Some(p) => Some(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(p)?)),
+                None => None,
+            };
+            let (mut md5, mut total, mut buf) = (md5::Context::new(), 0u64, vec![0u8; 1 << 20]);
+            let read = loop {
+                match output.read(&mut buf) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => {
+                        md5.consume(&buf[..n]);
+                        total += n as u64;
+                        if let Some(w) = sink.as_mut() {
+                            w.write_all(&buf[..n])?;
+                        }
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            drop(output);
+            let errors = reg.join();
+            let secs = started.elapsed().as_secs_f64();
+            for (label, cpu, wall) in reg.cpu_report() {
+                println!("  {label}: {:.0}s cpu / {wall:.0}s wall", cpu.unwrap_or(0.0));
+            }
+            read.context("reading the decoded output")?;
+            for e in &errors {
+                eprintln!("stage error: {e:#}");
+            }
+            println!("{total} bytes in {secs:.1}s, md5 {:x}", md5.finalize());
+            anyhow::ensure!(errors.is_empty(), "{} stage error(s)", errors.len());
             Ok(())
         }
         Cmd::ImportArcini { arc_ini, out } => {

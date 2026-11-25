@@ -124,6 +124,61 @@ mod imp {
         let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
         Some(t(k) + t(u))
     }
+
+    /// Adds up the CPU time of a codec process and everything it starts. A CLS proxy runs the
+    /// real decoder as a child process (cls-magic2.dll -> cls-magic2_x64.exe), and unarc.dll
+    /// runs external codecs (bcm, rzw, ...) as children, so the process alone shows next to
+    /// nothing. Processes a job counts stay counted after they exit.
+    pub struct CpuJob(HANDLE);
+    // SAFETY: a job handle can be used from any thread.
+    unsafe impl Send for CpuJob {}
+    unsafe impl Sync for CpuJob {}
+
+    impl CpuJob {
+        /// None if the process can't be put in a job (then only its own time is known).
+        /// Children it started before this call aren't counted; codecs start theirs later.
+        pub fn track(child: &std::process::Child) -> Option<CpuJob> {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                // Nested inside any job the process is already in (Windows 8+).
+                if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                    CloseHandle(job);
+                    return None;
+                }
+                Some(CpuJob(job))
+            }
+        }
+
+        /// User + kernel CPU seconds of every process that has been in the job.
+        pub fn cpu_seconds(&self) -> Option<f64> {
+            use windows_sys::Win32::System::JobObjects::{
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            };
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicAccountingInformation,
+                    (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            (ok != 0).then(|| (info.TotalUserTime + info.TotalKernelTime) as f64 / 1e7)
+        }
+    }
+
+    impl Drop for CpuJob {
+        fn drop(&mut self) {
+            // Closing only the handle: the processes keep running (no kill-on-close limit).
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        }
+    }
 }
 
 /// How the codec processes of one decode chain share the CPU. The first decode stage (the
@@ -177,6 +232,15 @@ mod imp {
     }
     pub fn cpu_seconds(_: &std::process::Child) -> Option<f64> {
         None
+    }
+    pub struct CpuJob;
+    impl CpuJob {
+        pub fn track(_: &std::process::Child) -> Option<CpuJob> {
+            None
+        }
+        pub fn cpu_seconds(&self) -> Option<f64> {
+            None
+        }
     }
 }
 

@@ -19,6 +19,8 @@ pub struct ChildInfo {
     pub label: String,
     pub child: Arc<Mutex<Child>>,
     pub started: Instant,
+    /// CPU accounting for the process and its descendants.
+    pub job: Option<crate::perf::CpuJob>,
 }
 
 type Workers = Vec<(String, JoinHandle<Result<()>>)>;
@@ -82,16 +84,25 @@ impl Registry {
     }
 
     /// (label, cpu seconds, wall seconds) per codec process.
+    /// Processes with the same label (one per chunk of a split xtool) are added up.
     pub fn cpu_report(&self) -> Vec<(String, Option<f64>, f64)> {
-        self.children
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|c| {
-                let ch = c.child.lock().unwrap();
-                (c.label.clone(), crate::perf::cpu_seconds(&ch), c.started.elapsed().as_secs_f64())
-            })
-            .collect()
+        let mut out: Vec<(String, Option<f64>, f64)> = Vec::new();
+        for c in self.children.lock().unwrap().iter() {
+            let ch = c.child.lock().unwrap();
+            let cpu = c.job.as_ref().and_then(|j| j.cpu_seconds()).or_else(|| crate::perf::cpu_seconds(&ch));
+            let wall = c.started.elapsed().as_secs_f64();
+            match out.iter_mut().find(|o| o.0 == c.label) {
+                Some(o) => {
+                    o.1 = match (o.1, cpu) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (a, b) => a.or(b),
+                    };
+                    o.2 = o.2.max(wall);
+                }
+                None => out.push((c.label.clone(), cpu, wall)),
+            }
+        }
+        out
     }
 }
 
@@ -193,6 +204,7 @@ pub fn pe_machine(path: &Path) -> Result<u16> {
     Ok(u16::from_le_bytes([pe[4], pe[5]]))
 }
 
+#[derive(Clone)]
 struct ExtSpec {
     label: String,
     argv: Vec<String>,
@@ -240,6 +252,7 @@ struct Spawned {
 fn spawn_child(spec: &ExtSpec, mut cmd: Command, ctx: &Ctx) -> Result<Spawned> {
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().with_context(|| format!("{}: failed to start {:?}", spec.label, spec.argv[0]))?;
+    let job = crate::perf::CpuJob::track(&child);
     if ctx.tune {
         crate::perf::tune_child(&child, spec.performance_cores);
         crate::perf::register_stage(child.id(), spec.rank);
@@ -265,7 +278,7 @@ fn spawn_child(spec: &ExtSpec, mut cmd: Command, ctx: &Ctx) -> Result<Spawned> {
         });
     }
     let child = Arc::new(Mutex::new(child));
-    ctx.reg.children.lock().unwrap().push(ChildInfo { label: spec.label.clone(), child: child.clone(), started: Instant::now() });
+    ctx.reg.children.lock().unwrap().push(ChildInfo { label: spec.label.clone(), child: child.clone(), started: Instant::now(), job });
     Ok(Spawned { child, stdin, stdout, stderr_tail: tail })
 }
 
@@ -344,20 +357,37 @@ impl Read for Tee {
     }
 }
 
+/// Benchmarking aids: a copy of a codec's input, so the codec can be replayed alone.
+/// `ARC_UNPACK_TEE_XTOOL=<file>`: xtool's input. `ARC_UNPACK_TEE_DIR=<dir>`: every codec's
+/// input, as `<dir>\<stage rank>-<label>-<id>.in` (rank 0 = the first decoder of the chain).
 fn tee_if_requested(spec: &ExtSpec, input: Stream) -> Result<Stream> {
     let is_xtool = Path::new(&spec.argv[0]).file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().starts_with("xtool"));
-    match std::env::var_os("ARC_UNPACK_TEE_XTOOL") {
-        Some(path) if is_xtool => {
-            let file = std::fs::File::create(&path).with_context(|| format!("create {}", Path::new(&path).display()))?;
-            Ok(Box::new(Tee { inner: input, copy: io::BufWriter::with_capacity(IO_BUF, file) }))
+    let path = match (std::env::var_os("ARC_UNPACK_TEE_DIR"), std::env::var_os("ARC_UNPACK_TEE_XTOOL")) {
+        (Some(dir), _) => {
+            let name: String = spec.label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+            PathBuf::from(dir).join(format!("{}-{}-{}-{}.in", spec.rank, name, std::process::id(), unique()))
         }
-        _ => Ok(input),
-    }
+        (None, Some(path)) if is_xtool => PathBuf::from(path),
+        _ => return Ok(input),
+    };
+    let file = std::fs::File::create(&path).with_context(|| format!("create {}", path.display()))?;
+    Ok(Box::new(Tee { inner: input, copy: io::BufWriter::with_capacity(IO_BUF, file) }))
 }
 
 fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
-    let input = tee_if_requested(&spec, input)?;
+    let mut input = tee_if_requested(&spec, input)?;
     if !spec.header && !spec.input_file && !spec.output_file {
+        // xtool restores one chunk at a time: give whole chunks to several xtool processes.
+        let workers = crate::xtsplit::workers();
+        if workers > 1 && crate::xtsplit::is_stream_decode(&spec.argv) {
+            match crate::xtsplit::probe(input)? {
+                crate::xtsplit::Plan::Split { header, rest } => return xtool_split(spec, header, rest, workers, ctx),
+                crate::xtsplit::Plan::Single { reason, replay } => {
+                    eprintln!("note: {}: not split ({reason}); one xtool decodes it", spec.label);
+                    input = replay;
+                }
+            }
+        }
         // Fast path: stdin -> codec -> stdout, read directly by the next stage.
         let own_dir = own_workdir(&spec, ctx)?;
         let mut cmd = command(&spec, Path::new(""), Path::new(""), workdir_of(&spec, &own_dir), ctx.tune);
@@ -403,6 +433,29 @@ fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
         Ok(())
     });
     Ok(Box::new(r))
+}
+
+/// Decodes an xtool stream with up to `workers` xtool processes (see `xtsplit`).
+fn xtool_split(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx: &Ctx) -> Result<Stream> {
+    let (base, ctx2) = (spec.clone(), ctx.clone());
+    let spawn = move |_chunk: u64| -> Result<crate::xtsplit::Worker> {
+        let mut spec = base.clone();
+        spec.label = format!("{} (split)", base.label);
+        let own_dir = own_workdir(&spec, &ctx2)?;
+        let mut cmd = command(&spec, Path::new(""), Path::new(""), workdir_of(&spec, &own_dir), ctx2.tune);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let sp = spawn_child(&spec, cmd, &ctx2)?;
+        let (label, tail) = (spec.label.clone(), sp.stderr_tail.clone());
+        Ok(crate::xtsplit::Worker {
+            stdin: sp.stdin.unwrap(),
+            stdout: sp.stdout.unwrap(),
+            child: sp.child,
+            exit_error: Box::new(move |status| exit_error(&label, status, &tail)),
+            keep: Box::new(own_dir),
+        })
+    };
+    let (reg, reg2) = (ctx.reg.clone(), ctx.reg.clone());
+    crate::xtsplit::run(header, rest, workers, spawn, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
 }
 
 /// Runs one codec process to completion, writing its output into `w`. Handles every combination
