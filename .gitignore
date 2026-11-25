@@ -4,3 +4,5 @@
 /hs2-codecs
 /release
 __pycache__/
+/bench/results
+/bench/*.local.json
