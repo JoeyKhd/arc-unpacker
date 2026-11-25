@@ -3,6 +3,8 @@ original installers and with earlier versions on the same repacks.
 
   python bench/ledger.py add <result.json>...   add runs measured by bench/compare.ps1
   python bench/ledger.py table [--names]        latest results, and arc-unpack's history per version
+  python bench/ledger.py table --doc            the table for docs/BENCHMARKS.md (one row per game,
+                                                with the version it was last measured with)
   python bench/ledger.py id "<repack folder>"   the IDs a repack is recorded under
 
 Repacks are recorded by their torrent's info hash (found in qBittorrent's saved torrents) and by
@@ -202,8 +204,38 @@ def fmt_time(s):
     return f"{s // 60} min {s % 60:02d} s" if s >= 60 else f"{s} s"
 
 
+def cmd_doc_table(rows, names):
+    """The table in docs/BENCHMARKS.md: one row per repack, fastest gain first, with the
+    arc-unpack version each row was measured with (only re-measured repacks change)."""
+    out = []
+    for rid in {r["repack"] for r in rows}:
+        mine = [r for r in rows if r["repack"] == rid]
+        orig = [r["seconds"] for r in mine if r["tool"] == "original" and r.get("ok")]
+        vs = [r["version"] for r in mine if r["tool"] == "arc-unpack" and r.get("ok")]
+        if not orig or not vs:
+            continue
+        v = max(vs, key=version_key)
+        arc = [r["seconds"] for r in mine if r["tool"] == "arc-unpack" and r["version"] == v and r.get("ok")]
+        o, a = statistics.median(orig), statistics.median(arc)
+        out.append((o / a, names.get(rid) or rid[:12], mine[0]["packed_bytes"], o, a, v))
+    out.sort(key=lambda x: (-round(x[0], 1), x[1].lower()))
+    print("| Game | Download | Original installer | arc-unpack | Faster | Version |")
+    print("|---|---:|---:|---:|---:|---|")
+    for speed, name, packed, o, a, v in out:
+        print(f"| {name} | {packed / 1e9:.1f} GB | {fmt_time(o)} | {fmt_time(a)} | **{speed:.1f}×** | {v} |")
+    so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
+    print(f"| **All {len(out)}** | | **{fmt_time(so)}** | **{fmt_time(sa)}** | **{so / sa:.1f}×** | |")
+
+
 def cmd_table(args):
     ledger = [r for r in load() if r.get("settings") == "default"]
+    if args.doc:
+        machines = {}
+        for r in ledger:
+            machines.setdefault(r["machine"], set()).add(r["repack"])
+        machine = max(machines, key=lambda m: len(machines[m]))
+        cmd_doc_table([r for r in ledger if r["machine"] == machine], load_names())
+        return
     names = load_names() if args.names else {}
     label = lambda rid: names.get(rid) or ("repack " + rid.replace("md5list:", "")[:8])
     for machine in sorted({r["machine"] for r in ledger}):
@@ -277,6 +309,7 @@ def main():
     a.add_argument("--disk", help="the drive's model, for results that don't record it")
     t = sub.add_parser("table", help="print the comparison tables")
     t.add_argument("--names", action="store_true", help="show the game names kept in names.local.json")
+    t.add_argument("--doc", action="store_true", help="print the table for docs/BENCHMARKS.md (names, newest version per game)")
     i = sub.add_parser("id", help="print a repack's IDs")
     i.add_argument("folder")
     args = p.parse_args()

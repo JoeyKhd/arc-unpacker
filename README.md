@@ -18,7 +18,7 @@
   </picture>
 </p>
 
-<sub>Each repack installed by its own <code>setup.exe</code> (install, then its default file check) and by arc-unpack 0.1.0-beta.6 (every file checked), one at a time, same parts, file cache flushed before each run. Core i9-13900K, 32 GB DDR5, Samsung 990 PRO NVMe SSD. <a href="#benchmarks">More</a></sub>
+<sub>Each repack installed by its own <code>setup.exe</code> (install, then its default file check) and by arc-unpack (every file checked; the version per game is in Benchmarks), one at a time, same parts, file cache flushed before each run. Core i9-13900K, 32 GB DDR5, Samsung 990 PRO NVMe SSD. <a href="#benchmarks">More</a></sub>
 
 <p align="center"><img src="docs/screenshot.png" alt="arc-unpack after an install: what was installed, how long it took, and the verified file count" width="640"></p>
 

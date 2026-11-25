@@ -104,7 +104,9 @@ def svg(t, machine, rows):
     o.append(f'<rect x="0" y="{ly - 10}" width="12" height="12" rx="2" fill="{t["gray"]}"/>')
     o.append(f'<text x="18" y="{ly}" font-size="13" fill="{t["secondary"]}">Original installer (install, then its file check)</text>')
     o.append(f'<rect x="330" y="{ly - 10}" width="12" height="12" rx="2" fill="{t["accent"]}"/>')
-    o.append(f'<text x="348" y="{ly}" font-size="13" fill="{t["secondary"]}">arc-unpack {escape(versions[-1])} (checks every file while installing)</text>')
+    # One version: name it. Several (repacks measured at different times): see docs/BENCHMARKS.md.
+    who = f"arc-unpack {versions[-1]}" if len(versions) == 1 else "arc-unpack, newest version measured"
+    o.append(f'<text x="348" y="{ly}" font-size="13" fill="{t["secondary"]}">{escape(who)} (checks every file while installing)</text>')
     o.append(f'<rect x="{x0 - 1}" y="{top - 4}" width="1" height="{n * pitch}" fill="{t["rule"]}"/>')
     for i, r in enumerate(rows):
         y = top + i * pitch
