@@ -32,3 +32,6 @@ tempfile = "3.27.0"
 name = "arc-unpack-gui"
 path = "src/bin/arc-unpack-gui.rs"
 test = false
+
+[build-dependencies]
+embed-resource = "3"

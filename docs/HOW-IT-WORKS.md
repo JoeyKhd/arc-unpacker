@@ -53,6 +53,7 @@ If a script needs a function arc-unpack doesn't provide, the install stops with 
 - **xtool on several processes.** xtool restores its data in chunks of about 400 MB, one chunk at a time, and a chunk only ends when its slowest stream ends. When a few large images fill a chunk (PNGs rebuilt with preflate), most of its threads wait: on Factorio's main archive, xtool kept about 5 of 32 threads busy for 300 s. arc-unpack reads xtool's stream itself and gives each chunk to its own xtool process, several at once (as many as the CPU and free memory allow), then puts their output back in order. xtool still restores every byte, so the output is identical; that archive now takes 135 s. Streams in another layout, or whose chunks depend on each other (deduplicated streams), go to one xtool as before, and the log says why. `ARC_UNPACK_XTOOL_WORKERS=N` sets the number of processes (1 turns this off).
 - **Every codec stage at once.** A chain like `xtool + precomp + srep + lolz` runs as four concurrent processes connected by large pipes, instead of one after another.
 - **Memory-aware scheduling.** Jobs are classed by codec: the lolz family and large srep blocks are memory-heavy, the rest are light and run alongside. The largest archive gets its slot first, because it decides when the install ends. A second heavy job only starts while plenty of RAM is free, and the limit is machine-wide, so two runs at once can't exhaust RAM or corrupt each other.
+- **A RAM limit you set.** FitGirl's installers have a "limit RAM usage to 2 GB" switch that lowers the decoders' memory settings. arc-unpack has the same switch with a number: **Limit RAM to** in the window, `--memory-limit <GB>` in a terminal. The lolz decoders are told to use at most half of it, srep a quarter and xtool's deduplication a fifth; below 8 GB xtool also gets fewer threads. One memory-hungry decoder runs at a time, and arc-unpack's own buffers shrink. It's slower, and it's a target, not a hard cap: data packed with a large dictionary still needs that dictionary.
 - **Fast output.** A pool of writer threads creates, preallocates and timestamps files while decoding continues.
 - **Never throttled.** Codec processes are opted out of Windows EcoQoS, so they aren't parked on efficiency cores.
 
@@ -119,6 +120,7 @@ To measure a single codec: run `test` or `install` with `ARC_UNPACK_TEE_DIR=<fol
 | `--runtimes` | `install`: afterwards, install the runtimes the game needs that this PC is missing (downloads them; see Runtimes). |
 | `-j, --jobs N` | Jobs at once. Light jobs fill in around heavy ones. |
 | `--heavy-jobs N` | Memory-heavy jobs at once, machine-wide (default 2). The first always runs; the others start only while at least a quarter of RAM (and 8 GB) is free. |
+| `--memory-limit GB` | `install`: keep RAM use to about this much (see *A RAM limit you set*). One memory-heavy job at a time. Slower. |
 | `--writers N` | File writer threads per job. |
 | `--stall-timeout S` | Stop a job after S seconds without progress (default 600, 0 = never). |
 | `--overwrite`, `--skip-missing`, `--no-tune` | Replace existing files / extract what's decodable / leave priorities alone. |
@@ -157,6 +159,7 @@ src/format.rs          FreeArc container: footer, control blocks, directory, var
 src/extract.rs         scheduling, splitting, writer pool, watchdog, path safety
 src/stage.rs           stage runners: built-ins, external programs, CLS hosts
 src/xtsplit.rs         xtool's stream cut into chunks for several xtool processes
+src/memlimit.rs        the RAM limit: the decoders' memory settings scaled to it
 src/config.rs          codecs.toml, method resolution, FreeArc option templates
 src/guard.rs           job objects, dialog handling, cross-process locks, elevation, RAM checks
 xtool-timer/           the xtool timer plugin (its own tiny crate)

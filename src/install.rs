@@ -88,6 +88,8 @@ pub struct InstallOptions {
     /// After the game: install the runtimes it needs that this PC is missing (DirectX, Visual
     /// C++, ...), downloaded from the links the installer uses. See `runtimes`.
     pub runtimes: bool,
+    /// Keep RAM use to about this many bytes (see `memlimit`). Callers also set `heavy_jobs` to 1.
+    pub memory_limit: Option<u64>,
 }
 
 pub struct InstallReport {
@@ -722,6 +724,11 @@ fn run_scripted(
     let _ = std::fs::remove_dir_all(&run_dir);
     let tmp = run_dir.join("tmp");
     ss::prepare_tmp(inno, &tmp).context("unpacking the installer's temporary files")?;
+    crate::memlimit::set(opts.memory_limit);
+    if let Some(limit) = opts.memory_limit {
+        let (_, physical) = crate::guard::memory();
+        events::info(sink, crate::memlimit::apply(&tmp, limit, physical));
+    }
     std::fs::create_dir_all(&target)?;
 
     let md5 = match md5_list_from_setup(inno) {

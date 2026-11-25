@@ -16,9 +16,129 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const OK: Color32 = Color32::from_rgb(110, 200, 120);
-const BAD: Color32 = Color32::from_rgb(240, 110, 110);
-const WARN: Color32 = Color32::from_rgb(230, 180, 60);
+// White on black with one accent (docs/logo.svg).
+const BG: Color32 = Color32::from_rgb(10, 10, 10);
+const SURFACE: Color32 = Color32::from_rgb(20, 20, 22);
+const BORDER: Color32 = Color32::from_rgb(39, 39, 42);
+const BORDER_STRONG: Color32 = Color32::from_rgb(63, 63, 70);
+const TEXT: Color32 = Color32::from_rgb(228, 228, 231);
+const MUTED: Color32 = Color32::from_rgb(161, 161, 170);
+const ACCENT: Color32 = Color32::from_rgb(34, 197, 94);
+const OK: Color32 = Color32::from_rgb(74, 222, 128);
+const BAD: Color32 = Color32::from_rgb(248, 113, 113);
+const WARN: Color32 = Color32::from_rgb(251, 191, 36);
+
+/// The mark, 128 x 128 RGBA (made from docs/logo.svg).
+const LOGO: &[u8] = include_bytes!("../../assets/icon-128.rgba");
+
+fn semibold() -> egui::FontFamily {
+    egui::FontFamily::Name("semibold".into())
+}
+
+/// Semibold text of a given size (headings, the primary button).
+fn sb(text: impl Into<String>, size: f32) -> RichText {
+    RichText::new(text).font(egui::FontId::new(size, semibold()))
+}
+
+/// Fonts and colours. Segoe UI comes from this PC's Windows folder; without it egui's own
+/// font is used.
+fn apply_theme(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let dir = PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into())).join("Fonts");
+    if let Ok(bytes) = std::fs::read(dir.join("segoeui.ttf")) {
+        fonts.font_data.insert("segoe".into(), Arc::new(egui::FontData::from_owned(bytes)));
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "segoe".into());
+    }
+    let mut bold: Vec<String> = Vec::new();
+    if let Ok(bytes) = std::fs::read(dir.join("seguisb.ttf")) {
+        fonts.font_data.insert("segoe-semibold".into(), Arc::new(egui::FontData::from_owned(bytes)));
+        bold.push("segoe-semibold".into());
+    }
+    bold.extend(fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default());
+    fonts.families.insert(semibold(), bold);
+    ctx.set_fonts(fonts);
+
+    ctx.all_styles_mut(|style| {
+        use egui::{FontFamily::Proportional, FontId, Stroke, TextStyle};
+        style.text_styles.insert(TextStyle::Body, FontId::new(15.0, Proportional));
+        style.text_styles.insert(TextStyle::Button, FontId::new(15.0, Proportional));
+        style.text_styles.insert(TextStyle::Small, FontId::new(12.5, Proportional));
+        style.text_styles.insert(TextStyle::Heading, FontId::new(22.0, semibold()));
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        style.spacing.interact_size.y = 32.0;
+        style.spacing.icon_width = 18.0;
+        let v = &mut style.visuals;
+        *v = egui::Visuals::dark();
+        v.panel_fill = BG;
+        v.window_fill = BG;
+        v.extreme_bg_color = SURFACE;
+        v.faint_bg_color = SURFACE;
+        v.hyperlink_color = ACCENT;
+        v.selection.bg_fill = Color32::from_rgb(22, 101, 52);
+        v.selection.stroke = Stroke::new(1.0, ACCENT);
+        let radius = egui::CornerRadius::same(8);
+        let w = &mut v.widgets;
+        w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+        w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+        w.noninteractive.corner_radius = radius;
+        for (state, fill, border) in [
+            (&mut w.inactive, Color32::from_rgb(32, 32, 36), BORDER),
+            (&mut w.hovered, Color32::from_rgb(44, 44, 48), BORDER_STRONG),
+            (&mut w.active, Color32::from_rgb(56, 56, 62), BORDER_STRONG),
+            (&mut w.open, Color32::from_rgb(44, 44, 48), BORDER_STRONG),
+        ] {
+            state.bg_fill = fill;
+            state.weak_bg_fill = fill;
+            state.bg_stroke = Stroke::new(1.0, border);
+            state.fg_stroke = Stroke::new(1.0, TEXT);
+            state.corner_radius = radius;
+            state.expansion = 0.0;
+        }
+    });
+}
+
+/// A status line: a small dot in `color`, then the text (red when it's an error, dimmed when
+/// the line is being re-checked).
+fn status(ui: &mut egui::Ui, color: Color32, text: impl Into<String>) {
+    ui.horizontal_wrapped(|ui| {
+        let h = ui.text_style_height(&egui::TextStyle::Body);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, h), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.0, color);
+        let ink = if color == BAD {
+            BAD
+        } else if color == ui.visuals().weak_text_color() {
+            color
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.label(RichText::new(text).color(ink));
+    });
+}
+
+/// A rounded progress bar.
+fn bar(ui: &mut egui::Ui, fraction: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    let r = height / 2.0;
+    ui.painter().rect_filled(rect, r, BORDER);
+    let mut fill = rect;
+    fill.set_width((rect.width() * fraction.clamp(0.0, 1.0)).max(height));
+    ui.painter().rect_filled(fill, r, ACCENT);
+}
+
+/// A bordered group for one section of the window.
+fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
 
 fn main() -> eframe::Result {
     arc_unpack::guard::kill_descendants_on_exit();
@@ -26,12 +146,20 @@ fn main() -> eframe::Result {
     let flags = Flags::parse();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([700.0, 520.0])
-            .with_min_inner_size([560.0, 420.0])
+            .with_inner_size([720.0, 600.0])
+            .with_min_inner_size([600.0, 460.0])
+            .with_icon(egui::IconData { rgba: LOGO.to_vec(), width: 128, height: 128 })
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("arc-unpack", options, Box::new(move |_cc| Ok(Box::new(App::new(flags)))))
+    eframe::run_native(
+        "arc-unpack",
+        options,
+        Box::new(move |cc| {
+            apply_theme(&cc.egui_ctx);
+            Ok(Box::new(App::new(flags)))
+        }),
+    )
 }
 
 /// Command line: an optional repack folder (or a file in it), plus hidden flags used for
@@ -48,6 +176,8 @@ struct Flags {
     screenshot: Option<PathBuf>,
     /// `--select a,b`: tick exactly these components once the repack is read.
     select: Option<BTreeSet<String>>,
+    /// `--ram-limit <GB>`: tick "Limit RAM to" with this value.
+    ram_limit: Option<u32>,
 }
 
 impl Flags {
@@ -59,6 +189,7 @@ impl Flags {
                 Some("--install-to") => f.target = args.next().map(|v| v.to_string_lossy().into_owned()),
                 Some("--auto-install") => f.auto_install = true,
                 Some("--screenshot") => f.screenshot = args.next().map(PathBuf::from),
+                Some("--ram-limit") => f.ram_limit = args.next().and_then(|v| v.to_str()?.parse().ok()),
                 Some("--select") => {
                     f.select = args.next().map(|v| v.to_string_lossy().split(',').map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect())
                 }
@@ -295,6 +426,8 @@ struct App {
     /// When the running check started (its result is only dimmed if it takes a moment).
     check_started: Instant,
     limit_ram: bool,
+    /// The limit to use when `limit_ram` is ticked, in GB.
+    ram_limit_gb: u32,
     skip_check: bool,
     /// Install the runtimes this PC is missing after the game (opt-in: it downloads).
     install_runtimes: bool,
@@ -306,6 +439,7 @@ struct App {
     ram: (u64, u64),
     free: Option<(String, Option<u64>, Instant)>,
     last_sample: Instant,
+    logo: Option<egui::TextureHandle>,
     screenshot: Option<PathBuf>,
     /// Frames the window has been settled for (screenshot timing).
     settled_frames: u32,
@@ -329,7 +463,8 @@ impl App {
             preset: flags.select,
             adding: None,
             check_started: Instant::now(),
-            limit_ram: false,
+            limit_ram: flags.ram_limit.is_some(),
+            ram_limit_gb: flags.ram_limit.map_or_else(default_ram_limit_gb, |gb| gb.clamp(2, physical_ram_gb())),
             skip_check: false,
             install_runtimes: false,
             progress: Progress::default(),
@@ -340,6 +475,7 @@ impl App {
             ram: (0, 0),
             free: None,
             last_sample: Instant::now() - Duration::from_secs(1),
+            logo: None,
             screenshot: flags.screenshot,
             settled_frames: 0,
             shots_taken: 0,
@@ -476,6 +612,7 @@ impl App {
             script,
             components: script.then(|| self.selected.iter().cloned().collect()),
             runtimes: self.install_runtimes && self.adding.is_none(),
+            memory_limit: self.limit_ram.then(|| (self.ram_limit_gb.max(1) as u64) << 30),
         };
         let done_ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -613,6 +750,17 @@ impl App {
     }
 }
 
+/// This PC's RAM in whole GB (at least 2).
+fn physical_ram_gb() -> u32 {
+    let (_, total) = arc_unpack::guard::memory();
+    (((total as f64) / (1u64 << 30) as f64).round() as u32).max(2)
+}
+
+/// The limit offered when "Limit RAM" is ticked: half of this PC's RAM.
+fn default_ram_limit_gb() -> u32 {
+    (physical_ram_gb() / 2).max(2)
+}
+
 fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, w, h);
@@ -625,9 +773,9 @@ fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
 fn folder_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, enabled: bool) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.add_sized([72.0, 22.0], egui::Label::new(label));
-        let w = ui.available_width() - 84.0;
-        let edit = ui.add_enabled(enabled, egui::TextEdit::singleline(value).hint_text(hint).desired_width(w));
+        ui.add_sized([74.0, 32.0], egui::Label::new(RichText::new(label).color(MUTED)));
+        let w = ui.available_width() - 104.0;
+        let edit = ui.add_enabled(enabled, egui::TextEdit::singleline(value).hint_text(hint).desired_width(w).margin(egui::vec2(10.0, 7.0)));
         changed |= edit.changed();
         if ui.add_enabled(enabled, egui::Button::new("Browse…")).clicked()
             && let Some(d) = rfd::FileDialog::new().pick_folder()
@@ -653,10 +801,21 @@ impl eframe::App for App {
         let busy = self.running.is_some();
         let dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
-        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
-            ui.heading("arc-unpack");
-            ui.label(RichText::new("Installs repacks faster, using the installer's own steps").weak());
-            ui.add_space(10.0);
+        let logo = self
+            .logo
+            .get_or_insert_with(|| ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied([128, 128], LOGO), egui::TextureOptions::LINEAR))
+            .clone();
+        egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(22, 18)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(44.0, 44.0)));
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(sb("arc-unpack", 22.0).color(Color32::WHITE));
+                    ui.label(RichText::new("Installs repacks faster, using the installer's own steps").color(MUTED));
+                });
+            });
+            ui.add_space(12.0);
 
             let before = self.repack.clone();
             if folder_row(ui, "Repack", &mut self.repack, "the repack folder (with setup.exe and the .bin files)", !busy) && self.repack != before {
@@ -673,7 +832,7 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 if dragging {
                     ui.add_space(30.0);
-                    ui.vertical_centered(|ui| ui.label(RichText::new("Drop to use this repack").size(18.0)));
+                    ui.vertical_centered(|ui| ui.label(sb("Drop to use this repack", 18.0)));
                     return;
                 }
                 self.before_install(ui, &ctx, busy);
@@ -701,10 +860,13 @@ impl eframe::App for App {
 impl App {
     fn before_install(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
         if self.repack.trim().is_empty() {
-            ui.add_space(30.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Drop a repack folder here, or press Browse").size(16.0));
-                ui.label(RichText::new("The folder with setup.exe and the fg-*.bin files").weak());
+            ui.add_space(8.0);
+            egui::Frame::new().stroke(egui::Stroke::new(1.0, BORDER_STRONG)).corner_radius(12).inner_margin(egui::Margin::symmetric(16, 44)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    ui.label(sb("Drop a repack folder here, or press Browse", 17.0));
+                    ui.label(RichText::new("The folder with setup.exe and the fg-*.bin files").color(MUTED));
+                });
             });
             return;
         }
@@ -727,13 +889,14 @@ impl App {
 
         // What to install.
         if !a.choices.is_empty() {
-            ui.label(RichText::new("What to install").strong());
             let mut toggled: Option<(String, bool, bool)> = None;
             let adding = adding_parts(&a, &self.selected);
             let installed_parts = match &self.check {
                 Some(Check { installed: Some(Ok(g)), .. }) if adding => g.parts.clone(),
                 _ => BTreeSet::new(),
             };
+            card(ui, |ui| {
+            ui.label(sb("What to install", 15.0));
             for c in &a.choices {
                 ui.horizontal(|ui| {
                     let mut on = self.selected.contains(&c.name);
@@ -753,6 +916,7 @@ impl App {
                     }
                 });
             }
+            });
             if let Some((name, on, exclusive)) = toggled {
                 if on {
                     if exclusive {
@@ -795,22 +959,20 @@ impl App {
                 let fits = free.is_none_or(|f| f > c.need + (1 << 30));
                 let adding = c.parts.only_optional;
                 if let (true, Some(Err(e))) = (adding, &c.installed) {
-                    ui.colored_label(tint(BAD, ui), format!("{e}. Choose the folder the game is installed in, or tick the base game."));
+                    status(ui, tint(BAD, ui), format!("{e}. Choose the folder the game is installed in, or tick the base game."));
                 } else if adding && c.archives == 0 {
-                    ui.colored_label(tint(WARN, ui), "Tick the parts to add to the installed game.");
+                    status(ui, tint(WARN, ui), "Tick the parts to add to the installed game.");
                 } else if !c.missing.is_empty() {
                     let (s, it) = if c.missing.len() == 1 { ("", "it") } else { ("s", "them") };
-                    ui.colored_label(
+                    status(
+                        ui,
                         tint(BAD, ui),
                         format!("Missing file{s}: {}. Download {it} into the repack folder, or untick the part that needs {it}.", c.missing.join(", ")),
                     );
                 } else if let Some(e) = &c.error {
-                    ui.colored_label(tint(BAD, ui), format!("The installer's steps can't be run: {e}"));
+                    status(ui, tint(BAD, ui), format!("The installer's steps can't be run: {e}"));
                 } else if !fits {
-                    ui.colored_label(
-                        tint(BAD, ui),
-                        format!("Needs {}, but only {} is free on {drive}", human(c.need), human(free.unwrap_or(0))),
-                    );
+                    status(ui, tint(BAD, ui), format!("Needs {}, but only {} is free on {drive}", human(c.need), human(free.unwrap_or(0))));
                 } else {
                     let mut line = if adding {
                         format!("Game found · adds {} · needs {}", part_labels(&a, &self.selected), human(c.need))
@@ -820,21 +982,26 @@ impl App {
                     if let Some(f) = free {
                         line.push_str(&format!(" · {} free on {drive}", human(f)));
                     }
-                    ui.colored_label(tint(OK, ui), line);
+                    status(ui, tint(OK, ui), line);
                     // Pressing Install mid-check is safe: the install checks for itself.
                     ready = true;
                 }
             }
         }
         if let Some(note) = &a.note {
-            ui.colored_label(WARN, note);
+            status(ui, WARN, note.clone());
         }
 
         // Options, in FitGirl's words.
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.limit_ram, "Limit RAM usage"))
-                .on_hover_text("For PCs with 16 GB of RAM or less: runs one memory-hungry decoder at a time. Slower.");
+            let hint = "Tells the decoders to stay within this much RAM and runs one memory-hungry decoder at a time. Slower. A game packed with very large settings can still need more.";
+            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.limit_ram, "Limit RAM to")).on_hover_text(hint);
+            ui.add_enabled(
+                !busy && self.limit_ram,
+                egui::DragValue::new(&mut self.ram_limit_gb).range(2..=physical_ram_gb()).speed(0.1).suffix(" GB"),
+            )
+            .on_hover_text(hint);
             ui.add_space(12.0);
             let has_list = a.scan.md5_file.is_some();
             ui.add_enabled(!busy && has_list, egui::Checkbox::new(&mut self.skip_check, "Skip archive check")).on_hover_text(if has_list {
@@ -862,11 +1029,14 @@ impl App {
         if !busy && !installed {
             let can = ready && !self.target.trim().is_empty();
             let adding = matches!(&self.check, Some(c) if c.parts.only_optional);
-            let button = egui::Button::new(RichText::new(if adding { "Add to installed game" } else { "Install" }).size(18.0).strong())
-                .fill(if can { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.bg_fill });
+            let label = sb(if adding { "Add to installed game" } else { "Install" }, 17.0);
+            let button = egui::Button::new(if can { label.color(Color32::from_rgb(5, 24, 12)) } else { label.color(MUTED) })
+                .fill(if can { ACCENT } else { Color32::from_rgb(32, 32, 36) })
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(10);
             let clicked = ui
                 .with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
-                    ui.add_enabled(can, button.min_size(egui::vec2(0.0, 40.0))).clicked()
+                    ui.add_enabled(can, button.min_size(egui::vec2(0.0, 46.0))).clicked()
                 })
                 .inner;
             if clicked {
@@ -920,11 +1090,11 @@ impl App {
         };
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(RichText::new(&title).strong().size(16.0));
+            ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
+            ui.label(sb(&title, 18.0).color(Color32::WHITE));
         });
         if !sub.is_empty() {
-            ui.label(&sub);
+            ui.label(RichText::new(&sub).color(MUTED));
         }
         let mut text = format!("{}%", (frac * 100.0).floor());
         if let Some(bps) = speed.filter(|b| *b > 0.0) {
@@ -936,7 +1106,8 @@ impl App {
         }
         let show_bar = !p.jobs.is_empty() || p.total_fixed;
         if show_bar {
-            ui.add(egui::ProgressBar::new(frac as f32).text(text));
+            bar(ui, frac as f32, 10.0);
+            ui.label(&text);
         }
         ui.horizontal(|ui| {
             if let Some(r) = &self.running {
@@ -961,7 +1132,8 @@ impl App {
                 for j in running {
                     let (d, t) = if j.out_total > 0 && j.out_done > 0 { (j.out_done, j.out_total) } else { (j.done, j.total) };
                     let rate = d as f64 / j.started.elapsed().as_secs_f64().max(0.1);
-                    ui.add(egui::ProgressBar::new(d as f32 / t.max(1) as f32).text(format!("{} · {}/s", j.label, human(rate as u64))));
+                    ui.label(RichText::new(format!("{} · {}/s", j.label, human(rate as u64))).color(MUTED));
+                    bar(ui, d as f32 / t.max(1) as f32, 4.0);
                 }
                 for j in finished.iter().rev().take(5) {
                     match &j.finished {
@@ -991,7 +1163,11 @@ impl App {
                 } else {
                     (format!("Finished with {} problem{}", s.problems.len(), if s.problems.len() == 1 { "" } else { "s" }), BAD)
                 };
-                ui.label(RichText::new(title).size(20.0).strong().color(color));
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 28.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 6.0, color);
+                    ui.label(sb(title, 22.0).color(Color32::WHITE));
+                });
                 if !s.cancelled {
                     ui.label(format!(
                         "{} files · {} · {} · {}/s on average",
@@ -1002,7 +1178,7 @@ impl App {
                     ));
                 }
                 if report.files_md5 > 0 {
-                    ui.colored_label(OK, format!("All {} files match the repack's MD5 list", count(report.files_md5 as u64)));
+                    status(ui, OK, format!("All {} files match the repack's MD5 list", count(report.files_md5 as u64)));
                 }
                 for p in &s.problems {
                     ui.colored_label(BAD, p);
@@ -1039,7 +1215,7 @@ impl App {
                 }
             }
             Outcome::Failed(e) => {
-                ui.label(RichText::new("Install failed").size(20.0).strong().color(BAD));
+                ui.label(sb("Install failed", 22.0).color(BAD));
                 ui.colored_label(BAD, e);
             }
         }

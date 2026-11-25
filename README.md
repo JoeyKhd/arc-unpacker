@@ -22,6 +22,8 @@
 
 **Add a bonus or language pack later:** untick the base game, choose the folder the game is installed in, and press **Add to installed game**. The main `.bin` files don't need to be there anymore. Works on games installed by arc-unpack or by the repack's own installer.
 
+**Short on RAM?** Tick **Limit RAM to** and set how many GB the install may use. It's slower.
+
 From a terminal: `arc-unpack install "<repack folder>" "<game folder>"`.
 
 > Use it only on archives you have the right to extract.

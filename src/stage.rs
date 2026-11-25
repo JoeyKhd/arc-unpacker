@@ -227,7 +227,8 @@ fn four_by_four(inner: Vec<Stage>, input: Stream, ctx: &Ctx, label: String) -> R
                 // Blocks in flight: as many as cores, within about 1.5 GB of buffers.
                 let block = (orig.max(packed) as u64).max(1 << 20);
                 let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-                ahead = ((3u64 << 29) / (2 * block)).clamp(1, threads.min(16) as u64) as usize;
+                let budget = crate::memlimit::get().map_or(3u64 << 29, |limit| (limit / 8).min(3 << 29));
+                ahead = (budget / (2 * block)).clamp(1, threads.min(16) as u64) as usize;
                 let (tx, rx) = crossbeam_channel::bounded::<(u64, i32, Vec<u8>)>(ahead);
                 for _ in 0..ahead {
                     let (rx, done, inner, ctx) = (rx.clone(), done.clone(), inner.clone(), ctx2.clone());

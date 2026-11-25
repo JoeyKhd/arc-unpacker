@@ -9,6 +9,7 @@ pub mod helpers;
 pub mod inno;
 pub mod install;
 pub mod lzma;
+pub mod memlimit;
 pub mod method;
 pub mod pascal;
 pub mod perf;

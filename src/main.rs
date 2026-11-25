@@ -365,6 +365,10 @@ struct InstallArgs {
     /// is free).
     #[arg(long, default_value_t = 2)]
     heavy_jobs: usize,
+    /// Keep RAM use to about this many GB: the decoders are told to stay within it and one
+    /// memory-hungry decoder runs at a time. Slower.
+    #[arg(long, value_name = "GB")]
+    memory_limit: Option<u64>,
     #[arg(long, default_value_t = 8)]
     writers: usize,
     #[arg(long)]
@@ -418,6 +422,9 @@ fn install(a: InstallArgs) -> Result<()> {
         if let Some(c) = &a.components {
             args.extend(["--components".into(), c.join(",")]);
         }
+        if let Some(gb) = a.memory_limit {
+            args.extend(["--memory-limit".into(), gb.to_string()]);
+        }
         for (flag, on) in
             [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune), ("--no-script", a.no_script), ("--runtimes", a.runtimes)]
         {
@@ -449,7 +456,7 @@ fn install(a: InstallArgs) -> Result<()> {
         config: a.config.map(|c| abs(&c)),
         verify_md5: !a.no_verify,
         jobs: a.jobs,
-        heavy_jobs: a.heavy_jobs,
+        heavy_jobs: if a.memory_limit.is_some() { 1 } else { a.heavy_jobs },
         writers: a.writers,
         overwrite: a.overwrite,
         stall_timeout: a.stall_timeout,
@@ -461,6 +468,7 @@ fn install(a: InstallArgs) -> Result<()> {
         script: !a.no_script,
         components: a.components,
         runtimes: a.runtimes,
+        memory_limit: a.memory_limit.map(|gb| gb.max(1) << 30),
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();

@@ -46,6 +46,7 @@ pub fn workers() -> usize {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     // Each xtool process takes about 1.5 GB with its chunk; keep a quarter of free memory spare.
     let (free, _) = crate::guard::memory();
+    let free = crate::memlimit::get().map_or(free, |limit| free.min(limit));
     let fit = if free > 0 { (free * 3 / 4 / (2 << 30)) as usize } else { 2 };
     (threads / 6).clamp(2, 6).min(fit)
 }
