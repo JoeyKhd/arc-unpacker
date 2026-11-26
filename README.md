@@ -8,7 +8,7 @@
 
 # arc-unpacker
 
-**Installs FitGirl-style repacks 1.7× faster than their own installer across 73 tested repacks (up to 3.9×), with byte-identical results.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
+**Installs FitGirl-style repacks 1.6× faster than their own installer across 75 tested repacks (up to 3.9×), with byte-identical results.** It runs the installer's own install steps on a parallel engine, and checks every file while writing it.
 
 **[→ Benchmarks: every game we tested, its own installer vs arc-unpack](docs/BENCHMARKS.md)**
 
@@ -42,7 +42,7 @@ More in [How it works](docs/HOW-IT-WORKS.md).
 
 - **Inno Setup + FreeArc repacks:** the format FitGirl uses "in 99.9% of cases". arc-unpack runs the installer's ISDone extraction steps and post-processing tools, with its CLS codecs (xtool, srep, lolz, …).
 - **Check any repack in seconds, without installing:** `arc-unpack script "<repack folder>"` lists every step, or names what isn't supported.
-- **Tested end to end** on 73 repacks ([benchmarks](docs/BENCHMARKS.md)). Every install was compared file by file with the original installer's output.
+- **Tested end to end** on 75 repacks ([benchmarks](docs/BENCHMARKS.md)). Every install was compared file by file with the original installer's output.
 
 **Runtimes (DirectX, Visual C++, .NET):** if this PC is missing one the game needs, the window offers **Also install missing runtimes**. They're downloaded from the same Microsoft links the installer uses, checked for Microsoft's signature, and installed silently. Otherwise arc-unpack never connects to the internet.
 
