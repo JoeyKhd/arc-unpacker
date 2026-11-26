@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-57 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+58 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -45,6 +45,7 @@
 | Frontier - Path of Shadows | 0.7 GB | 1 min 45 s | 52 s | **2.0×** | 0.1.0-beta.9 |
 | Hozy | 5.2 GB | 2 min 31 s | 1 min 16 s | **2.0×** | 0.1.0-beta.8 |
 | 771 - Smile and Work | 0.7 GB | 24 s | 12 s | **1.9×** | 0.1.0-beta.6 |
+| Ancient Wars - Sparta HD | 5.1 GB | 1 min 07 s | 35 s | **1.9×** | 0.1.0-beta.10 |
 | Football Manager 27 | 4.7 GB | 6 min 48 s | 3 min 32 s | **1.9×** | 0.1.0-beta.8 |
 | Goat Simulator 3 | 5.5 GB | 3 min 18 s | 1 min 45 s | **1.9×** | 0.1.0-beta.8 |
 | Revenge of the Mage | 6.1 GB | 3 min 45 s | 2 min 00 s | **1.9×** | 0.1.0-beta.8 |
@@ -63,11 +64,11 @@
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 57** | | **149 min 28 s** | **72 min 23 s** | **2.1×** | |
+| **All 58** | | **150 min 35 s** | **72 min 58 s** | **2.1×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 57 installs were byte-identical to the original installer's.
+- **Same result:** all 58 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
