@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-75 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+76 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -62,6 +62,7 @@
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
 | Car Mechanic Simulator 2021 | 10.8 GB | 7 min 40 s | 4 min 32 s | **1.7×** | 0.1.0-beta.11 |
 | The Rogue Prince of Persia | 0.5 GB | 41 s | 25 s | **1.7×** | 0.1.0-beta.9 |
+| AI LIMIT | 14.8 GB | 4 min 43 s | 3 min 00 s | **1.6×** | 0.1.0-beta.12 |
 | Football Manager 2023 | 2.3 GB | 2 min 40 s | 1 min 40 s | **1.6×** | 0.1.0-beta.8 |
 | Motorcycle Ride - Infinity | 3.0 GB | 1 min 45 s | 1 min 10 s | **1.5×** | 0.1.0-beta.9 |
 | Red Dead Redemption | 6.4 GB | 5 min 18 s | 3 min 48 s | **1.4×** | 0.1.0-beta.7 |
@@ -81,11 +82,11 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 75** | | **313 min 16 s** | **190 min 12 s** | **1.6×** | |
+| **All 76** | | **317 min 59 s** | **193 min 12 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 75 installs were byte-identical to the original installer's.
+- **Same result:** all 76 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
