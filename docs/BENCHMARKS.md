@@ -59,7 +59,7 @@
 | Motorcycle Ride - Infinity | 3.0 GB | 1 min 45 s | 1 min 10 s | **1.5×** | 0.1.0-beta.9 |
 | Red Dead Redemption | 6.4 GB | 5 min 18 s | 3 min 48 s | **1.4×** | 0.1.0-beta.7 |
 | Takeover 2 | 4.2 GB | 3 min 15 s | 2 min 15 s | **1.4×** | 0.1.0-beta.9 |
-| Bloodborne | 15.1 GB | 10 min 44 s | 8 min 08 s | **1.3×** | 0.1.0-beta.10 |
+| Bloodborne | 15.1 GB | 10 min 44 s | 8 min 10 s | **1.3×** | 0.1.0-beta.11 |
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
@@ -67,7 +67,7 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 61** | | **187 min 01 s** | **103 min 13 s** | **1.8×** | |
+| **All 61** | | **187 min 01 s** | **103 min 14 s** | **1.8×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
