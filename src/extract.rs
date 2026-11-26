@@ -169,18 +169,16 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
         bail!("missing decoders (use --skip-missing to extract the rest):\n  {}", missing.join("\n  "));
     }
 
+    // Without administrator rights these codecs can't create their shared memory: they fail, and
+    // their helper processes wait forever. Stop before starting any.
     if !crate::guard::is_elevated() {
         let needs = codecs_needing_admin(&jobs, cfg);
-        if !needs.is_empty() {
-            events::warn(
-                sink,
-                format!(
-                    "not running as administrator, but these codecs create Global\\ shared memory and will fail \
-                     without it: {}. Run arc-unpack as administrator.",
-                    needs.join(", ")
-                ),
-            );
-        }
+        ensure!(
+            needs.is_empty(),
+            "these codecs need administrator rights (they create Global\\ shared memory): {}. Run arc-unpack as \
+             administrator (without --no-elevate).",
+            needs.join(", ")
+        );
     }
 
     let mut summary = Summary::default();
@@ -417,11 +415,13 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
                 }
             }
             JobKind::Unarc => {
-                if let Ok(rd) = std::fs::read_dir(cfg.codec_dir()) {
-                    for e in rd.flatten() {
-                        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
-                        if n.starts_with("cls-") && n.ends_with(".dll") {
-                            dlls.insert(e.path());
+                // unarc.dll loads cls-<name>.dll for a method <name>; any word of the method
+                // string can be one ("4x4:b128mb:mpzz+srep").
+                for b in &job.archive.blocks {
+                    for word in b.method.split(['+', ':']).map(str::trim).filter(|w| !w.is_empty()) {
+                        let dll = cfg.codec_dir().join(format!("cls-{}.dll", word.to_ascii_lowercase()));
+                        if dll.is_file() {
+                            dlls.insert(dll);
                         }
                     }
                 }
