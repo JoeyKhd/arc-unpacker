@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-52 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+57 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -10,17 +10,21 @@
 | Hearts of Iron IV | 4.6 GB | 5 min 40 s | 1 min 27 s | **3.9×** | 0.1.0-beta.8 |
 | Hollow Knight - Silksong | 1.8 GB | 1 min 56 s | 30 s | **3.9×** | 0.1.0-beta.6 |
 | Void Reaver | 2.1 GB | 1 min 18 s | 20 s | **3.9×** | 0.1.0-beta.8 |
+| SURI - The Seventh Note | 1.8 GB | 1 min 33 s | 25 s | **3.8×** | 0.1.0-beta.10 |
 | Chained Beasts | 0.5 GB | 30 s | 8 s | **3.7×** | 0.1.0-beta.9 |
 | Crusader Kings 3 | 6.0 GB | 6 min 16 s | 1 min 41 s | **3.7×** | 0.1.0-beta.7 |
 | Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 41 s | **3.5×** | 0.1.0-beta.6 |
+| The Witch's Bakery | 2.3 GB | 39 s | 11 s | **3.5×** | 0.1.0-beta.10 |
 | God of War III Remastered | 30.0 GB | 6 min 14 s | 1 min 49 s | **3.4×** | 0.1.0-beta.7 |
 | Castlevania - Belmont's Curse | 5.1 GB | 3 min 40 s | 1 min 09 s | **3.2×** | 0.1.0-beta.6 |
 | Factorio | 4.9 GB | 9 min 57 s | 3 min 04 s | **3.2×** | 0.1.0-beta.8 |
+| Mr. Prepper | 2.2 GB | 1 min 39 s | 32 s | **3.1×** | 0.1.0-beta.10 |
 | Bendy and the Dark Revival | 3.0 GB | 1 min 40 s | 33 s | **3.0×** | 0.1.0-beta.8 |
 | Slime Rancher 2 | 1.7 GB | 2 min 29 s | 50 s | **3.0×** | 0.1.0-beta.6 |
 | Cities - Skylines | 7.6 GB | 3 min 51 s | 1 min 21 s | **2.9×** | 0.1.0-beta.8 |
 | Probably Stolen | 0.6 GB | 29 s | 10 s | **2.9×** | 0.1.0-beta.7 |
 | Flick | 2.1 GB | 54 s | 19 s | **2.8×** | 0.1.0-beta.6 |
+| Hazard Levels | 6.3 GB | 2 min 13 s | 47 s | **2.8×** | 0.1.0-beta.10 |
 | Halls of Torment | 0.9 GB | 34 s | 13 s | **2.7×** | 0.1.0-beta.8 |
 | Shipping Store Simulator 2037 | 2.0 GB | 1 min 45 s | 39 s | **2.7×** | 0.1.0-beta.9 |
 | ATOM RPG | 5.5 GB | 2 min 37 s | 1 min 00 s | **2.6×** | 0.1.0-beta.9 |
@@ -46,6 +50,7 @@
 | Revenge of the Mage | 6.1 GB | 3 min 45 s | 2 min 00 s | **1.9×** | 0.1.0-beta.8 |
 | Serious Sam Fusion | 4.6 GB | 2 min 29 s | 1 min 20 s | **1.9×** | 0.1.0-beta.6 |
 | The Killing Stone | 4.4 GB | 1 min 58 s | 1 min 04 s | **1.9×** | 0.1.0-beta.6 |
+| Witch Cabin Cleanup | 2.4 GB | 39 s | 21 s | **1.9×** | 0.1.0-beta.10 |
 | Frontier Paladin | 8.7 GB | 5 min 15 s | 2 min 54 s | **1.8×** | 0.1.0-beta.9 |
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
 | The Rogue Prince of Persia | 0.5 GB | 41 s | 25 s | **1.7×** | 0.1.0-beta.9 |
@@ -58,11 +63,11 @@
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 52** | | **142 min 46 s** | **70 min 07 s** | **2.0×** | |
+| **All 57** | | **149 min 28 s** | **72 min 23 s** | **2.1×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 52 installs were byte-identical to the original installer's.
+- **Same result:** all 57 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
