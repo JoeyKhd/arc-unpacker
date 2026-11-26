@@ -511,7 +511,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     });
     let md5 = inno
         .as_ref()
-        .and_then(|i| match md5_list_from_setup(i) {
+        .and_then(|i| match md5_list_from_setup(i, None) {
             Ok(l) => l,
             Err(e) => {
                 events::warn(sink, format!("installed-file MD5 list: {e:#}"));
@@ -731,7 +731,7 @@ fn run_scripted(
     }
     std::fs::create_dir_all(&target)?;
 
-    let md5 = match md5_list_from_setup(inno) {
+    let md5 = match md5_list_from_setup(inno, Some(&selected)) {
         Ok(l) => l.map(Arc::new),
         Err(e) => {
             events::warn(sink, format!("installed-file MD5 list: {e:#}"));
@@ -1309,11 +1309,18 @@ fn move_tree(from: &Path, to: &Path) -> Result<()> {
 
 /// The repack's list of installed-file MD5s shipped inside setup.exe (FitGirl:
 /// `{app}\_Redist\fitgirl.md5`, lines like `<md5> *..\Game\file.dat` relative to the list's
-/// own folder).
-fn md5_list_from_setup(inno: &crate::inno::Setup) -> Result<Option<Md5List>> {
+/// own folder). With a selection, only the lists of selected components: a repack with a
+/// language choice ships one list per language, all written to the same file.
+fn md5_list_from_setup(inno: &crate::inno::Setup, selected: Option<&std::collections::BTreeSet<String>>) -> Result<Option<Md5List>> {
     let mut list = Md5List::new();
     for f in inno.files.iter().filter(|f| f.has_data() && english_or_neutral(&f.languages)) {
         let Some(rel) = f.app_relative() else { continue };
+        if let Some(sel) = selected
+            && !f.components.is_empty()
+            && !crate::setup_script::eval_components(&f.components, sel).unwrap_or(true)
+        {
+            continue;
+        }
         // FitGirl ships optional parts' entries as `*.addon` next to the list (the installer
         // appends them when the part is installed).
         let lower = rel.to_ascii_lowercase();
