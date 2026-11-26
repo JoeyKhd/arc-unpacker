@@ -928,6 +928,36 @@ struct Prefetch {
     cancel: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<Result<Summary>>>,
     used: bool,
+    /// The programs its codecs run (worked out once its config is final).
+    programs: Option<Vec<PathBuf>>,
+}
+
+/// The codec programs an archive's blocks run, given by a path (`xt\xtool.exe`, or absolute).
+/// Scripts often unpack these into their temp folder in an early step; an early extraction
+/// waits until they are there. (Bare names may be found on PATH, so they aren't waited for.)
+fn codec_programs(cfg: &Config, archive: &Path) -> Vec<PathBuf> {
+    let Ok(a) = Archive::open(archive) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for b in &a.blocks {
+        let Ok(stages) = cfg.resolve(&b.method) else { continue }; // unarc.dll's job, not ours
+        for s in Config::flatten(&stages) {
+            if let crate::config::Codec::External(e) = &s.codec {
+                // (A program that isn't there yet keeps its relative path: inside codec_dir.)
+                let p = PathBuf::from(&e.argv[0]);
+                let p = if p.is_absolute() {
+                    p
+                } else if p.components().count() > 1 {
+                    cfg.codec_dir().join(p)
+                } else {
+                    continue;
+                };
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Staging folder for early extractions: next to the game folder (same drive, so moving the
@@ -980,6 +1010,7 @@ fn plan_prefetches(plan: &crate::setup_script::Plan, src: &Path, app: &Path, sta
             cancel: Arc::new(AtomicBool::new(false)),
             handle: None,
             used: false,
+            programs: None,
         });
     }
     out
@@ -1052,6 +1083,11 @@ impl ScriptRunner<'_> {
                     continue;
                 }
             };
+            // Its codec programs may still be unpacked by an earlier step: then try again later.
+            let programs = self.prefetch[i].programs.get_or_insert_with(|| codec_programs(&cfg, &archive));
+            if !programs.iter().all(|p| p.is_file()) {
+                continue;
+            }
             let mut eopts = self.options(stage.clone(), whole.then_some(out.as_path()), self.prefetch[i].cancel.clone());
             let started = Arc::new(AtomicBool::new(false));
             eopts.first_job_started = Some(started.clone());
