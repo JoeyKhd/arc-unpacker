@@ -41,18 +41,65 @@ pub fn find(names: &[&str], host_dir: &Path) -> Result<PathBuf> {
 fn unpack(name: &str, bytes: &[u8]) -> Result<PathBuf> {
     // Keyed by content, so a changed helper never reuses a stale copy from another build.
     let digest = sha1_smol::Sha1::from(bytes).digest().to_string();
-    let dir = crate::install::default_cache_dir().join("helpers").join(&digest[..12]);
+    unpack_into(&crate::install::default_cache_dir().join("helpers").join(&digest[..12]), name, bytes, 50)
+}
+
+fn unpack_into(dir: &Path, name: &str, bytes: &[u8], tries: u32) -> Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = dir.join(name);
-    if !path.is_file() {
-        std::fs::create_dir_all(&dir)?;
-        // Write next to the target and rename, so a half-written helper is never executed.
-        let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(&tmp); // another process won the race; theirs is identical
+    if path.is_file() {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    // Write next to the target and rename, so a half-written helper is never executed. The
+    // temporary name is unique per call: several extractions in one process can unpack the
+    // same helper at once.
+    let tmp = dir.join(format!("{name}.{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    // A virus scanner checking the new program can hold it open for a moment, which makes the
+    // rename fail: try again for a few seconds.
+    let mut error = None;
+    for _ in 0..tries {
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => {
+                error = None;
+                break;
+            }
+            // Another extraction got there first; its copy is identical.
+            Err(_) if path.is_file() => {
+                error = None;
+                break;
+            }
+            Err(e) => error = Some(e),
         }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_file(&tmp);
+    if let Some(e) = error {
+        return Err(blocked(&path, &format!("it could not be put in place ({e})")));
+    }
+    if !path.is_file() {
+        return Err(blocked(&path, "it was removed right after it was written"));
     }
     Ok(path)
+}
+
+/// The error for a helper program that could not be written or was removed.
+fn blocked(path: &Path, what: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "arc-unpack's helper {} is missing: {what}. A virus scanner has probably blocked or removed it. Allow \
+         the folder {} in your virus scanner (or restore the file from its quarantine) and try again.",
+        path.display(),
+        path.parent().unwrap_or(path).display()
+    )
+}
+
+/// For a program that failed to start because it isn't there: if it is one of arc-unpack's
+/// own helpers, the reason (a virus scanner removing it after it was written).
+pub fn missing_hint(program: &Path) -> Option<String> {
+    let helpers = crate::install::default_cache_dir().join("helpers");
+    (program.starts_with(&helpers) && !program.is_file()).then(|| format!("{:#}", blocked(program, "it was removed after it was written")))
 }
 
 /// The xtool plugin from `xtool-timer/`. Named to sort last among the plugins xtool finds.
@@ -95,6 +142,31 @@ pub fn embedded() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unpacks_once_even_from_many_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = vec![7u8; 1 << 20];
+        let paths: Vec<_> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..8).map(|_| s.spawn(|| super::unpack_into(dir.path(), "h.exe", &bytes, 50).unwrap())).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(paths.iter().all(|p| p == &dir.path().join("h.exe")));
+        assert_eq!(std::fs::read(dir.path().join("h.exe")).unwrap(), bytes);
+        // Nothing else is left behind.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A helper that can't be put in place is an error that says why, never a path to a file
+    /// that isn't there.
+    #[test]
+    fn a_blocked_helper_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("h.exe")).unwrap(); // the rename can't replace this
+        let e = super::unpack_into(dir.path(), "h.exe", b"MZ", 2).unwrap_err().to_string();
+        assert!(e.contains("could not be put in place") && e.contains("virus scanner"), "{e}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "temporary file left behind");
+    }
+
     /// With `--features embed-helpers`, a helper that is not next to the executable is
     /// unpacked from the binary itself and is a valid PE file of the right architecture.
     #[cfg(feature = "embed-helpers")]

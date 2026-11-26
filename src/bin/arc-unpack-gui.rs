@@ -149,7 +149,9 @@ fn main() -> eframe::Result {
             .with_inner_size([720.0, 600.0])
             .with_min_inner_size([600.0, 460.0])
             .with_icon(egui::IconData { rgba: LOGO.to_vec(), width: 128, height: 128 })
-            .with_drag_and_drop(true),
+            // Run as administrator, the window can't receive Explorer's drag-and-drop: see
+            // `elevated_drop`, which takes over then.
+            .with_drag_and_drop(!arc_unpack::guard::is_elevated()),
         ..Default::default()
     };
     eframe::run_native(
@@ -157,9 +159,72 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             apply_theme(&cc.egui_ctx);
+            if arc_unpack::guard::is_elevated() {
+                elevated_drop::install(cc);
+            }
             Ok(Box::new(App::new(flags)))
         }),
     )
+}
+
+/// Drag-and-drop for a window run as administrator. Explorer runs without administrator rights,
+/// and Windows doesn't deliver its (OLE) drag-and-drop to a program with more rights. The older
+/// WM_DROPFILES way can be let through, so the window uses that instead.
+mod elevated_drop {
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW, WM_COPYDATA, WM_DROPFILES};
+
+    /// The message Windows uses to copy the dropped file list across to the window.
+    const WM_COPYGLOBALDATA: u32 = 0x0049;
+    static DROPPED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static CTX: OnceLock<eframe::egui::Context> = OnceLock::new();
+
+    pub fn install(cc: &eframe::CreationContext<'_>) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = cc.window_handle() else { return };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+        let hwnd = h.hwnd.get() as HWND;
+        let _ = CTX.set(cc.egui_ctx.clone());
+        // SAFETY: a live window of this thread; the subclass procedure lives for the program.
+        unsafe {
+            for msg in [WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA] {
+                ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, std::ptr::null_mut());
+            }
+            DragAcceptFiles(hwnd, 1);
+            SetWindowSubclass(hwnd, Some(on_message), 1, 0);
+        }
+    }
+
+    /// Paths dropped since the last call.
+    pub fn take() -> Vec<PathBuf> {
+        std::mem::take(&mut *DROPPED.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    unsafe extern "system" fn on_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _: usize, _: usize) -> LRESULT {
+        if msg != WM_DROPFILES {
+            return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+        }
+        let drop = wparam as HDROP;
+        let mut paths = Vec::new();
+        // SAFETY: `drop` is the HDROP Windows passed with WM_DROPFILES; buffers are sized to it.
+        unsafe {
+            for i in 0..DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0) {
+                let mut buf = vec![0u16; DragQueryFileW(drop, i, std::ptr::null_mut(), 0) as usize + 1];
+                let n = DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32) as usize;
+                paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])));
+            }
+            DragFinish(drop);
+        }
+        DROPPED.lock().unwrap_or_else(|e| e.into_inner()).extend(paths);
+        if let Some(ctx) = CTX.get() {
+            ctx.request_repaint();
+        }
+        0
+    }
 }
 
 /// Command line: an optional repack folder (or a file in it), plus hidden flags used for
@@ -695,7 +760,8 @@ impl App {
     }
 
     fn take_dropped(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let mut dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        dropped.extend(elevated_drop::take());
         if self.running.is_none()
             && let Some(dir) = dropped.into_iter().find_map(repack_dir_of)
         {

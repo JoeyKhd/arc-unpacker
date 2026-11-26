@@ -226,6 +226,7 @@ dependencies = [
  "lzma-rs",
  "md5",
  "png",
+ "raw-window-handle",
  "rfd",
  "serde",
  "sha1_smol",

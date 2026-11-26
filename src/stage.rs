@@ -370,7 +370,13 @@ struct Spawned {
 
 fn spawn_child(spec: &ExtSpec, mut cmd: Command, ctx: &Ctx) -> Result<Spawned> {
     cmd.stderr(Stdio::piped());
-    let mut child = cmd.spawn().with_context(|| format!("{}: failed to start {:?}", spec.label, spec.argv[0]))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        let what = format!("{}: failed to start {:?}", spec.label, spec.argv[0]);
+        match crate::helpers::missing_hint(Path::new(&spec.argv[0])) {
+            Some(hint) if e.kind() == std::io::ErrorKind::NotFound => anyhow::anyhow!("{what}: {hint}"),
+            _ => anyhow::Error::new(e).context(what),
+        }
+    })?;
     let job = crate::perf::CpuJob::track(&child);
     if ctx.tune {
         crate::perf::tune_child(&child, spec.performance_cores);
