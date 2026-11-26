@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-label="Drag the repack folder onto the arc-unpack window">
+  <defs>
+    <clipPath id="frame"><rect width="1280" height="360" rx="20"/></clipPath>
+    <linearGradient id="white-trail" gradientUnits="userSpaceOnUse" x1="140" y1="0" x2="420" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.22"/>
+    </linearGradient>
+    <linearGradient id="green-trail" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="420" y2="0">
+      <stop offset="0" stop-color="#22c55e" stop-opacity="0"/>
+      <stop offset="1" stop-color="#22c55e" stop-opacity="0.95"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="360" rx="20" fill="#0a0a0a"/>
+
+  <!-- The folder's trail: the mark's three streams -->
+  <g clip-path="url(#frame)">
+    <g transform="translate(50 -12)">
+    <polygon points="150,318 420,183 420,201 150,336" fill="url(#white-trail)"/>
+    <polygon points="120,368 420,218 420,236 120,386" fill="url(#green-trail)"/>
+    <polygon points="190,368 420,253 420,271 190,386" fill="url(#white-trail)"/>
+    </g>
+  </g>
+
+  <!-- The folder, on its way -->
+  <g transform="translate(460 138) rotate(-8 80 62)">
+    <path d="M0,14 a14,14 0 0 1 14,-14 h44 l16,16 h72 a14,14 0 0 1 14,14 v80 a14,14 0 0 1 -14,14 h-132 a14,14 0 0 1 -14,-14 z" fill="#a1a1aa"/>
+    <path d="M0,44 a12,12 0 0 1 12,-12 h136 a12,12 0 0 1 12,12 v66 a14,14 0 0 1 -14,14 h-132 a14,14 0 0 1 -14,-14 z" fill="#ffffff"/>
+  </g>
+  <!-- Pointer -->
+  <path transform="translate(598 224)" d="M0,0 v40 l10,-9 l8,17 l8,-4 l-8,-16 h14 z" fill="#ffffff" stroke="#0a0a0a" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- The window -->
+  <rect x="700" y="38" width="520" height="284" rx="16" fill="#111113" stroke="#3f3f46" stroke-width="2"/>
+  <g transform="translate(716 50) scale(0.085)">
+    <g stroke-width="8" stroke-linejoin="round" transform="translate(256 258) scale(1.14) translate(-253 -259)">
+      <polygon points="118,188 216,138 314,188 216,238" fill="#ffffff" stroke="#ffffff"/>
+      <polygon points="104,202 206,254 206,380 104,328" fill="#a1a1aa" stroke="#a1a1aa"/>
+      <polygon points="226,256 376,180 376,210 226,286" fill="#ffffff" stroke="#ffffff"/>
+      <polygon points="226,302 402,212 402,242 226,332" fill="#22c55e" stroke="#22c55e"/>
+      <polygon points="226,348 360,280 360,310 226,378" fill="#ffffff" stroke="#ffffff"/>
+    </g>
+  </g>
+  <rect x="764" y="62" width="120" height="14" rx="7" fill="#fafafa"/>
+  <rect x="724" y="98" width="472" height="26" rx="7" fill="#18181b" stroke="#27272a"/>
+  <rect x="724" y="132" width="472" height="26" rx="7" fill="#18181b" stroke="#27272a"/>
+  <rect x="724" y="176" width="472" height="124" rx="12" fill="#22c55e" fill-opacity="0.07" stroke="#22c55e" stroke-width="2.5" stroke-dasharray="10 8"/>
+  <g fill="none" stroke="#22c55e" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M960,204 v36"/>
+    <path d="M944,226 l16,16 l16,-16"/>
+  </g>
+  <text x="960" y="282" text-anchor="middle" font-family="'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif" font-size="24" fill="#d4d4d8">Drop the repack folder here</text>
+
+  <rect x="0.5" y="0.5" width="1279" height="359" rx="19.5" fill="none" stroke="#27272a"/>
+</svg>
