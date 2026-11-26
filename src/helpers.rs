@@ -107,9 +107,11 @@ pub const XTOOL_TIMER: &str = "zz-arc-unpack-timer.dll";
 
 /// xtool (the precompressor most repacks use) coordinates its threads with `Sleep(1)`, which
 /// lasts ~15.6 ms at Windows' default timer resolution; a tiny plugin next to xtool.exe makes
-/// xtool ask for 1 ms (see `xtool-timer/src/lib.rs`). This puts the plugin next to every 64-bit
+/// xtool ask for 1 ms, and keeps xtool's view of free memory steady, which avoids an xtool bug
+/// that restores large deduplicated files wrong when free memory rises during a decode (see
+/// `xtool-timer/src/lib.rs`). This puts the plugin next to every 64-bit
 /// `xtool*.exe` in `codec_dir` and its subfolders, or removes it when
-/// `ARC_UNPACK_NO_XTOOL_TIMER` is set. Failures are ignored: it is only a speed-up.
+/// `ARC_UNPACK_NO_XTOOL_TIMER` is set. Failures are ignored (as without the plugin).
 pub fn place_xtool_timer(codec_dir: &Path, host_dir: &Path) {
     let enabled = std::env::var_os("ARC_UNPACK_NO_XTOOL_TIMER").is_none();
     let mut dirs = vec![codec_dir.to_path_buf()];
