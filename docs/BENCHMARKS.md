@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-67 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+70 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -33,6 +33,7 @@
 | Cuphead | 4.3 GB | 2 min 34 s | 1 min 03 s | **2.5×** | 0.1.0-beta.8 |
 | Dice Hoarder | 1.5 GB | 2 min 04 s | 49 s | **2.5×** | 0.1.0-beta.8 |
 | Hollow Knight | 1.1 GB | 1 min 24 s | 33 s | **2.5×** | 0.1.0-beta.7 |
+| Persona 3 Reload | 12.3 GB | 3 min 38 s | 1 min 30 s | **2.4×** | 0.1.0-beta.11 |
 | Ticket to Ride | 0.7 GB | 45 s | 18 s | **2.4×** | 0.1.0-beta.9 |
 | Moadra | 3.3 GB | 50 s | 22 s | **2.3×** | 0.1.0-beta.6 |
 | Silver Pines | 2.1 GB | 2 min 28 s | 1 min 04 s | **2.3×** | 0.1.0-beta.8 |
@@ -43,6 +44,7 @@
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
 | over the hill | 2.1 GB | 3 min 35 s | 1 min 44 s | **2.1×** | 0.1.0-beta.8 |
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
+| Solo Leveling - ARISE OVERDRIVE | 17.9 GB | 12 min 26 s | 5 min 49 s | **2.1×** | 0.1.0-beta.11 |
 | Dispatch | 13.0 GB | 3 min 03 s | 1 min 32 s | **2.0×** | 0.1.0-beta.11 |
 | Fish and Hike | 0.9 GB | 57 s | 28 s | **2.0×** | 0.1.0-beta.9 |
 | Frontier - Path of Shadows | 0.7 GB | 1 min 45 s | 52 s | **2.0×** | 0.1.0-beta.9 |
@@ -70,14 +72,15 @@
 | Euro Truck Simulator 2 | 18.2 GB | 11 min 20 s | 9 min 23 s | **1.2×** | 0.1.0-beta.11 |
 | GTA Trilogy - Definitive Edition | 24.5 GB | 9 min 48 s | 7 min 52 s | **1.2×** | 0.1.0-beta.10 |
 | Max Payne 3 - Complete Edition | 14.9 GB | 10 min 54 s | 9 min 08 s | **1.2×** | 0.1.0-beta.11 |
+| Beast of Reincarnation | 22.6 GB | 15 min 16 s | 14 min 21 s | **1.1×** | 0.1.0-beta.11 |
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 67** | | **234 min 30 s** | **135 min 11 s** | **1.7×** | |
+| **All 70** | | **265 min 51 s** | **156 min 50 s** | **1.7×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 67 installs were byte-identical to the original installer's.
+- **Same result:** all 70 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
