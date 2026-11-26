@@ -249,7 +249,10 @@ def cmd_docs(args):
     end = s.index("\n\n", start)
     s = s[:start] + doc_table(out) + s[end:]
     s = re.sub(r"^\d+ FitGirl repacks, each installed", f"{n} FitGirl repacks, each installed", s, count=1, flags=re.M)
-    s = re.sub(r"all \d+ installs were byte-identical", f"all {n} installs were byte-identical", s)
+    # Never claim more than the ledger shows: "all N" only when every row is identical.
+    same = sum(1 for x in out if x[6])
+    count = f"all {n}" if same == n else f"{same} of {n}"
+    s = re.sub(r"(all \d+|\d+ of \d+) installs were byte-identical", f"{count} installs were byte-identical", s, count=1)
     doc.write_text(s, encoding="utf-8", newline="\n")
     readme = repo / "README.md"
     r = readme.read_text(encoding="utf-8")
