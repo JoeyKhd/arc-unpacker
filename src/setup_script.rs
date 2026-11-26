@@ -81,7 +81,40 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
             out.insert(name);
         }
     }
-    out
+    with_exclusive_choices(setup, out)
+}
+
+/// Inno Setup keeps one choice of a "pick one" group (components with the exclusive flag, such
+/// as FitGirl's game language) ticked whenever the group's parent is ticked: the first one,
+/// unless another is ticked already. `/COMPONENTS=text,local` installs the first language.
+pub fn with_exclusive_choices(setup: &Setup, selected: BTreeSet<String>) -> BTreeSet<String> {
+    exclusive_choices_of(&setup.components, selected)
+}
+
+fn exclusive_choices_of(components: &[crate::inno::Component], mut selected: BTreeSet<String>) -> BTreeSet<String> {
+    let components: Vec<(String, bool)> = components
+        .iter()
+        .filter(|c| crate::install::english_or_neutral(&c.languages))
+        .map(|c| (c.name.to_ascii_lowercase(), c.exclusive))
+        .collect();
+    // In definition order, so a choice ticked here can tick a group below it in turn.
+    for (parent, _) in &components {
+        if !selected.contains(parent) {
+            continue;
+        }
+        let prefix = format!("{parent}\\");
+        let group: Vec<&String> = components
+            .iter()
+            .filter(|(name, exclusive)| *exclusive && name.strip_prefix(&prefix).is_some_and(|rest| !rest.contains('\\')))
+            .map(|(name, _)| name)
+            .collect();
+        if let Some(first) = group.first()
+            && !group.iter().any(|name| selected.contains(*name))
+        {
+            selected.insert((*first).clone());
+        }
+    }
+    selected
 }
 
 /// Whether the repack folder has an optional/selective archive for this component, e.g.
@@ -233,6 +266,8 @@ pub struct InnoHost<'a> {
     skipping: bool,
     /// Steps left out this way, in order.
     pub skipped: Vec<Step>,
+    /// The component masks the script gave ISDoneInit (Comp1..Comp3), if it called it.
+    isdone_components: Option<[u64; 3]>,
 }
 
 impl<'a> InnoHost<'a> {
@@ -250,6 +285,7 @@ impl<'a> InnoHost<'a> {
             parts: Parts::default(),
             skipping: false,
             skipped: Vec::new(),
+            isdone_components: None,
         }
     }
 
@@ -583,6 +619,14 @@ impl Host for InnoHost<'_> {
                 yes(self.exec(&s(0), &s(1), &tmp)?)
             }
             "dll:ISARCEXTRACT" => {
+                // CurComponent: ISDone extracts an archive of component n only if bit n-1 of the
+                // masks given to ISDoneInit is set (0 = always), and reports success either way.
+                if let (n @ 1..=96, Some(masks)) = (int(0), self.isdone_components) {
+                    let bit = (n - 1) as usize;
+                    if masks[bit / 32] & (1 << (bit % 32)) == 0 {
+                        return Ok(yes(true));
+                    }
+                }
                 let (archive, dest, inner, password, cfg) = (s(2), s(3), s(4), s(6), s(7));
                 let base = inner.trim_matches(['\\', '/']).to_string();
                 ensure!(!base.split(['\\', '/']).any(|p| p == ".."), "bad path inside archive '{inner}'");
@@ -606,7 +650,13 @@ impl Host for InnoHost<'_> {
                 }
                 yes(ok)
             }
-            "dll:ISDONEINIT" | "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" | "dll:SREPINIT"
+            "dll:ISDONEINIT" => {
+                // ISDoneInit(RecordFileName, TimeType, Comp1, Comp2, Comp3, ...): which
+                // components' archives ISArcExtract extracts.
+                self.isdone_components = Some([int(2) as u64, int(3) as u64, int(4) as u64]);
+                yes(true)
+            }
+            "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" | "dll:SREPINIT"
             | "dll:PRECOMPINIT" => yes(true),
             "dll:WRAPCALLBACK" => Some(Value::Int(0)),
             "dll:SUSPENDPROC" | "dll:RESUMEPROC" | "dll:SETTASKBARPROGRESSVALUE" | "dll:SETTASKBARPROGRESSSTATE" => None,
@@ -833,7 +883,10 @@ pub fn plan_with(
     let _ = std::fs::remove_dir_all(&tmp);
     fill_plan_tmp(setup, &tmp)?;
     let files = repack_files(repack);
-    let selected = selected.unwrap_or_else(|| default_components(setup, &files));
+    let selected = match selected {
+        Some(chosen) => with_exclusive_choices(setup, chosen),
+        None => default_components(setup, &files),
+    };
     let parts = parts_for(setup, &files, &selected);
     let components = setup
         .components
@@ -1083,6 +1136,21 @@ mod tests {
         // An installer without a fixed component has no base game to leave out.
         let p = parts_of(&[component("text", false), component("bonus", false)], &files, &sel(&["bonus"]));
         assert!(!p.only_optional);
+    }
+
+    #[test]
+    fn a_ticked_group_gets_its_first_choice() {
+        let pick = |name: &str| crate::inno::Component { exclusive: true, ..component(name, false) };
+        let comps = [component("text", true), component("local", false), pick(r"local\eng"), pick(r"local\rus"), component("directx", false)];
+        let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
+        // Ancient Wars: Sparta HD with /COMPONENTS=text,local: Inno Setup installs English.
+        assert_eq!(exclusive_choices_of(&comps, sel(&["text", "local"])), sel(&["text", "local", r"local\eng"]));
+        // A choice already made stays; an unticked group stays empty.
+        assert_eq!(exclusive_choices_of(&comps, sel(&["text", "local", r"local\rus"])), sel(&["text", "local", r"local\rus"]));
+        assert_eq!(exclusive_choices_of(&comps, sel(&["text"])), sel(&["text"]));
+        // Ordinary (non-exclusive) children aren't ticked by their parent.
+        let comps = [component("voice", false), component(r"voice\french", false)];
+        assert_eq!(exclusive_choices_of(&comps, sel(&["voice"])), sel(&["voice"]));
     }
 
     #[test]

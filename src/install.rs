@@ -582,7 +582,7 @@ fn install_scripted(
     let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
     let target = abs(&opts.target_dir);
     let selected: std::collections::BTreeSet<String> = match &opts.components {
-        Some(list) => list.iter().map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect(),
+        Some(list) => ss::with_exclusive_choices(inno, list.iter().map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect()),
         None => ss::default_components(inno, &ss::repack_files(&opts.repack_dir)),
     };
     events::info(sink, format!("running the installer's own install script; components: {}", selected.iter().cloned().collect::<Vec<_>>().join(", ")));
