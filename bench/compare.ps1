@@ -145,7 +145,11 @@ function Invoke-Original($tag, $repack, $target, $parts) {
             if ($t -ge $nextTree) {
                 $nextTree = $t + 15
                 $tree = Get-Tree $setup.Id
-                $c = ($tree | ForEach-Object { [double]$_.KernelModeTime + [double]$_.UserModeTime } | Measure-Object -Sum).Sum
+                # The decoders' CPU only: Setup's own window keeps ticking while a decoder hangs.
+                # (While no decoder runs, Setup's own CPU counts instead.)
+                $workers = @($tree | Where-Object { $_.Name -notmatch '^setup(\.tmp|\.exe)?$' -and $_.Name -notmatch '\.tmp$' })
+                $counted = if ($workers.Count -gt 0) { $workers } else { $tree }
+                $c = ($counted | ForEach-Object { [double]$_.KernelModeTime + [double]$_.UserModeTime } | Measure-Object -Sum).Sum
                 if ($c -ne $treeCpu) { $treeCpu = $c; $treeSince = $t }
                 elseif (($t - $treeSince) -ge 600) {
                     $r.window_text = [AbHelp]::WindowText([int[]]@($tree | ForEach-Object { [int]$_.ProcessId }))
