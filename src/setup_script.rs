@@ -81,7 +81,10 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
         let in_type = default_type
             .as_ref()
             .is_some_and(|d| c.types.split(',').any(|t| t.trim().eq_ignore_ascii_case(d)));
-        if c.fixed || in_type || downloaded_part(c, repack_files) {
+        // A downloaded optional archive ticks its part, but not in a "pick one" group: there the
+        // installer's default stays (the first choice, see `with_exclusive_choices`). Left 4 Dead
+        // 2 with several voice packs downloaded installs English by default, not the first pack.
+        if c.fixed || in_type || (!c.exclusive && downloaded_part(c, repack_files)) {
             out.insert(name);
         }
     }
@@ -140,7 +143,9 @@ fn downloaded_part(component: &crate::inno::Component, repack_files: &[String]) 
 
 /// Whether `file` is the optional/selective archive of `component`: by the last part of its
 /// name (`voice\french` -> `...french...`), or by its description when that is one word, as
-/// FitGirl's language names are (`local\esp` "Spanish" -> `...spanish...`).
+/// FitGirl's language names are (`local\esp` "Spanish" -> `...spanish...`), or by the words of
+/// the archive's part name: their initials (`le` -> `fg-optional-limited-edition.bin`) or as a
+/// phrase in the description ("Install Limited Edition as well").
 fn part_file_matches(component: &crate::inno::Component, file: &str) -> bool {
     if !is_optional_archive(file) {
         return false;
@@ -149,7 +154,19 @@ fn part_file_matches(component: &crate::inno::Component, file: &str) -> bool {
     let leaf = component.name.rsplit('\\').next().unwrap_or(&component.name).to_ascii_lowercase();
     let word: String = component.description.trim().to_ascii_lowercase();
     let one_word = !word.starts_with('{') && word.len() >= 4 && word.chars().all(|c| c.is_ascii_alphabetic());
-    (leaf.len() >= 3 && file.contains(&leaf)) || (one_word && file.contains(&word))
+    if (leaf.len() >= 3 && file.contains(&leaf)) || (one_word && file.contains(&word)) {
+        return true;
+    }
+    // "fg-optional-limited-edition.bin" -> ["limited", "edition"].
+    let stem = file.rsplit_once('.').map_or(file.as_str(), |(s, _)| s);
+    let part = ["optional-", "selective-"].iter().find_map(|k| stem.split_once(k).map(|(_, rest)| rest)).unwrap_or("");
+    let words: Vec<&str> = part.split(['-', '_', ' ']).filter(|w| !w.is_empty()).collect();
+    if words.len() < 2 {
+        return false;
+    }
+    let initials: String = words.iter().filter_map(|w| w.chars().next()).collect();
+    let phrase = words.join(" ");
+    (leaf.len() >= 2 && initials == leaf) || (phrase.len() >= 6 && word.contains(&phrase))
 }
 
 /// Inno Setup's uninstaller (`unins000.exe`, `unins001.exe`, ...).
@@ -644,7 +661,17 @@ impl Host for InnoHost<'_> {
                 out.push((5, Value::Int(if ok { 0 } else { 1 })));
                 yes(ok)
             }
-            "dll:ISEXEC" => yes(self.exec(&s(3), &s(4), &s(5))?),
+            "dll:ISEXEC" => {
+                // ISDone creates a missing working folder: Sleeping Dogs runs build01.bat in
+                // {app}\temp\04\, which nothing before it creates. (Only where the script may write.)
+                if !self.dry
+                    && let Some(dir) = self.writable(&s(5))
+                    && !dir.exists()
+                {
+                    let _ = std::fs::create_dir_all(&dir);
+                }
+                yes(self.exec(&s(3), &s(4), &s(5))?)
+            }
             "dll:EXEC2" => {
                 let tmp = self.folders.tmp.to_string_lossy().into_owned();
                 yes(self.exec(&s(0), &s(1), &tmp)?)
@@ -1180,6 +1207,12 @@ mod tests {
         assert!(downloaded_part(&c(r"local\esp", "Spanish"), &files));
         assert!(!downloaded_part(&c(r"local\ita", "Italian"), &files));
         assert!(!downloaded_part(&c("credits", "Credits Video"), &files), "only one-word descriptions are matched");
+        // Sleeping Dogs: component "le", archive fg-optional-limited-edition.bin.
+        let sd: Vec<String> = ["fg-01.bin", "fg-optional-limited-edition.bin"].iter().map(|s| s.to_string()).collect();
+        assert!(downloaded_part(&c("le", "Install Limited Edition as well"), &sd));
+        assert!(downloaded_part(&c("lim", "Install Limited Edition as well"), &sd), "the phrase alone");
+        assert!(downloaded_part(&c("le", ""), &sd), "the initials alone");
+        assert!(!downloaded_part(&c("text", "Definitive Edition"), &sd));
     }
 
     fn component(name: &str, fixed: bool) -> crate::inno::Component {
