@@ -1435,6 +1435,7 @@ impl ScriptRunner<'_> {
             return Ok(true);
         }
         let mut child = self.spawn(program, args, dir)?;
+        let mut stall = crate::guard::StallCheck::new(self.opts.stall_timeout);
         let status = loop {
             if let Some(st) = child.try_wait()? {
                 break st;
@@ -1442,6 +1443,16 @@ impl ScriptRunner<'_> {
             if self.opts.cancel.load(Ordering::Relaxed) {
                 let _ = child.kill();
                 bail!("cancelled");
+            }
+            if stall.stalled() {
+                // Named before stopping it: what still runs is the best hint at why.
+                let running = crate::guard::running_programs().join(", ");
+                let _ = child.kill();
+                let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                bail!(
+                    "{name}{args} made no progress for {} s (nothing read or written; still running: {running}): stopped it",
+                    stall.limit_secs()
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };

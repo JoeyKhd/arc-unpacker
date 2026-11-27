@@ -182,6 +182,62 @@ mod imp {
         out
     }
 
+    /// Bytes read and written so far by this process and everything it started, those that
+    /// already exited included. None without the job (see `kill_descendants_on_exit`).
+    pub fn job_io_bytes() -> Option<u64> {
+        use windows_sys::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JobObjectBasicAndIoAccountingInformation,
+        };
+        let job = *JOB.lock().unwrap() as HANDLE;
+        if job.is_null() {
+            return None;
+        }
+        let mut info: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAndIoAccountingInformation,
+                (&mut info as *mut JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        (ok != 0).then(|| info.IoInfo.ReadTransferCount + info.IoInfo.WriteTransferCount)
+    }
+
+    /// Names of the processes this one started that still run (e.g. "cmd.exe, countdown.exe").
+    pub fn running_programs() -> Vec<String> {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        };
+        let pids = job_pids();
+        let mut names = Vec::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap as isize == -1 {
+                return names;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut e) != 0 {
+                loop {
+                    if pids.contains(&e.th32ProcessID) {
+                        let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                        let name = String::from_utf16_lossy(&e.szExeFile[..n]);
+                        if !name.eq_ignore_ascii_case("conhost.exe") && !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                    if Process32NextW(snap, &mut e) == 0 {
+                        break;
+                    }
+                }
+            }
+            windows_sys::Win32::Foundation::CloseHandle(snap);
+        }
+        names
+    }
+
     fn job_pids() -> HashSet<u32> {
         let job = *JOB.lock().unwrap() as HANDLE;
         if job.is_null() {
@@ -464,6 +520,12 @@ mod imp {
         (0.0, 0, 0)
     }
     pub fn tune_descendants(_: &mut std::collections::HashSet<u32>) {}
+    pub fn job_io_bytes() -> Option<u64> {
+        None
+    }
+    pub fn running_programs() -> Vec<String> {
+        Vec::new()
+    }
     pub fn kill_descendants_on_exit() -> bool {
         false
     }
@@ -479,6 +541,50 @@ mod imp {
 }
 
 pub use imp::*;
+
+/// Notices an install that stopped making progress: this process and everything it started
+/// (codecs, the repack's tools, tools those start) read and wrote less than `STALL_BYTES` in
+/// the time limit. A tool waiting for a file that never comes, a dialog nobody sees, a
+/// deadlock: whatever the cause, nothing moves on disk.
+pub struct StallCheck {
+    limit: Option<std::time::Duration>,
+    base: u64,
+    since: std::time::Instant,
+    next: std::time::Instant,
+}
+
+/// Less I/O than this counts as none: a batch file's waiting loop (cmd re-reading its lines,
+/// a 1-second timer program) does a few hundred bytes a second.
+pub const STALL_BYTES: u64 = 4 << 20;
+
+impl StallCheck {
+    /// `limit_secs` 0: never stalls. Also never without the job (the counts come from it).
+    pub fn new(limit_secs: u64) -> StallCheck {
+        let now = std::time::Instant::now();
+        let limit = (limit_secs > 0 && job_io_bytes().is_some()).then(|| std::time::Duration::from_secs(limit_secs));
+        StallCheck { limit, base: job_io_bytes().unwrap_or(0), since: now, next: now }
+    }
+
+    /// Call often (it looks once a second): true once nothing moved for the limit.
+    pub fn stalled(&mut self) -> bool {
+        let Some(limit) = self.limit else { return false };
+        let now = std::time::Instant::now();
+        if now < self.next {
+            return false;
+        }
+        self.next = now + std::time::Duration::from_secs(1);
+        let io = job_io_bytes().unwrap_or(self.base);
+        if io.saturating_sub(self.base) >= STALL_BYTES {
+            self.base = io;
+            self.since = now;
+        }
+        now.duration_since(self.since) > limit
+    }
+
+    pub fn limit_secs(&self) -> u64 {
+        self.limit.map(|l| l.as_secs()).unwrap_or(0)
+    }
+}
 
 #[cfg(all(test, windows))]
 mod tests {
@@ -507,5 +613,39 @@ mod tests {
         drop(first); // released from a different thread than any waiter: semaphores allow that
         let waited = waiter.join().unwrap();
         assert!(waited >= std::time::Duration::from_millis(250), "second acquire didn't wait ({waited:?})");
+    }
+
+    /// A batch file's waiting loop counts as no progress; writing counts as progress. (Ignored:
+    /// the counts cover the whole test process, so other tests' I/O would disturb it. Run it
+    /// alone: `cargo test --lib stall_check -- --ignored`.)
+    #[test]
+    #[ignore]
+    fn stall_check() {
+        use std::time::{Duration, Instant};
+        assert!(kill_descendants_on_exit());
+        let mut stall = StallCheck::new(3);
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "for /l %i in (1,1,30) do @(ping -n 2 127.0.0.1 >nul & if exist nothing-here.txt exit)"])
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while !stall.stalled() {
+            assert!(started.elapsed() < Duration::from_secs(10), "a waiting loop wasn't seen as stalled");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert!(running_programs().iter().any(|n| n.eq_ignore_ascii_case("cmd.exe")));
+        let _ = child.kill();
+
+        let dir = std::env::temp_dir().join(format!("arcunp-stall-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut stall = StallCheck::new(3);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(6) {
+            std::fs::write(dir.join("x"), vec![0u8; 2 << 20]).unwrap();
+            assert!(!stall.stalled(), "writing was seen as a stall");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

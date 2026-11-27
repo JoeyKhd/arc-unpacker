@@ -708,12 +708,24 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
         s
     });
     // Cancel support: unarc reports progress in coarse steps, so watch the flag separately.
+    // Also stopped when nothing moves on disk for the stall timeout (a hung external codec).
     let finished = Arc::new(AtomicBool::new(false));
+    let stalled = Arc::new(Mutex::new(None::<String>));
     let canceller = {
-        let (child, finished, cancel) = (child.clone(), finished.clone(), opts.cancel.clone());
+        let (child, finished, cancel, stalled) = (child.clone(), finished.clone(), opts.cancel.clone(), stalled.clone());
+        let mut stall = crate::guard::StallCheck::new(opts.stall_timeout);
         std::thread::spawn(move || {
             while !finished.load(Ordering::Relaxed) {
                 if cancel.load(Ordering::Relaxed) {
+                    let _ = child.lock().unwrap().kill();
+                    return;
+                }
+                if stall.stalled() {
+                    let running = crate::guard::running_programs().join(", ");
+                    *stalled.lock().unwrap() = Some(format!(
+                        "unarc.dll made no progress for {} s (nothing read or written; still running: {running}): stopped it",
+                        stall.limit_secs()
+                    ));
                     let _ = child.lock().unwrap().kill();
                     return;
                 }
@@ -750,6 +762,9 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     let cpu = job.as_ref().and_then(|j| j.cpu_seconds()).or_else(|| crate::perf::cpu_seconds(&child.lock().unwrap()));
     if opts.cancel.load(Ordering::Relaxed) {
         bail!("cancelled");
+    }
+    if let Some(why) = stalled.lock().unwrap().take() {
+        bail!("{why}");
     }
     if !status.success() {
         bail!("unarc.dll failed ({status}): {}", errors.trim());
