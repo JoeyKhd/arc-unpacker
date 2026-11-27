@@ -303,17 +303,47 @@ function Read-Manifest($path) {
 # The installers' own uninstallers (Inno's unins000.*, arc-unpack's uninstall.*) aren't game files.
 function Test-Uninstaller($k) { $k -in 'unins000.exe', 'unins000.dat', 'uninstall.exe', 'uninstall.dat' }
 
-function Compare-Manifests($origPath, $arcPath) {
+# Scripts write the install folder into some files (Assetto Corsa: SetIniString puts
+# '{app}\AssettoCorsa.exe' into SmartSteamEmu.ini). The original installs into <Work>\<n>-o and
+# arc-unpack into <Work>\<n>-a, so such a file differs by that one name. It counts as the same when
+# the arc-unpack copy, with its folder replaced by the original's (<n> as in that run, which an
+# older manifest may have had at another batch position), hashes like the original's.
+function Test-SameButFolder($file, $targetA, $wantMd5) {
+    $fi = Get-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    if (-not $fi -or $fi.Length -gt 4MB) { return $false }
+    $latin = [Text.Encoding]::GetEncoding(28591)
+    $text = $latin.GetString([IO.File]::ReadAllBytes($file))
+    if ($text.IndexOf($targetA, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    $md5 = [Security.Cryptography.MD5]::Create()
+    $leaf = Split-Path $targetA -Leaf
+    $base = Split-Path $targetA -Parent
+    $n = if ($leaf -match '^(\d+)-a$') { [int]$Matches[1] } else { 0 }
+    $tries = @($n) + (1..60 | Where-Object { $_ -ne $n })
+    foreach ($i in $tries) {
+        $orig = Join-Path $base "$i-o"
+        $swapped = [regex]::Replace($text, [regex]::Escape($targetA), { param($m) $orig }, 'IgnoreCase')
+        $hash = ($md5.ComputeHash($latin.GetBytes($swapped)) | ForEach-Object { $_.ToString('x2') }) -join ''
+        if ($hash -eq $wantMd5.ToLower()) { return $true }
+    }
+    $false
+}
+
+function Compare-Manifests($origPath, $arcPath, $targetA) {
     $a = Read-Manifest $origPath; $b = Read-Manifest $arcPath
     if ($a.Count -eq 0) { return $null }
-    $same = 0; $differ = @(); $onlyOrig = @(); $onlyArc = @()
+    $same = 0; $folderOnly = 0; $differ = @(); $onlyOrig = @(); $onlyArc = @()
     foreach ($k in $a.Keys) {
         if (Test-Uninstaller $k) { continue }
-        if (-not $b.ContainsKey($k)) { $onlyOrig += $k } elseif ($a[$k][1] -eq $b[$k][1]) { $same++ } else { $differ += $k }
+        if (-not $b.ContainsKey($k)) { $onlyOrig += $k }
+        elseif ($a[$k][1] -eq $b[$k][1]) { $same++ }
+        elseif ($targetA -and (Test-SameButFolder (Join-Path $targetA $k) $targetA $a[$k][1])) { $same++; $folderOnly++ }
+        else { $differ += $k }
     }
     foreach ($k in $b.Keys) { if (-not $a.ContainsKey($k) -and -not (Test-Uninstaller $k)) { $onlyArc += $k } }
     [ordered]@{
         identical = $same; differ = $differ.Count; only_original = $onlyOrig.Count; only_arc_unpack = $onlyArc.Count
+        # (Counted in identical: files that differ only by the install folder's name.)
+        install_folder_only = $folderOnly
         examples = (@($differ | Select-Object -First 3) + @($onlyOrig | Select-Object -First 3 | ForEach-Object { "only original: $_" }) + @($onlyArc | Select-Object -First 3 | ForEach-Object { "only arc-unpack: $_" })) -join '; '
     }
 }
@@ -392,7 +422,7 @@ foreach ($repack in $Repacks) {
         try { [void][AbHelp]::Manifest($targetA, $arcManifest) } catch { $res.arc_unpack.manifest_error = $_.Exception.Message }
         $tot = Get-ManifestTotals $arcManifest
         $res.arc_unpack.files = $tot.files; $res.arc_unpack.bytes = $tot.bytes
-        $res.compare = Compare-Manifests $origManifest $arcManifest
+        $res.compare = Compare-Manifests $origManifest $arcManifest $targetA
         # Clean up with arc-unpack's own uninstaller (which tests it), then delete what's left.
         $un = Join-Path $targetA 'uninstall.exe'
         if (Test-Path -LiteralPath $un) {
@@ -407,6 +437,7 @@ foreach ($repack in $Repacks) {
         Remove-Item -LiteralPath "$targetA.arc-unpack-staging" -Recurse -Force -ErrorAction SilentlyContinue
         $res | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Out "result-$tag.json") -Encoding UTF8
         $same = if ($res.compare) { if ($res.compare.differ + $res.compare.only_original + $res.compare.only_arc_unpack -eq 0) { 'same files as the original' } else { 'FILES DIFFER from the original' } } else { 'no original fingerprint to compare with' }
+        if ($res.compare -and $res.compare.install_folder_only -gt 0) { $same += " ($($res.compare.install_folder_only) differ only by the install folder's name, which the script writes into them)" }
         Write-Host ("  {0} s, exit {1}, {2}" -f $res.arc_unpack.total_s, $res.arc_unpack.exit, $same)
     }
 }
