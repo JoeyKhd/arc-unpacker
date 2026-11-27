@@ -1115,6 +1115,16 @@ fn is_batch(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"))
 }
 
+/// Exit codes that don't mean failure:
+/// - fart.exe (FART 1.99b, FitGirl's find-and-replace) returns how many replacements it made;
+///   only -1 to -4 are errors;
+/// - FitGirl's buildNN.bat files end by deleting themselves, so cmd then fails to read the next
+///   line and returns 1.
+fn benign_exit(program: &Path, code: i32) -> bool {
+    let fart = program.file_name().is_some_and(|n| n.eq_ignore_ascii_case("fart.exe"));
+    (fart && code >= 0) || (is_batch(program) && code == 1 && !program.exists())
+}
+
 /// Does an Exec step (possibly) change `cfg_name`? Batch files are opaque, so they count.
 fn exec_touches(program: &Path, args: &str, cfg_name: &str) -> bool {
     is_batch(program) || args.to_lowercase().contains(cfg_name)
@@ -1512,7 +1522,7 @@ impl ScriptRunner<'_> {
                 events::info(self.sink, format!("    {name}: {cpu:.0}s cpu / {wall:.0}s wall ({:.1} cores)", cpu / wall));
             }
         }
-        if !status.success() {
+        if !status.success() && !benign_exit(program, status.code().unwrap_or(-1)) {
             let note = format!("{name}{args}: exited with code {}", status.code().unwrap_or(-1));
             events::warn(self.sink, note.clone());
             self.summary.notes.push(note);
@@ -2232,5 +2242,22 @@ mod tests {
         let t = referenced_tool_paths(&cfg);
         assert!(t.contains("xtool3/xtool.exe"));
         assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn benign_exit_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fart = dir.path().join("fart.exe");
+        assert!(benign_exit(&fart, 8), "fart: 8 replacements");
+        assert!(benign_exit(&fart, 0));
+        assert!(!benign_exit(&fart, -2), "fart: an error");
+        // A bat that deleted itself; one that is still there failed for real.
+        let gone = dir.path().join("build01.bat");
+        assert!(benign_exit(&gone, 1));
+        assert!(!benign_exit(&gone, 2));
+        let kept = dir.path().join("build02.bat");
+        std::fs::write(&kept, "@echo off").unwrap();
+        assert!(!benign_exit(&kept, 1));
+        assert!(!benign_exit(&dir.path().join("x5.exe"), 2));
     }
 }
