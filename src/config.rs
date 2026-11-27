@@ -53,6 +53,11 @@ pub struct MethodSpec {
     /// Keep this codec on the fastest core class (P-cores on hybrid CPUs).
     #[serde(default)]
     pub performance_cores: bool,
+    /// The file the decoder creates in its working folder when `cmd` names no {output} and its
+    /// stdout isn't the data (arc.ini `datafile`; NanoZip's `nz.exe x {input}.nz` recreates the
+    /// name it packed, "$$arcdatafile$$.tmp").
+    #[serde(default)]
+    pub datafile: Option<String>,
 }
 
 fn yes() -> bool {
@@ -80,6 +85,8 @@ pub struct External {
     pub output_file: bool,
     pub header: bool,
     pub performance_cores: bool,
+    /// See `MethodSpec::datafile` (then `output_file` is set too).
+    pub datafile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,7 +287,9 @@ fn external(cmd: &str, spec: &MethodSpec, m: &Method, dir: &Path) -> Result<Exte
         }
     }
     let workdir = spec.workdir.as_ref().map(|w| if w.is_relative() { dir.join(w) } else { w.clone() });
-    Ok(External { argv, workdir, input_file, output_file, header: spec.header, performance_cores: spec.performance_cores })
+    let datafile = spec.datafile.clone().filter(|_| !output_file);
+    let output_file = output_file || datafile.is_some();
+    Ok(External { argv, workdir, input_file, output_file, header: spec.header, performance_cores: spec.performance_cores, datafile })
 }
 
 #[cfg(test)]

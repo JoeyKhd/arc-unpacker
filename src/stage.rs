@@ -145,6 +145,7 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                     header: e.header,
                     performance_cores: e.performance_cores,
                     rank,
+                    datafile: e.datafile.clone(),
                 };
                 rank += 1;
                 external(spec, stream, ctx)?
@@ -161,6 +162,7 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                     header: false,
                     performance_cores: *performance_cores,
                     rank,
+                    datafile: None,
                 };
                 rank += 1;
                 external(spec, stream, ctx)?
@@ -335,6 +337,8 @@ struct ExtSpec {
     performance_cores: bool,
     /// Position among this chain's codec processes in decode order (0 reads the archive).
     rank: usize,
+    /// The output file the decoder creates in its working folder (see `config::External`).
+    datafile: Option<String>,
 }
 
 fn command(spec: &ExtSpec, input_path: &Path, output_path: &Path, workdir: &Path, tune: bool) -> Command {
@@ -605,9 +609,13 @@ fn run_process(spec: &ExtSpec, mut input: Stream, w: &mut PipeWriter, ctx: &Ctx)
         let ext = placeholder_ext(&spec.argv, ph);
         PathBuf::from(format!("{}{ext}", base.display()))
     };
-    let (in_file, out_file) = (with_ext(&tin, "{input}"), with_ext(&tout, "{output}"));
-    let _cleanup = Cleanup(vec![tin.clone(), tout.clone(), in_file.clone(), out_file.clone()]);
     let own_dir = own_workdir(spec, ctx)?;
+    let in_file = with_ext(&tin, "{input}");
+    let out_file = match &spec.datafile {
+        Some(name) => workdir_of(spec, &own_dir).join(name),
+        None => with_ext(&tout, "{output}"),
+    };
+    let _cleanup = Cleanup(vec![tin.clone(), tout.clone(), in_file.clone(), out_file.clone()]);
     if spec.input_file {
         let mut f = io::BufWriter::with_capacity(IO_BUF, std::fs::File::create(&in_file).context("create input temp file")?);
         io::copy(&mut input, &mut f).context("writing codec input temp file")?;

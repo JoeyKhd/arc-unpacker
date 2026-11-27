@@ -136,6 +136,10 @@ pub fn to_toml(arc_ini: &Path) -> Result<String> {
         }
         writeln!(t, "# unpackcmd = {}", s.unpackcmd)?;
         writeln!(t, "cmd = {}", toml_str(&translate_cmd(s)))?;
+        // No data file in the command and no stdout: the decoder recreates `datafile` itself.
+        if !s.unpackcmd.contains(" <stdout>") && !s.unpackcmd.contains(&s.datafile) {
+            writeln!(t, "datafile = {}", toml_str(&s.datafile))?;
+        }
         if !s.header {
             writeln!(t, "header = false")?;
         }
@@ -191,6 +195,29 @@ mod tests {
                 assert_eq!(e.argv, vec!["srep", "-d", "-m3yf", "-", "-"]);
                 assert!(!e.input_file && !e.output_file && !e.header);
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// NanoZip in Call of Duty: Black Ops: `nz.exe x $$arcpackedfile$$.nz` recreates its output
+    /// itself; `datafile` names it, and its console output is not the data.
+    #[test]
+    fn implicit_data_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ini = dir.path().join("arc.ini");
+        std::fs::write(&ini, "[External compressor:nco]\r\nheader = 0\r\nsolid = 0\r\nunpackcmd = nz.exe x $$arcpackedfile$$.nz\r\ndatafile   = $$arcdatafile$$.tmp\r\npackedfile = $$arcpackedfile$$.nz\r\n\r\n[External compressor:rzs]\r\nheader = 0\r\nunpackcmd = rz.exe d - - <stdin> <stdout>\r\n").unwrap();
+        let toml_text = to_toml(&ini).unwrap();
+        assert!(toml_text.contains("cmd = 'nz.exe x {input}.nz'\ndatafile = '$$arcdatafile$$.tmp'\n"), "{toml_text}");
+        let cfg: crate::config::Config = toml::from_str(&toml_text).unwrap();
+        match &cfg.resolve("nco:m256m").unwrap()[0].codec {
+            crate::config::Codec::External(e) => {
+                assert!(e.input_file && e.output_file);
+                assert_eq!(e.datafile.as_deref(), Some("$$arcdatafile$$.tmp"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match &cfg.resolve("rzs").unwrap()[0].codec {
+            crate::config::Codec::External(e) => assert!(e.datafile.is_none() && !e.output_file),
             other => panic!("{other:?}"),
         }
     }
