@@ -328,6 +328,10 @@ pub struct InnoHost<'a> {
     pub skipped: Vec<Step>,
     /// The component masks the script gave ISDoneInit (Comp1..Comp3), if it called it.
     isdone_components: Option<[u64; 3]>,
+    /// ISDoneInit found no records file ({tmp}\records.inf): calls with PctOfTotal 0 always run.
+    isdone_no_records: bool,
+    /// ISDone's srep memory (SrepInit's VirtMem; 4096 until set).
+    isdone_srep_mem: i64,
 }
 
 impl<'a> InnoHost<'a> {
@@ -346,6 +350,8 @@ impl<'a> InnoHost<'a> {
             skipping: false,
             skipped: Vec::new(),
             isdone_components: None,
+            isdone_no_records: false,
+            isdone_srep_mem: 4096,
         }
     }
 
@@ -428,16 +434,12 @@ impl<'a> InnoHost<'a> {
     }
 
     /// ISDone's CurComponent gate (ISArcExtract, ISRarExtract, IS7zipExtract, ISExec): the call
-    /// for component n only runs if bit n-1 of the masks given to ISDoneInit is set (0 = always);
-    /// a skipped call reports success.
-    fn isdone_skips(&self, n: i64) -> bool {
-        match (n, self.isdone_components) {
-            (n @ 1..=96, Some(masks)) => {
-                let bit = (n - 1) as usize;
-                masks[bit / 32] & (1 << (bit % 32)) == 0
-            }
-            _ => false,
-        }
+    /// for component n runs if n is 0, or if its bit in the masks given to ISDoneInit is set:
+    /// 1-32 Comp1 bit n-1, 33-64 Comp2 bit n-33, 65 and up Comp3 bit (n-65) & 31 (so above 96 it
+    /// wraps). Without a records file, a call with PctOfTotal 0 always runs. A skipped call
+    /// reports success.
+    fn isdone_skips(&self, n: i64, pct: f64) -> bool {
+        isdone_gate_skips(self.isdone_components, self.isdone_no_records, n, pct)
     }
 
     fn step(&mut self, step: Step) -> Result<bool> {
@@ -536,6 +538,7 @@ impl Host for InnoHost<'_> {
     fn call(&mut self, key: &str, a: &[Value], out: &mut Vec<(usize, Value)>) -> Result<Option<Value>> {
         let s = |i: usize| a.get(i).map(Value::as_str).unwrap_or_default();
         let int = |i: usize| a.get(i).map(Value::as_int).unwrap_or(0);
+        let float = |i: usize| a.get(i).map(Value::as_float).unwrap_or(0.0);
         let yes = |b: bool| Some(Value::Int(b as i64));
         if key.starts_with("CLASS:") {
             return Ok(None);
@@ -708,18 +711,21 @@ impl Host for InnoHost<'_> {
             "dll:ISEXEC" => {
                 // CurComponent, as for ISArcExtract: Kerbal Space Program ties rus.bat, esp.bat, ...
                 // to their language's component, and ISDone skips the others.
-                if self.isdone_skips(int(0)) {
+                if self.isdone_skips(int(0), float(1)) {
                     return Ok(yes(true));
                 }
-                // ISDone creates a missing working folder: Sleeping Dogs runs build01.bat in
-                // {app}\temp\04\, which nothing before it creates. (Only where the script may write.)
-                if !self.dry
-                    && let Some(dir) = self.writable(&s(5))
-                    && !dir.exists()
-                {
-                    let _ = std::fs::create_dir_all(&dir);
+                // A missing working folder: ISDone only calls SetCurrentDirectoryA (failure ignored,
+                // nothing created), so the program runs in whatever folder was current. Sleeping
+                // Dogs runs build01.bat in {app}\temp\04\, which only its optional part creates;
+                // without it every line of the bat finds nothing. Here it runs in an empty folder
+                // of the run's own, outside the game folder.
+                let mut dir = s(5);
+                if !self.dry && normalize(Path::new(&dir)).is_some_and(|d| !d.is_dir()) {
+                    let elsewhere = self.folders.tmp.with_file_name("cwd-missing");
+                    let _ = std::fs::create_dir_all(&elsewhere);
+                    dir = elsewhere.to_string_lossy().into_owned();
                 }
-                yes(self.exec(&s(3), &s(4), &s(5), true)?)
+                yes(self.exec(&s(3), &s(4), &dir, true)?)
             }
             "dll:EXEC2" => {
                 let tmp = self.folders.tmp.to_string_lossy().into_owned();
@@ -728,7 +734,7 @@ impl Host for InnoHost<'_> {
             "dll:IS7ZIPEXTRACT" => {
                 // IS7zipExtract(CurComponent, PctOfTotal, InName, OutPath, DeleteInFile, Password).
                 // Farming Simulator 17: ('{app}\inner.pack', '{app}', True, '').
-                if self.isdone_skips(int(0)) {
+                if self.isdone_skips(int(0), float(1)) {
                     return Ok(yes(true));
                 }
                 let (archive, dest, password) = (s(2), s(3), s(5));
@@ -760,7 +766,7 @@ impl Host for InnoHost<'_> {
             }
             "dll:ISRAREXTRACT" => {
                 // ISRarExtract(CurComponent, PctOfTotal, InName, OutPath, DeleteInFile, Password).
-                if self.isdone_skips(int(0)) {
+                if self.isdone_skips(int(0), float(1)) {
                     return Ok(yes(true));
                 }
                 let (archive, dest, password) = (s(2), s(3), s(5));
@@ -782,10 +788,12 @@ impl Host for InnoHost<'_> {
                 yes(ok)
             }
             "dll:ISARCEXTRACT" => {
-                if self.isdone_skips(int(0)) {
+                if self.isdone_skips(int(0), float(1)) {
                     return Ok(yes(true));
                 }
                 let (archive, dest, inner, password, cfg) = (s(2), s(3), s(4), s(6), s(7));
+                // ExtractedPath "*" is ISDone's flatten mode (every file straight into OutPath).
+                ensure!(inner != "*", "ISArcExtract with ExtractedPath '*' (flatten) is not supported");
                 let base = inner.trim_matches(['\\', '/']).to_string();
                 ensure!(!base.split(['\\', '/']).any(|p| p == ".."), "bad path inside archive '{inner}'");
                 // FitGirl passes the unarc.dll path in the password slot; real passwords aren't supported.
@@ -810,25 +818,50 @@ impl Host for InnoHost<'_> {
             }
             "dll:ISDONEINIT" => {
                 // ISDoneInit(RecordFileName, TimeType, Comp1, Comp2, Comp3, ...): which
-                // components' archives ISArcExtract extracts.
-                self.isdone_components = Some([int(2) as u64, int(3) as u64, int(4) as u64]);
+                // components' archives ISArcExtract extracts. ISDone looks for the records file
+                // next to itself ({tmp}), whatever folder the script names.
+                self.isdone_components = Some([int(2) as u32 as u64, int(3) as u32 as u64, int(4) as u32 as u64]);
+                let records = s(0).rsplit(['\\', '/', ':']).next().unwrap_or("").to_string();
+                self.isdone_no_records = records.is_empty() || !self.folders.tmp.join(&records).is_file();
+                self.isdone_srep_mem = 4096;
+                yes(true)
+            }
+            "dll:SREPINIT" => {
+                // SrepInit(TmpPath, VirtMem, MaxSave): ISDone writes srep's memory and temp folder
+                // to {tmp}\CLS.ini [Srep] (Call of Duty: Black Ops: Memory=484, TempPath=<app>\).
+                // VirtMem 0 means 4096; above 4096 it warns and keeps the previous value.
+                let mem = int(1) as u32 as i64;
+                match mem {
+                    0 => self.isdone_srep_mem = 4096,
+                    1..=4096 => self.isdone_srep_mem = mem,
+                    _ => self.messages.push(format!("installer message: SrepInit: memory {mem} is too large (ISDone keeps {})", self.isdone_srep_mem)),
+                }
+                let cls = self.folders.tmp.join("CLS.ini").to_string_lossy().into_owned();
+                let temp = isdone_temp_path(&s(0), &self.folders.tmp);
+                self.ini(true, "Srep", "Memory", &self.isdone_srep_mem.to_string(), &cls)?;
+                self.ini(true, "Srep", "TempPath", &temp, &cls)?;
                 yes(true)
             }
             "dll:PRECOMPINIT" => {
                 // PrecompInit(TmpPath, VirtMem, PrecompVers): ISDone gives the precomp CLS codec
-                // its temp folder and memory in {tmp}\CLS.ini, [Precomp]. Without them it keeps
-                // CLS.ini's "{app}" placeholder and fails (Pro Evolution Soccer 2017).
+                // its memory and temp folder in {tmp}\CLS.ini, [Precomp]. Without them it keeps
+                // CLS.ini's "{app}" placeholder and fails (Pro Evolution Soccer 2017). FitGirl
+                // passes version 0 (automatic); other versions must be 0.38, 0.40, 0.41 or 0.42.
+                let v = float(2);
+                let known = [(-0.01, 0.01), (0.375, 0.385), (0.395, 0.405), (0.405, 0.415), (0.415, 0.425)];
+                if !known.iter().any(|&(lo, hi)| lo < v && v < hi) {
+                    self.messages.push(format!("installer message: PrecompInit: unknown precomp version {v}"));
+                    return Ok(yes(false));
+                }
+                let mem = int(1) as u32 as i64;
+                let mem = if (1..=4096).contains(&mem) { mem } else { 4096 };
                 let cls = self.folders.tmp.join("CLS.ini").to_string_lossy().into_owned();
-                let (path, memory) = (s(0), int(1));
-                if !path.is_empty() {
-                    self.ini(true, "Precomp", "TempPath", &path, &cls)?;
-                }
-                if memory > 0 {
-                    self.ini(true, "Precomp", "Memory", &memory.to_string(), &cls)?;
-                }
+                let temp = isdone_temp_path(&s(0), &self.folders.tmp);
+                self.ini(true, "Precomp", "Memory", &mem.to_string(), &cls)?;
+                self.ini(true, "Precomp", "TempPath", &temp, &cls)?;
                 yes(true)
             }
-            "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" | "dll:SREPINIT" => yes(true),
+            "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" => yes(true),
             "dll:WRAPCALLBACK" => Some(Value::Int(0)),
             "dll:SUSPENDPROC" | "dll:RESUMEPROC" | "dll:SETTASKBARPROGRESSVALUE" | "dll:SETTASKBARPROGRESSSTATE" => None,
             _ => bail!("{key} is declared but not implemented"),
@@ -842,6 +875,29 @@ pub fn run_step(script: &Script, vm: &mut Vm, host: &mut InnoHost, step: i64) ->
         return Ok(());
     }
     vm.call("CURSTEPCHANGED", &[Value::Int(step)], host)
+}
+
+/// See `InnoHost::isdone_skips` (reverse-engineered from ISDone 0.6).
+fn isdone_gate_skips(masks: Option<[u64; 3]>, no_records: bool, n: i64, pct: f64) -> bool {
+    let Some(masks) = masks else { return false };
+    if pct == 0.0 && no_records {
+        return false;
+    }
+    let n = n as u32; // a Cardinal
+    let (mask, bit) = match n {
+        0 => return false,
+        1..=32 => (masks[0], n - 1),
+        33..=64 => (masks[1], n - 33),
+        _ => (masks[2], (n - 65) & 31),
+    };
+    mask & (1 << bit) == 0
+}
+
+/// ISDone's temp folder for srep and precomp (SrepInit, PrecompInit): the folder given, with a
+/// trailing backslash, or ISDone's own folder ({tmp}) when none is given.
+fn isdone_temp_path(path: &str, tmp: &Path) -> String {
+    let p = if path.is_empty() { tmp.to_string_lossy().into_owned() } else { path.to_string() };
+    if p.ends_with('\\') { p } else { format!("{p}\\") }
 }
 
 /// Absolute path without `.`/`..` (purely lexical), or None for relative/odd paths.
@@ -1396,6 +1452,31 @@ mod tests {
         // Ordinary (non-exclusive) children aren't ticked by their parent.
         let comps = [component("voice", false), component(r"voice\french", false)];
         assert_eq!(exclusive_choices_of(&comps, sel(&["voice"])), sel(&["voice"]));
+    }
+
+    #[test]
+    fn isdone_component_gate() {
+        // Components 1 and 3 (Comp1 bits 0 and 2), 33 (Comp2 bit 0), 66 (Comp3 bit 1).
+        let m = Some([0b101, 0b1, 0b10]);
+        let skips = |n, pct| isdone_gate_skips(m, false, n, pct);
+        assert!(!skips(0, 0.0), "0 = always");
+        assert!(!skips(1, 0.0) && skips(2, 0.0) && !skips(3, 0.0));
+        assert!(!skips(33, 0.0) && skips(34, 0.0));
+        assert!(skips(65, 0.0) && !skips(66, 0.0));
+        assert!(!skips(98, 0.0), "above 96 it wraps: 98 is Comp3 bit 1 again");
+        assert!(skips(97, 0.0));
+        // Without ISDoneInit nothing is skipped; without a records file, calls with Pct 0 run.
+        assert!(!isdone_gate_skips(None, false, 2, 0.0));
+        assert!(!isdone_gate_skips(m, true, 2, 0.0));
+        assert!(isdone_gate_skips(m, true, 2, 5.0));
+    }
+
+    #[test]
+    fn isdone_temp_folders_end_in_a_backslash() {
+        let tmp = Path::new(r"C:\run\tmp");
+        assert_eq!(isdone_temp_path(r"C:\Games\Game", tmp), r"C:\Games\Game\");
+        assert_eq!(isdone_temp_path(r"C:\Games\Game\", tmp), r"C:\Games\Game\");
+        assert_eq!(isdone_temp_path("", tmp), r"C:\run\tmp\");
     }
 
     #[test]

@@ -337,7 +337,7 @@ impl Value {
     pub fn as_bool(&self) -> bool {
         self.as_int() != 0
     }
-    fn as_float(&self) -> f64 {
+    pub fn as_float(&self) -> f64 {
         match self {
             Value::Float(f) => *f,
             v => v.as_int() as f64,
