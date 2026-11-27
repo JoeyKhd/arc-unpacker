@@ -662,6 +662,14 @@ impl Host for InnoHost<'_> {
                 yes(ok)
             }
             "dll:ISEXEC" => {
+                // CurComponent, as for ISArcExtract: Kerbal Space Program ties rus.bat, esp.bat, ...
+                // to their language's component, and ISDone skips the others.
+                if let (n @ 1..=96, Some(masks)) = (int(0), self.isdone_components) {
+                    let bit = (n - 1) as usize;
+                    if masks[bit / 32] & (1 << (bit % 32)) == 0 {
+                        return Ok(yes(true));
+                    }
+                }
                 // ISDone creates a missing working folder: Sleeping Dogs runs build01.bat in
                 // {app}\temp\04\, which nothing before it creates. (Only where the script may write.)
                 if !self.dry
