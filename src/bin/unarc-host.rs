@@ -132,6 +132,9 @@ fn main() {
     arc_unpack::guard::kill_descendants_on_exit();
     // unarc loads CLS proxies in-process; CLS-srep reads its helper's prefix from here.
     arc_unpack::guard::provide_cls_proxy_init();
+    // The CLS proxies unarc loads may start helpers that inherit handles: not our pipes
+    // (stderr stays inheritable: unarc's external codecs report their errors there).
+    arc_unpack::guard::keep_std_handles_private(false);
     OVERWRITE.store(args.iter().any(|a| a == "-o+"), Ordering::Relaxed);
 
     let lib = match unsafe { libloading::Library::new(&args[0]) } {

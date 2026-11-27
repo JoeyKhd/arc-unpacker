@@ -10,9 +10,12 @@
 //! The host calls ClsMain(CLS_INIT, NULL, NULL) once, ClsMain(CLS_DECOMPRESS, cb, inst)
 //! per stream, then ClsMain(CLS_DONE, NULL, NULL). This mirrors what FreeArc itself does.
 
+use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::io::{self, Read, Write};
 use std::mem::ManuallyDrop;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const CLS_INIT: i32 = 1;
 const CLS_DONE: i32 = 2;
@@ -42,13 +45,20 @@ unsafe extern "C" {
     fn free(p: *mut c_void);
 }
 
+/// The codec's view of us. Proxy codecs (cls-uni builds) call back from two threads at once:
+/// reads from a reader thread, writes from the main one. So the input is touched only by read
+/// callbacks and the output only by write callbacks, each in its own cell, and the shared bits
+/// are atomic or locked.
 struct Host {
     params: Vec<u8>, // NUL-terminated
-    input: ManuallyDrop<std::fs::File>,
-    output: io::BufWriter<&'static std::fs::File>,
-    downstream_closed: bool,
-    error: Option<String>,
+    input: UnsafeCell<ManuallyDrop<std::fs::File>>,
+    output: UnsafeCell<io::BufWriter<&'static std::fs::File>>,
+    downstream_closed: AtomicBool,
+    error: Mutex<Option<String>>,
 }
+
+// Safety: see above; one thread reads, one thread writes, never the same cell.
+unsafe impl Sync for Host {}
 
 /// Set ARC_UNPACK_CLS_TRACE=1 to log every callback the codec makes (to stderr).
 static TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -86,7 +96,7 @@ unsafe extern "C" fn callback(instance: *mut c_void, op: i32, ptr: *mut c_void, 
 }
 
 unsafe fn callback_inner(instance: *mut c_void, op: i32, ptr: *mut c_void, n: i32) -> i32 {
-    let host = unsafe { &mut *(instance as *mut Host) };
+    let host = unsafe { &*(instance as *const Host) };
     match op {
         CLS_GET_PARAMSTR => {
             // FreeArc does a plain strcpy and ignores n; do the same.
@@ -98,16 +108,17 @@ unsafe fn callback_inner(instance: *mut c_void, op: i32, ptr: *mut c_void, n: i3
                 return 0;
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, n as usize) };
+            let input = unsafe { &mut *host.input.get() };
             // FreeArc fills the buffer completely unless the stream ends, for both read kinds.
             let mut got = 0;
             while got < buf.len() {
-                match host.input.read(&mut buf[got..]) {
+                match input.read(&mut buf[got..]) {
                     Ok(0) => break,
                     Ok(k) => got += k,
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     Err(e) if e.kind() == io::ErrorKind::BrokenPipe => break, // writer closed = EOF
                     Err(e) => {
-                        host.error = Some(format!("read stdin: {e}"));
+                        *host.error.lock().unwrap() = Some(format!("read stdin: {e}"));
                         return FREEARC_ERRCODE_READ;
                     }
                 }
@@ -119,15 +130,16 @@ unsafe fn callback_inner(instance: *mut c_void, op: i32, ptr: *mut c_void, n: i3
                 return 0;
             }
             let buf = unsafe { std::slice::from_raw_parts(ptr as *const u8, n as usize) };
-            match host.output.write_all(buf) {
+            let output = unsafe { &mut *host.output.get() };
+            match output.write_all(buf) {
                 Ok(()) => n,
                 Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
                     // The consumer has everything it needs (or failed and will report it).
-                    host.downstream_closed = true;
+                    host.downstream_closed.store(true, Ordering::Relaxed);
                     FREEARC_ERRCODE_NO_MORE_DATA_REQUIRED
                 }
                 Err(e) => {
-                    host.error = Some(format!("write stdout: {e}"));
+                    *host.error.lock().unwrap() = Some(format!("write stdout: {e}"));
                     FREEARC_ERRCODE_WRITE
                 }
             }
@@ -211,29 +223,32 @@ fn main() {
         unsafe { (ManuallyDrop::new(std::fs::File::from_raw_fd(0)), &*Box::leak(Box::new(std::fs::File::from_raw_fd(1)))) }
     };
 
-    let mut host = Host {
+    let host = Host {
         params: params_z,
-        input,
-        output: io::BufWriter::with_capacity(1 << 20, output),
-        downstream_closed: false,
-        error: None,
+        input: UnsafeCell::new(input),
+        output: UnsafeCell::new(io::BufWriter::with_capacity(1 << 20, output)),
+        downstream_closed: AtomicBool::new(false),
+        error: Mutex::new(None),
     };
+    // A helper the codec starts must not hold our pipes (see guard::keep_std_handles_private).
+    arc_unpack::guard::keep_std_handles_private(true);
 
     TRACE.store(std::env::var_os("ARC_UNPACK_CLS_TRACE").is_some(), std::sync::atomic::Ordering::Relaxed);
     *INIT_LOCK.lock().unwrap() = arc_unpack::guard::InitLock::acquire();
     let ret = unsafe {
         cls_main(CLS_INIT, None, std::ptr::null_mut());
-        let r = cls_main(CLS_DECOMPRESS, Some(callback), &mut host as *mut Host as *mut c_void);
+        let r = cls_main(CLS_DECOMPRESS, Some(callback), &host as *const Host as *mut c_void);
         INIT_LOCK.lock().unwrap().take();
         cls_main(CLS_DONE, None, std::ptr::null_mut());
         r
     };
 
-    let flushed = host.output.flush();
+    let mut host = host;
+    let flushed = host.output.get_mut().flush();
     if TRACE.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("[cls trace] ClsMain(DECOMPRESS) = {ret}; io totals (op, calls, bytes): {:?}", IO_CALLS.lock().unwrap());
     }
-    if let Some(e) = &host.error {
+    if let Some(e) = host.error.get_mut().unwrap() {
         eprintln!("cls-host: {method}: {e}");
         std::process::exit(1);
     }
@@ -242,7 +257,7 @@ fn main() {
         std::process::exit(1);
     }
     if let Err(e) = flushed
-        && !host.downstream_closed
+        && !host.downstream_closed.load(Ordering::Relaxed)
     {
         eprintln!("cls-host: {method}: flush stdout: {e}");
         std::process::exit(1);

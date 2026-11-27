@@ -101,6 +101,25 @@ mod imp {
         }
     }
 
+    /// Makes this process's standard handles non-inheritable (they stay usable here). A codec
+    /// that starts a helper with bInheritHandles=TRUE (cls-lollypop.dll) would otherwise hand it
+    /// our pipes, and the stage after ours would only see the end of the stream once the
+    /// helper is gone too. `stderr`: also stderr (unarc-host keeps it, for its external codecs'
+    /// messages).
+    pub fn keep_std_handles_private(stderr: bool) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        let mut handles = vec![std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle()];
+        if stderr {
+            handles.push(std::io::stderr().as_raw_handle());
+        }
+        for h in handles {
+            if !h.is_null() {
+                unsafe { SetHandleInformation(h as _, HANDLE_FLAG_INHERIT, 0) };
+            }
+        }
+    }
+
     /// Codec helpers are often started by codec DLLs/programs, not by us (e.g. a CLS proxy's
     /// 64-bit helper), so they miss the tuning applied at spawn. Apply it to every process in
     /// our job that hasn't had it yet: above-normal priority and no EcoQoS power throttling.
@@ -437,26 +456,45 @@ mod imp {
     /// other's data. Holding this (session-wide) until the codec is running prevents that.
     /// It's a semaphore, so any thread may release it (the codec calls back on its own threads);
     /// waiting is capped so a crashed holder can't block everyone.
-    pub struct InitLock(HANDLE);
+    /// The semaphore, and whether this holder took its count (a wait that timed out didn't).
+    pub struct InitLock(HANDLE, bool);
 
     impl InitLock {
         pub fn acquire() -> Option<InitLock> {
-            use windows_sys::Win32::System::Threading::{CreateSemaphoreW, WaitForSingleObject};
-            let name = wide(std::ffi::OsStr::new("Local\\arc-unpack-codec-init"));
-            let h = unsafe { CreateSemaphoreW(std::ptr::null(), 1, 1, name.as_ptr()) };
-            if h.is_null() {
-                return None;
-            }
-            unsafe { WaitForSingleObject(h, 60_000) };
-            Some(InitLock(h))
+            acquire_within(60_000)
         }
+
+        /// Whether this holder has the lock (false after a timed-out wait).
+        pub fn held(&self) -> bool {
+            self.1
+        }
+    }
+
+    pub fn acquire_within(ms: u32) -> Option<InitLock> {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{CreateSemaphoreW, WaitForSingleObject};
+        let name = wide(std::ffi::OsStr::new("Local\\arc-unpack-codec-init"));
+        let h = unsafe { CreateSemaphoreW(std::ptr::null(), 1, 1, name.as_ptr()) };
+        if h.is_null() {
+            return None;
+        }
+        let took = unsafe { WaitForSingleObject(h, ms) } == WAIT_OBJECT_0;
+        if !took {
+            // A holder that never let go (a stuck codec start): go on without the lock rather
+            // than wait forever, and don't give back a count this holder never took, which
+            // would let a third instance in while the first still holds it.
+            eprintln!("arc-unpack: waited {} s for another codec to start; starting without the lock", ms / 1000);
+        }
+        Some(InitLock(h, took))
     }
 
     impl Drop for InitLock {
         fn drop(&mut self) {
             use windows_sys::Win32::System::Threading::ReleaseSemaphore;
             unsafe {
-                ReleaseSemaphore(self.0, 1, std::ptr::null_mut());
+                if self.1 {
+                    ReleaseSemaphore(self.0, 1, std::ptr::null_mut());
+                }
                 windows_sys::Win32::Foundation::CloseHandle(self.0);
             }
         }
@@ -529,6 +567,7 @@ mod imp {
     pub fn kill_descendants_on_exit() -> bool {
         false
     }
+    pub fn keep_std_handles_private(_: bool) {}
     pub fn provide_cls_proxy_init() -> bool {
         false
     }
@@ -613,6 +652,17 @@ mod tests {
         drop(first); // released from a different thread than any waiter: semaphores allow that
         let waited = waiter.join().unwrap();
         assert!(waited >= std::time::Duration::from_millis(250), "second acquire didn't wait ({waited:?})");
+
+        // (Same test: the lock is one named semaphore.) A wait that times out holds nothing and
+        // gives nothing back: the first holder still excludes everyone else.
+        let first = InitLock::acquire().unwrap();
+        assert!(first.held());
+        let timed_out = acquire_within(100).unwrap();
+        assert!(!timed_out.held());
+        drop(timed_out);
+        assert!(!acquire_within(100).unwrap().held(), "a timed-out holder released a count it never took");
+        drop(first);
+        assert!(acquire_within(100).unwrap().held());
     }
 
     /// A batch file's waiting loop counts as no progress; writing counts as progress. (Ignored:
