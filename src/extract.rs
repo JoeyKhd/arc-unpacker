@@ -590,10 +590,13 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
 static PROXY_USE: Mutex<Vec<(String, usize, bool)>> = Mutex::new(Vec::new());
 static PROXY_FREED: std::sync::Condvar = std::sync::Condvar::new();
 
-/// Helper-program codecs that spill to fixed-name temp files in one shared folder: magic2l and
-/// magicl write `<ldmfTempPath>temp_<worker>.ldmf` (fopen "w+b"); a second instance shows
-/// "Can't create vm temp file!" and crashes. So one runs at a time.
-const SPILLING_PROXIES: [&str; 2] = ["cls-magic2l", "cls-magicl"];
+/// Codecs that use fixed-name temp files or shared objects, so one runs at a time:
+/// - magic2l and magicl write `<ldmfTempPath>temp_<worker>.ldmf` (fopen "w+b"); a second
+///   instance shows "Can't create vm temp file!" and crashes;
+/// - precomp.inside (CLS-precomp.dll, which drives the repack's precomp.exe rather than an
+///   `_x64` helper) names its shared memory `Global\PrecompInside_*` with no instance number, and
+///   its temp file has a fixed name. Call of Duty: Black Ops runs two such blocks.
+const SPILLING_PROXIES: [&str; 3] = ["cls-magic2l", "cls-magicl", "cls-precomp"];
 
 struct ProxyUse {
     /// Codec names, and whether this job holds each one exclusively.
@@ -682,7 +685,8 @@ fn proxy_codecs(job: &Job, cfg: &Config) -> Vec<String> {
         .iter()
         .filter(|dll| {
             let stem = dll.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            ["x64", "x86"].iter().any(|a| dll.with_file_name(format!("{stem}_{a}.exe")).is_file())
+            SPILLING_PROXIES.contains(&stem.to_lowercase().as_str())
+                || ["x64", "x86"].iter().any(|a| dll.with_file_name(format!("{stem}_{a}.exe")).is_file())
         })
         .filter_map(|dll| dll.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
         .collect();
