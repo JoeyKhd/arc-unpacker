@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-98 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+100 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -35,6 +35,7 @@
 | Halls of Torment | 0.9 GB | 34 s | 13 s | **2.7×** | 0.1.0-beta.8 |
 | Shipping Store Simulator 2037 | 2.0 GB | 1 min 45 s | 39 s | **2.7×** | 0.1.0-beta.9 |
 | ATOM RPG | 5.5 GB | 2 min 37 s | 1 min 00 s | **2.6×** | 0.1.0-beta.9 |
+| Outer Wilds | 2.5 GB | 2 min 01 s | 47 s | **2.6×** | 1.0.3-dev |
 | Stardew Valley | 0.4 GB | 36 s | 14 s | **2.6×** | 0.1.0-beta.7 |
 | Cuphead | 4.3 GB | 2 min 34 s | 1 min 03 s | **2.5×** | 0.1.0-beta.8 |
 | Dice Hoarder | 1.5 GB | 2 min 04 s | 49 s | **2.5×** | 0.1.0-beta.8 |
@@ -104,11 +105,12 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 98** | | **505 min 34 s** | **314 min 55 s** | **1.6×** | |
+| Prototype | 5.4 GB | 3 min 13 s | 3 min 13 s | **1.0×** | 1.0.3-dev |
+| **All 100** | | **510 min 47 s** | **318 min 55 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** 97 of 98 installs were byte-identical to the original installer's.
+- **Same result:** 99 of 100 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
