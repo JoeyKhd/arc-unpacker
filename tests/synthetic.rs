@@ -57,7 +57,7 @@ fn cstr(out: &mut Vec<u8>, s: &str) {
     out.push(0);
 }
 
-fn descriptor(out: &mut Vec<u8>, kind: u64, method: &str, orig: usize, comp: usize, crc: u32) {
+fn descriptor(out: &mut Vec<u8>, kind: u64, method: &str, orig: usize, comp: usize, crc: u32, hash: fn(&[u8]) -> u32) {
     let start = out.len();
     out.extend_from_slice(b"ArC\x01");
     out.extend(varint(kind));
@@ -65,7 +65,7 @@ fn descriptor(out: &mut Vec<u8>, kind: u64, method: &str, orig: usize, comp: usi
     out.extend(varint(orig as u64));
     out.extend(varint(comp as u64));
     out.extend(crc.to_le_bytes());
-    let dcrc = crc32fast::hash(&out[start..]);
+    let dcrc = hash(&out[start..]);
     out.extend(dcrc.to_le_bytes());
 }
 
@@ -73,14 +73,20 @@ fn split_path(p: &str) -> (&str, &str) {
     p.rsplit_once('/').unwrap_or(("", p))
 }
 
-/// Builds a complete archive. `std_crc = false` stores bogus block CRCs, like the modified
-/// FreeArc builds some repacks use.
+/// Builds a complete archive. `std_crc = false` stores bogus block CRCs, like a modified FreeArc
+/// whose checksum arc-unpack doesn't know.
 fn build(blocks: Vec<B>, std_crc: bool) -> Vec<u8> {
-    let bogus = |c: u32| if std_crc { c } else { !c };
+    build_with(blocks, crc32fast::hash, !std_crc)
+}
+
+/// Builds a complete archive whose checksums (files, blocks, descriptors) are `hash`; with
+/// `bogus`, the block CRCs are wrong.
+fn build_with(blocks: Vec<B>, hash: fn(&[u8]) -> u32, bogus: bool) -> Vec<u8> {
+    let bogus = |c: u32| if bogus { !c } else { c };
     let mut out = Vec::new();
     let hdr = b"ArC\x01\x00\x00\x06\x07".to_vec();
     out.extend(&hdr);
-    descriptor(&mut out, 1, "storing", 8, 8, bogus(crc32fast::hash(&hdr)));
+    descriptor(&mut out, 1, "storing", 8, 8, bogus(hash(&hdr)), hash);
 
     let mut positions = Vec::new();
     let mut sizes = Vec::new();
@@ -136,13 +142,13 @@ fn build(blocks: Vec<B>, std_crc: bool) -> Vec<u8> {
         d.push(f.is_dir as u8);
     }
     for f in &all {
-        let c = if f.is_dir { 0 } else { crc32fast::hash(&f.data) };
+        let c = if f.is_dir { 0 } else { hash(&f.data) };
         d.extend((if f.bad_crc { c ^ 1 } else { c }).to_le_bytes());
     }
     d.extend(varint(0));
     let dcomp = lzma_raw(d.clone());
     out.extend(&dcomp);
-    descriptor(&mut out, 3, "lzma:mfbt4:d8m", d.len(), dcomp.len(), bogus(crc32fast::hash(&d)));
+    descriptor(&mut out, 3, "lzma:mfbt4:d8m", d.len(), dcomp.len(), bogus(hash(&d)), hash);
 
     let footer_pos = out.len() as u64;
     let mut ft = Vec::new();
@@ -152,19 +158,19 @@ fn build(blocks: Vec<B>, std_crc: bool) -> Vec<u8> {
     ft.extend(varint(footer_pos));
     ft.extend(varint(8));
     ft.extend(varint(8));
-    ft.extend(bogus(crc32fast::hash(&hdr)).to_le_bytes());
+    ft.extend(bogus(hash(&hdr)).to_le_bytes());
     ft.extend(varint(3));
     cstr(&mut ft, "lzma:mfbt4:d8m");
     ft.extend(varint(footer_pos - dir_pos));
     ft.extend(varint(d.len() as u64));
     ft.extend(varint(dcomp.len() as u64));
-    ft.extend(bogus(crc32fast::hash(&d)).to_le_bytes());
+    ft.extend(bogus(hash(&d)).to_le_bytes());
     ft.push(0); // locked
     ft.extend(varint(0)); // old comment
     cstr(&mut ft, ""); // recovery settings
     ft.extend(varint(0)); // comment
     out.extend(&ft);
-    descriptor(&mut out, 4, "storing", ft.len(), ft.len(), bogus(crc32fast::hash(&ft)));
+    descriptor(&mut out, 4, "storing", ft.len(), ft.len(), bogus(hash(&ft)), hash);
     out
 }
 
@@ -220,6 +226,13 @@ header = false
     fn write_archive(&self, name: &str, blocks: Vec<B>, std_crc: bool) -> PathBuf {
         let path = self.p(name);
         std::fs::write(&path, build(blocks, std_crc)).unwrap();
+        path
+    }
+
+    /// An archive with FitGirl's CRC-32 (the checksum of her modified unarc.dll) throughout.
+    fn write_fitgirl_archive(&self, name: &str, blocks: Vec<B>) -> PathBuf {
+        let path = self.p(name);
+        std::fs::write(&path, build_with(blocks, arc_unpack::fgcrc::hash, false)).unwrap();
         path
     }
 
@@ -340,12 +353,34 @@ fn nonstandard_checksums_are_detected_not_misreported() {
     let env = Env::new();
     env.write_archive("mod.arc", vec![B { method: "storing", files: vec![file("f.bin", vec![1, 2, 3])], encode: |d| d }], false);
     let o = env.run(&["list", "mod.arc"]);
-    assert!(text(&o).contains("nonstandard checksums"));
+    assert!(text(&o).contains("unknown checksums"));
     let o = env.run(&["extract", "mod.arc", "-o", "out"]);
     assert!(o.status.success(), "{}", text(&o));
     let t = text(&o);
-    assert!(t.contains("not standard CRC-32") && t.contains("1 complete but not CRC-checked"), "{t}");
+    assert!(t.contains("neither standard nor FitGirl CRC-32") && t.contains("1 complete but not CRC-checked"), "{t}");
     assert_file(&env.p("out"), "f.bin", &[1, 2, 3]);
+}
+
+/// FitGirl's archives use another CRC-32 throughout: files are verified with it, and a damaged
+/// file is caught.
+#[test]
+fn fitgirl_checksums_are_verified() {
+    let env = Env::new();
+    let mut bad = file("bad.bin", pseudo_random(10_000, 4));
+    bad.bad_crc = true;
+    env.write_fitgirl_archive("fg.arc", vec![B { method: "lzma:d8m", files: vec![file("a.bin", vec![5; 3000]), file("b.bin", pseudo_random(20_000, 3))], encode: lzma_raw }]);
+    env.write_fitgirl_archive("fgbad.arc", vec![B { method: "lzma:d8m", files: vec![file("good.bin", vec![7; 5000]), bad], encode: lzma_raw }]);
+    let o = env.run(&["list", "fg.arc"]);
+    assert!(text(&o).contains("FitGirl CRC-32"), "{}", text(&o));
+    let o = env.run(&["extract", "fg.arc", "-o", "out"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let t = text(&o);
+    assert!(!t.contains("not CRC-checked") && !t.contains("cannot be verified"), "{t}");
+    assert_file(&env.p("out"), "b.bin", &pseudo_random(20_000, 3));
+    let o = env.run(&["extract", "fgbad.arc", "-o", "outbad"]);
+    assert_eq!(o.status.code(), Some(2));
+    let t = text(&o);
+    assert!(t.contains("bad.bin") && t.contains("CRC mismatch"), "{t}");
 }
 
 #[test]

@@ -631,7 +631,7 @@ fn open_all(paths: &[PathBuf]) -> Result<Vec<Archive>> {
 fn print_archive(a: &Archive, files: bool) {
     let nfiles = a.entries.iter().filter(|e| !e.is_dir).count();
     let ndirs = a.entries.len() - nfiles;
-    let crc = if a.standard_crc { "standard CRC-32" } else { "nonstandard checksums" };
+    let crc = a.checksum.describe();
     println!("{}  ({} on disk, {} files + {} dirs, {} unpacked, {crc})", a.name(), human(a.len), nfiles, ndirs, human(a.total_size()));
     for (i, b) in a.blocks.iter().enumerate() {
         let n = a.entries[b.entries()].iter().filter(|e| !e.is_dir).count();

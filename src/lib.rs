@@ -3,6 +3,7 @@ pub mod arcini;
 pub mod config;
 pub mod events;
 pub mod extract;
+pub mod fgcrc;
 pub mod format;
 pub mod guard;
 pub mod helpers;

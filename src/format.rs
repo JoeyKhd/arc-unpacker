@@ -14,9 +14,10 @@
 //! `footer_data_pos - pos`. A directory lists its data blocks with positions stored as
 //! `dir_data_pos - pos`.
 //!
-//! Stock FreeArc uses standard CRC-32 everywhere. Some repacks ship a modified unarc with a
-//! different checksum, so `Archive::standard_crc` records whether the directory blocks' CRCs
-//! match standard CRC-32; file CRCs are only verified when they do.
+//! Stock FreeArc uses standard CRC-32 everywhere. FitGirl's modified unarc.dll uses a CRC-32
+//! with another polynomial (`crate::fgcrc`) everywhere instead. `Archive::checksum` records which
+//! one the directory blocks match; file CRCs are verified with it. An archive that matches
+//! neither (another modified unarc) keeps its files unverified.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::fs::File;
@@ -127,14 +128,86 @@ pub struct Entry {
     pub crc: u32,
 }
 
+/// Which CRC-32 an archive's checksums are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checksum {
+    /// Stock FreeArc: standard CRC-32 (zlib's).
+    Standard,
+    /// FitGirl's unarc.dll: CRC-32 with the reflected polynomial 0x0895171B.
+    FitGirl,
+    /// Neither matched: file CRCs can't be checked.
+    Unknown,
+}
+
+impl Checksum {
+    pub fn verifies(self) -> bool {
+        self != Checksum::Unknown
+    }
+
+    pub fn hash(self, data: &[u8]) -> u32 {
+        let mut h = self.hasher();
+        h.update(data);
+        h.finalize()
+    }
+
+    pub fn hasher(self) -> Crc {
+        match self {
+            Checksum::FitGirl => Crc::FitGirl(crate::fgcrc::Hasher::new()),
+            _ => Crc::Standard(crc32fast::Hasher::new()),
+        }
+    }
+
+    /// For `arc-unpack list`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Checksum::Standard => "standard CRC-32",
+            Checksum::FitGirl => "FitGirl CRC-32",
+            Checksum::Unknown => "unknown checksums",
+        }
+    }
+
+    /// The kind whose CRC of `data` is `crc`.
+    fn of(data: &[u8], crc: u32) -> Checksum {
+        if crc32fast::hash(data) == crc {
+            Checksum::Standard
+        } else if crate::fgcrc::hash(data) == crc {
+            Checksum::FitGirl
+        } else {
+            Checksum::Unknown
+        }
+    }
+}
+
+/// A running CRC of either kind.
+pub enum Crc {
+    Standard(crc32fast::Hasher),
+    FitGirl(crate::fgcrc::Hasher),
+}
+
+impl Crc {
+    pub fn update(&mut self, data: &[u8]) {
+        match self {
+            Crc::Standard(h) => h.update(data),
+            Crc::FitGirl(h) => h.update(data),
+        }
+    }
+
+    pub fn finalize(self) -> u32 {
+        match self {
+            Crc::Standard(h) => h.finalize(),
+            Crc::FitGirl(h) => h.finalize(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Archive {
     pub path: PathBuf,
     pub len: u64,
     pub blocks: Vec<DataBlock>,
     pub entries: Vec<Entry>,
-    /// True when the archive's own block CRCs are standard CRC-32 (so file CRCs can be trusted).
-    pub standard_crc: bool,
+    /// The CRC-32 the archive's checksums are (file CRCs are checked with it, unless Unknown).
+    pub checksum: Checksum,
 }
 
 impl Archive {
@@ -166,18 +239,26 @@ impl Archive {
         }
 
         let mut archive =
-            Archive { path: path.to_path_buf(), len, blocks: Vec::new(), entries: Vec::new(), standard_crc: true };
-        let mut saw_dir = false;
+            Archive { path: path.to_path_buf(), len, blocks: Vec::new(), entries: Vec::new(), checksum: Checksum::Unknown };
+        let mut kinds = Vec::new();
         for cb in controls.iter().filter(|c| c.kind == BLOCK_DIR) {
-            saw_dir = true;
             let bytes = read_control_block(&mut f, cb)?;
-            if crc32fast::hash(&bytes) != cb.crc {
-                archive.standard_crc = false;
-            }
+            kinds.push(Checksum::of(&bytes, cb.crc));
             parse_directory(&bytes, cb.pos, &mut archive)
                 .with_context(|| format!("{}: bad directory block at {}", path.display(), cb.pos))?;
         }
-        ensure!(saw_dir, "{}: footer lists no directory block", path.display());
+        ensure!(!kinds.is_empty(), "{}: footer lists no directory block", path.display());
+        if kinds.iter().all(|k| *k == kinds[0]) {
+            archive.checksum = kinds[0];
+        }
+        // unarc.dll: "control block failed CRC check".
+        if archive.checksum.verifies() {
+            ensure!(
+                archive.checksum.hash(&footer_bytes) == footer.crc,
+                "{}: the archive's footer failed its CRC check (the file is damaged)",
+                path.display()
+            );
+        }
         Ok(archive)
     }
 
@@ -194,23 +275,28 @@ fn find_footer(f: &mut File, len: u64) -> Result<ControlBlock> {
     f.read_exact(&mut tail)?;
     let base = len - tail_len;
 
-    let mut fallback = None;
+    // The last candidate that ends exactly at EOF and whose own descriptor CRC is right (either
+    // kind) wins; failing that, the best of the others (EOF first, then a right CRC).
+    let mut best: Option<(u8, ControlBlock)> = None;
     let mut end = tail.len();
     while let Some(p) = find_last(&tail[..end], SIGNATURE) {
         end = p;
-        let Ok((desc, desc_end)) = parse_descriptor(&tail[p..]) else { continue };
+        let Ok((desc, desc_end, desc_ok)) = parse_descriptor(&tail[p..]) else { continue };
         if desc.kind != BLOCK_FOOTER || !is_method_name(&desc.method) {
             continue;
         }
         let desc_pos = base + p as u64;
         let Some(pos) = desc_pos.checked_sub(desc.compsize) else { continue };
         let found = ControlBlock { pos, ..desc };
-        if desc_pos + desc_end as u64 == len {
+        let score = 2 * (desc_pos + desc_end as u64 == len) as u8 + desc_ok as u8;
+        if score == 3 {
             return Ok(found);
         }
-        fallback.get_or_insert(found);
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            best = Some((score, found));
+        }
     }
-    fallback.context("footer descriptor not found in the last 64 KiB")
+    best.map(|(_, b)| b).context("footer descriptor not found in the last 64 KiB")
 }
 
 fn find_last(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -221,8 +307,9 @@ fn is_method_name(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
 
-/// Parses a descriptor starting at the signature. Returns the block info (pos = 0) and its length.
-fn parse_descriptor(buf: &[u8]) -> Result<(ControlBlock, usize)> {
+/// Parses a descriptor starting at the signature. Returns the block info (pos = 0), its length,
+/// and whether its own CRC (over everything before it, either kind) is right.
+fn parse_descriptor(buf: &[u8]) -> Result<(ControlBlock, usize, bool)> {
     let mut c = Cursor::new(buf);
     ensure!(c.take(4)? == SIGNATURE, "no signature");
     let kind = c.varint()?;
@@ -230,8 +317,10 @@ fn parse_descriptor(buf: &[u8]) -> Result<(ControlBlock, usize)> {
     let origsize = c.varint()?;
     let compsize = c.varint()?;
     let crc = c.u32le()?;
-    let _desc_crc = c.u32le()?;
-    Ok((ControlBlock { kind, method, pos: 0, origsize, compsize, crc }, c.pos))
+    let covered = c.pos;
+    let desc_crc = c.u32le()?;
+    let desc_ok = Checksum::of(&buf[..covered], desc_crc) != Checksum::Unknown;
+    Ok((ControlBlock { kind, method, pos: 0, origsize, compsize, crc }, c.pos, desc_ok))
 }
 
 fn read_control_block(f: &mut File, cb: &ControlBlock) -> Result<Vec<u8>> {
@@ -384,5 +473,32 @@ mod tests {
         assert_eq!(c.varint().unwrap(), 405);
         assert_eq!(c.varint().unwrap(), 557);
         assert_eq!(c.varint().unwrap(), 8);
+    }
+
+    #[test]
+    fn checksum_kinds() {
+        assert_eq!(Checksum::of(b"123456789", 0xCBF4_3926), Checksum::Standard);
+        assert_eq!(Checksum::of(b"123456789", 0xF9CD_CB20), Checksum::FitGirl);
+        assert_eq!(Checksum::of(b"123456789", 0x1234_5678), Checksum::Unknown);
+        for kind in [Checksum::Standard, Checksum::FitGirl] {
+            let mut h = kind.hasher();
+            h.update(b"1234");
+            h.update(b"56789");
+            assert_eq!(h.finalize(), kind.hash(b"123456789"));
+        }
+    }
+
+    #[test]
+    fn descriptor_crc_of_a_fitgirl_header() {
+        // Every FitGirl archive's header descriptor: storing, 8 bytes, block CRC f664dce3,
+        // descriptor CRC f6d0be5a (FitGirl CRC-32 of everything before it).
+        let mut d = vec![0x41, 0x72, 0x43, 0x01, 0x02];
+        d.extend_from_slice(b"storing\0");
+        d.extend_from_slice(&[0x10, 0x10, 0xe3, 0xdc, 0x64, 0xf6]);
+        d.extend_from_slice(&0xF6D0_BE5Au32.to_le_bytes());
+        let (cb, len, ok) = parse_descriptor(&d).unwrap();
+        assert_eq!((cb.method.as_str(), cb.origsize, cb.compsize, cb.crc, len, ok), ("storing", 8, 8, 0xF664_DCE3, d.len(), true));
+        *d.last_mut().unwrap() ^= 1;
+        assert!(!parse_descriptor(&d).unwrap().2);
     }
 }

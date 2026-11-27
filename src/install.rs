@@ -2162,7 +2162,7 @@ mod tests {
         std::fs::write(game.join("Data").join("voice.pck"), b"english").unwrap();
         std::fs::write(game.join("keep.txt"), b"untouched").unwrap();
         let entry = |p: &str, is_dir: bool| Entry { path: p.into(), size: 1, mtime: 0, is_dir, crc: 0 };
-        let archive = |entries| Archive { path: PathBuf::new(), len: 0, blocks: Vec::new(), entries, standard_crc: true };
+        let archive = |entries| Archive { path: PathBuf::new(), len: 0, blocks: Vec::new(), entries, checksum: crate::format::Checksum::Standard };
         // Only files the archive holds and the game already has are moved, keeping their paths.
         let a = archive(vec![entry("Data", true), entry("Data/voice.pck", false), entry("new.txt", false)]);
         assert_eq!(back_up_replaced(&a, &game, None, &game, &backup).unwrap(), 1);

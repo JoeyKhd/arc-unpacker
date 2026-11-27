@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::events::{self, CodecCpu, Event, Level, Sink};
-use crate::format::{Archive, DataBlock, Entry};
+use crate::format::{Archive, Checksum, DataBlock, Entry};
 use crate::stage::{self, Ctx, Registry, Stream};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -80,7 +80,7 @@ pub fn hex(d: &[u8]) -> String {
 pub struct Summary {
     /// Files whose CRC matched.
     pub files_ok: u64,
-    /// Files decoded completely but not CRC-checked (archive uses a nonstandard checksum).
+    /// Files decoded completely but not CRC-checked (the archive's checksum kind is unknown).
     pub files_unverified: u64,
     pub bytes: u64,
     pub problems: Vec<String>,
@@ -184,10 +184,10 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     let mut summary = Summary::default();
     let via_unarc: Vec<String> =
         jobs.iter().filter(|j| matches!(j.kind, JobKind::Unarc)).map(|j| j.archive.name()).collect();
-    for a in archives.iter().filter(|a| !a.standard_crc && !via_unarc.contains(&a.name())) {
+    for a in archives.iter().filter(|a| !a.checksum.verifies() && !via_unarc.contains(&a.name())) {
         summary.notes.push(format!(
-            "{}: block checksums are not standard CRC-32 (modified FreeArc), so file CRCs cannot be \
-             verified; sizes and codec exit codes are still checked",
+            "{}: block checksums are neither standard nor FitGirl CRC-32 (another modified FreeArc), \
+             so file CRCs cannot be verified; sizes and codec exit codes are still checked",
             a.name()
         ));
     }
@@ -640,7 +640,7 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
     };
 
     let entries = &archive.entries[block.entries()];
-    let split = split(output, entries, opts, archive.standard_crc);
+    let split = split(output, entries, opts, archive.checksum);
     done.store(true, Ordering::Relaxed);
     let _ = watchdog.join();
     if split.is_err() {
@@ -922,7 +922,8 @@ struct FileJob {
 /// Cuts the decoded stream into files. In extract mode, files go to a pool of writer threads
 /// (file creation/close is the slow part on Windows, so it pays to overlap it); in test mode
 /// CRCs are checked inline.
-fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) -> Result<BlockResult> {
+fn split(mut stream: Stream, entries: &[Entry], opts: &Options, checksum: Checksum) -> Result<BlockResult> {
+    let verify = checksum.verifies();
     let mut problems = Vec::new();
     let mut files_ok = 0u64;
     let mut files_unverified = 0u64;
@@ -930,7 +931,7 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
     let Some(out_dir) = &opts.out_dir else {
         let mut buf = vec![0u8; CHUNK];
         for e in entries.iter().filter(|e| !e.is_dir) {
-            let mut h = crc32fast::Hasher::new();
+            let mut h = checksum.hasher();
             let expected = expected_md5(opts, &e.path);
             let mut m = expected.map(|_| md5::Context::new());
             let mut left = e.size;
@@ -971,7 +972,7 @@ fn split(mut stream: Stream, entries: &[Entry], opts: &Options, verify: bool) ->
             let overwrite = opts.overwrite;
             s.spawn(move || {
                 while let Ok(job) = job_rx.recv() {
-                    match write_file(&job, overwrite, verify, expected_md5(opts, &job.rel)) {
+                    match write_file(&job, overwrite, checksum, expected_md5(opts, &job.rel)) {
                         Ok(()) => {
                             ok_counter.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1057,7 +1058,8 @@ fn check_md5(expected: &ExpectedMd5, ctx: md5::Context) {
     expected.checked.store(true, Ordering::Relaxed);
 }
 
-fn write_file(job: &FileJob, overwrite: bool, verify: bool, expected: Option<&ExpectedMd5>) -> Result<()> {
+fn write_file(job: &FileJob, overwrite: bool, checksum: Checksum, expected: Option<&ExpectedMd5>) -> Result<()> {
+    let verify = checksum.verifies();
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true);
     if overwrite { opts.create(true).truncate(true) } else { opts.create_new(true) };
@@ -1066,7 +1068,7 @@ fn write_file(job: &FileJob, overwrite: bool, verify: bool, expected: Option<&Ex
         file.set_len(job.size)?; // reserve space up front: fewer fragments, early "disk full"
     }
     let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
-    let mut h = crc32fast::Hasher::new();
+    let mut h = checksum.hasher();
     let mut m = expected.map(|_| md5::Context::new());
     let mut written = 0u64;
     for chunk in job.chunks.iter() {
