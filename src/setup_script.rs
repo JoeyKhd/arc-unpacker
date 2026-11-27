@@ -166,6 +166,15 @@ fn part_file_matches(component: &crate::inno::Component, file: &str) -> bool {
     if words.iter().any(|w| music(w)) && (music(&leaf) || word.split(|c: char| !c.is_ascii_alphanumeric()).any(music)) {
         return true;
     }
+    // Every telling word of the part found in the description, a prefix being enough:
+    // `...-selective-speech-brazilian.bin` is "Portuguese-Brazil", while
+    // `...-chinese-simplified.bin` is not "Chinese Traditional".
+    let generic = |w: &str| matches!(w, "speech" | "voice" | "voices" | "vo" | "audio" | "sound" | "sounds" | "language" | "lang" | "pack");
+    let telling: Vec<&str> = words.iter().copied().filter(|w| w.len() >= 3 && !generic(w)).collect();
+    let described: Vec<&str> = word.split(|c: char| !c.is_ascii_alphanumeric()).filter(|d| d.len() >= 4).collect();
+    if !telling.is_empty() && telling.iter().all(|w| described.iter().any(|d| w.starts_with(d) || d.starts_with(w))) {
+        return true;
+    }
     if words.len() < 2 {
         return false;
     }
@@ -1232,6 +1241,13 @@ mod tests {
         assert!(downloaded_part(&c("ost", ""), &civ));
         assert!(!downloaded_part(&c("bonus", "Bonus Content"), &civ));
         assert!(!downloaded_part(&c("ost", "Bonus OST (OGG)"), &files), "no soundtrack downloaded");
+        // Splinter Cell: Blacklist: "Portuguese-Brazil" is setup-fitgirl-selective-speech-brazilian.bin.
+        let scb: Vec<String> = ["setup-fitgirl-01.bin", "setup-fitgirl-selective-speech-brazilian.bin", "fg-selective-chinese-simplified.bin"].iter().map(|s| s.to_string()).collect();
+        assert!(downloaded_part(&c(r"local\por", "Portuguese-Brazil"), &scb));
+        assert!(downloaded_part(&c(r"local\chi", "Chinese Simplified"), &scb));
+        assert!(!downloaded_part(&c(r"local\cht", "Chinese Traditional"), &scb));
+        assert!(!downloaded_part(&c(r"local\eng", "English"), &scb));
+        assert!(!downloaded_part(&c("text", "Main game files"), &scb));
     }
 
     fn component(name: &str, fixed: bool) -> crate::inno::Component {
