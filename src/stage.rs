@@ -193,6 +193,7 @@ fn four_by_four(inner: Vec<Stage>, input: Stream, ctx: &Ctx, label: String) -> R
         let mut workers = Vec::new();
         let mut jobs: Option<crossbeam_channel::Sender<(u64, i32, Vec<u8>)>> = None;
         let (mut next_out, mut index, mut ahead) = (0u64, 0u64, 1usize);
+        let mut reserved = ReservedMemory::take(0);
         // Writes finished blocks in order; with `wait`, until block `upto` has been written.
         let emit = |next_out: &mut u64, upto: u64, w: &mut crate::pipe::PipeWriter| -> Result<()> {
             loop {
@@ -226,11 +227,15 @@ fn four_by_four(inner: Vec<Stage>, input: Stream, ctx: &Ctx, label: String) -> R
             let mut data = vec![0u8; packed as usize];
             ensure!(read_full(&mut input, &mut data)?, "4x4: stream cut short");
             if jobs.is_none() {
-                // Blocks in flight: as many as cores, within about 1.5 GB of buffers.
+                // Blocks in flight: as many as cores, as far as free RAM allows (see
+                // `four_by_four_workers`), reserved so that 4x4 streams starting together
+                // don't all count the same free memory.
                 let block = (orig.max(packed) as u64).max(1 << 20);
                 let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-                let budget = crate::memlimit::get().map_or(3u64 << 29, |limit| (limit / 8).min(3 << 29));
-                ahead = (budget / (2 * block)).clamp(1, threads.min(16) as u64) as usize;
+                let (available, _) = crate::guard::memory();
+                let others = FOUR_BY_FOUR_RESERVED.load(std::sync::atomic::Ordering::Relaxed);
+                ahead = four_by_four_workers(block, &inner, available.saturating_sub(others), crate::memlimit::get(), threads);
+                reserved = ReservedMemory::take(ahead as u64 * per_block_memory(block, &inner));
                 let (tx, rx) = crossbeam_channel::bounded::<(u64, i32, Vec<u8>)>(ahead);
                 for _ in 0..ahead {
                     let (rx, done, inner, ctx) = (rx.clone(), done.clone(), inner.clone(), ctx2.clone());
@@ -261,11 +266,54 @@ fn four_by_four(inner: Vec<Stage>, input: Stream, ctx: &Ctx, label: String) -> R
         for h in workers {
             let _ = h.join();
         }
+        drop(reserved);
         r?;
         w.finish()?;
         Ok(())
     });
     Ok(Box::new(r))
+}
+
+/// Memory reserved by the running 4x4 streams for their blocks in flight.
+static FOUR_BY_FOUR_RESERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A share of `FOUR_BY_FOUR_RESERVED`, given back when dropped.
+struct ReservedMemory(u64);
+
+impl ReservedMemory {
+    fn take(bytes: u64) -> ReservedMemory {
+        FOUR_BY_FOUR_RESERVED.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        ReservedMemory(bytes)
+    }
+}
+
+impl Drop for ReservedMemory {
+    fn drop(&mut self) {
+        FOUR_BY_FOUR_RESERVED.fetch_sub(self.0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// What one 4x4 block in flight takes: its packed and decoded buffers here, plus what the
+/// inner codec needs for it. The built-in LZMA needs its dictionary (at most the block). A codec
+/// program or CLS DLL's needs aren't declared for decoding, so it gets four times the block (bcm,
+/// a BWT decoder, takes about five times its block, counting our input buffer).
+fn per_block_memory(block: u64, inner: &[Stage]) -> u64 {
+    let foreign = inner.iter().any(|s| matches!(s.codec, Codec::External(_) | Codec::Cls { .. } | Codec::FourByFour(_)));
+    2 * block + if foreign { 4 * block } else { block }
+}
+
+/// How many 4x4 blocks to decode at once: one per logical CPU (as FreeArc's own 4x4 does), as
+/// far as half the free RAM (`available`, less what other 4x4 streams reserved) allows. With a
+/// RAM limit: within an eighth of it, at most 1.5 GiB. (It used to be a fixed 1.5 GiB of buffers,
+/// at most 16: 3 blocks at a time for 256 MB blocks, which held Batman: Arkham City's bcm
+/// archive at 2.8 cores for 420 s.)
+fn four_by_four_workers(block: u64, inner: &[Stage], available: u64, limit: Option<u64>, threads: usize) -> usize {
+    let per = per_block_memory(block, inner).max(1);
+    let budget = match limit {
+        Some(l) => (l / 8).min(3 << 29),
+        None => available / 2,
+    };
+    (budget / per).clamp(1, threads.max(1) as u64) as usize
 }
 
 /// One 4x4 block through the inner chain; it must decode to exactly `size` bytes.
@@ -685,6 +733,31 @@ pub(crate) fn unique() -> u64 {
 mod tests {
     use super::*;
     use crate::config::{Codec, Config};
+
+    #[test]
+    fn four_by_four_workers_follow_free_ram() {
+        const MB: u64 = 1 << 20;
+        const GB: u64 = 1 << 30;
+        let cfg = Config::default();
+        let native = match &cfg.resolve("4x4:b256mb:lzma:64mb").unwrap()[0].codec {
+            Codec::FourByFour(inner) => inner.clone(),
+            c => panic!("{c:?}"),
+        };
+        let foreign = vec![crate::config::Stage {
+            method: crate::method::parse_chain("bcm").remove(0),
+            codec: Codec::Cls { dll: "cls-bcm.dll".into(), method: "bcm".into(), performance_cores: false },
+        }];
+        // Batman: Arkham City's 4x4:b256mb:bcm with 24 GB free on 32 threads: 1.5 GB per block,
+        // 8 at once (it was 3).
+        assert_eq!(four_by_four_workers(256 * MB, &foreign, 24 * GB, None, 32), 8);
+        // Small blocks: one per CPU (it was at most 16).
+        assert_eq!(four_by_four_workers(16 * MB, &foreign, 24 * GB, None, 32), 32);
+        // Native LZMA needs less per block.
+        assert_eq!(four_by_four_workers(256 * MB, &native, 24 * GB, None, 32), 16);
+        // Little free RAM: still one; a RAM limit keeps its old, smaller budget.
+        assert_eq!(four_by_four_workers(256 * MB, &foreign, 512 * MB, None, 32), 1);
+        assert_eq!(four_by_four_workers(64 * MB, &foreign, 24 * GB, Some(8 * GB), 32), 2);
+    }
 
     #[test]
     fn four_by_four_resolves_its_inner_method() {
