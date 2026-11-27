@@ -202,6 +202,18 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
         output: jobs.iter().map(Job::origsize).sum(),
     });
 
+    // How the lolz decoders will run, from their stream headers: tells a decoder-bound block
+    // from one held up elsewhere in the logs.
+    for j in &jobs {
+        if let JobKind::Block(i) = j.kind {
+            let b = &j.archive.blocks[i];
+            if let Some(h) = lolz_header(&j.archive, b) {
+                let name = b.method.rsplit('+').next().unwrap_or("").split(':').next().unwrap_or("");
+                events::info(sink, format!("{} #{i}: {name}: {}", j.archive.name(), h.describe()));
+            }
+        }
+    }
+
     let summary = Arc::new(Mutex::new(summary));
     let pending: Vec<(usize, Job, bool)> =
         jobs.into_iter().map(|j| { let heavy = is_heavy(&j, cfg); (next_job_id(), j, heavy) }).collect();
@@ -376,7 +388,17 @@ fn next_job(
 /// decoders (magic*, lolly*) size their thread count by a share of RAM, and srep keeps the data
 /// it may need again in memory. The single-threaded lolzi/lolzx/lolz take what the stream says.
 fn is_heavy(job: &Job, cfg: &Config) -> bool {
-    let block = |b: &DataBlock| method_is_heavy(&b.method, b.origsize, cfg);
+    let block = |b: &DataBlock| {
+        // A single-threaded magic*/lolly* stream that needs little memory (its header says so)
+        // is light: then only the rest of the chain counts. (Hades: small magic2 side archives.)
+        match lolz_header(&job.archive, b) {
+            Some(h) if h.light() => {
+                let rest: Vec<&str> = b.method.split('+').collect();
+                rest.len() > 1 && method_is_heavy(&rest[..rest.len() - 1].join("+"), b.origsize, cfg)
+            }
+            _ => method_is_heavy(&b.method, b.origsize, cfg),
+        }
+    };
     match job.kind {
         JobKind::Unarc => job.archive.blocks.iter().any(block),
         JobKind::Block(i) => block(&job.archive.blocks[i]),
@@ -385,6 +407,91 @@ fn is_heavy(job: &Job, cfg: &Config) -> bool {
 
 fn method_is_heavy(chain: &str, block_size: u64, cfg: &Config) -> bool {
     method_is_heavy_with(chain, block_size, cfg, crate::memlimit::get())
+}
+
+/// The header of a magic*/lolly* stream: the first bytes of the data block, when that decoder
+/// is the chain's last (outermost) method. Reverse-engineered (the same layout in every magic
+/// and lolly build; cls-magic2_x64.exe FUN_140013da0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LolzHeader {
+    /// Block-parallel ("mtt1"): decoded by T threads, T from MaxThreadsUsage, the CPUs and
+    /// MaxMemoryUsage / `need()`. Otherwise `threads` (fixed at pack time) decode it.
+    mtt: bool,
+    threads: u32,
+    /// Dictionary, 16 MiB units.
+    dict16: u32,
+    mode: u32,
+    f2bc: u32,
+    b: u32,
+    ldmf: bool,
+    /// mtt: each thread's input buffer, 64 KiB units.
+    thrbuf: u32,
+}
+
+impl LolzHeader {
+    fn parse(h: &[u8]) -> Option<LolzHeader> {
+        let w0 = u32::from_le_bytes(h.get(0..4)?.try_into().ok()?);
+        let w1 = u32::from_le_bytes(h.get(4..8)?.try_into().ok()?);
+        let mtt = w0 >> 31 == 1;
+        let thrbuf = if mtt { u16::from_le_bytes(h.get(9..11)?.try_into().ok()?) as u32 } else { 0 };
+        Some(LolzHeader {
+            mtt,
+            threads: ((w1 >> 20) & 0xF) + 1,
+            dict16: (w1 >> 13) & 0x7F,
+            mode: (w1 >> 8) & 7,
+            f2bc: (w1 >> 11) & 3,
+            b: w1 & 0xFF,
+            ldmf: *h.get(8)? & 1 == 1,
+            thrbuf,
+        })
+    }
+
+    /// Memory per decode thread, bytes (magic2's formula; the others are close).
+    fn need(&self) -> u64 {
+        let mut n = self.thrbuf as u64 * (64 << 10) + self.dict16 as u64 * (16 << 20) + 0x599E44;
+        if self.ldmf {
+            n += 0x128A14;
+        }
+        if self.f2bc != 0 {
+            n += (self.b as u64 * (512 << 10) + (512 << 10)) * 4 + 0x9C4C2;
+        }
+        if self.mode < 3 {
+            n += 0x1B96C0;
+        }
+        n += match self.mode {
+            1 | 3 => 0x992200,
+            2 | 4 => 0x3420000,
+            _ => 0,
+        };
+        n
+    }
+
+    /// A fixed-thread stream that needs under 1 GB in all.
+    fn light(&self) -> bool {
+        !self.mtt && self.threads as u64 * (self.dict16 as u64 * (16 << 20) + (10 << 20)) < 1 << 30
+    }
+
+    fn describe(&self) -> String {
+        if self.mtt {
+            format!("multi-threaded stream, up to 16 threads as memory allows ({} MB each)", self.need() >> 20)
+        } else {
+            format!("{} decode thread(s), fixed when packed ({} MB dictionary)", self.threads, self.dict16 * 16)
+        }
+    }
+}
+
+/// The lolz header of block `b`, if its outermost method is a magic*/lolly* decoder.
+fn lolz_header(archive: &Archive, b: &DataBlock) -> Option<LolzHeader> {
+    let last = b.method.rsplit('+').next()?.split(':').next()?.to_ascii_lowercase();
+    if !(last.starts_with("magic") || last.starts_with("lolly")) || b.compsize < 16 {
+        return None;
+    }
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(&archive.path).ok()?;
+    f.seek(SeekFrom::Start(b.pos)).ok()?;
+    let mut h = [0u8; 11];
+    f.read_exact(&mut h).ok()?;
+    LolzHeader::parse(&h)
 }
 
 /// `method_is_heavy` with the RAM limit (`limit`, bytes) given.
@@ -1218,6 +1325,20 @@ mod tests {
         // Plain FreeArc methods never are.
         assert!(!method_is_heavy("dispack070+delta+lzma:96mb", 8 * gb, &cfg));
         assert!(!method_is_heavy("storing", 50 * gb, &cfg));
+    }
+
+    #[test]
+    fn lolz_stream_headers() {
+        // 007 First Light fg-01 #1 (magic2): block-parallel, 954 MB per thread.
+        let h = LolzHeader::parse(&[0x44, 0x48, 0x28, 0xee, 0x1f, 0x00, 0x94, 0xff, 0x00, 0x30, 0x1b]).unwrap();
+        assert!(h.mtt && h.threads == 10 && h.dict16 == 32 && h.thrbuf == 6960 && !h.ldmf);
+        assert_eq!(h.need() >> 20, 954);
+        assert!(!h.light());
+        // Hades fg-04 #1 (magic2): 3 fixed threads, 32 MB dictionary: light.
+        let h = LolzHeader::parse(&[0x44, 0x48, 0x28, 0x6e, 0x1f, 0x40, 0x20, 0x07, 0x00, 0xb5, 0x00]).unwrap();
+        assert!(!h.mtt && h.threads == 3 && h.dict16 == 2 && h.mode == 0 && h.b == 31);
+        assert!(h.light());
+        assert!(LolzHeader::parse(&[0; 5]).is_none());
     }
 
     #[test]
