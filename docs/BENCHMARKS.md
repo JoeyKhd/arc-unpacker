@@ -47,7 +47,6 @@
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
-| Shambles - Sons of Apocalypse | 1.2 GB | 37 s | 17 s | **2.2×** | 1.0.4 |
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
@@ -70,7 +69,6 @@
 | Sleeping Dogs Pack | 10.4 GB | 7 min 08 s | 3 min 42 s | **1.9×** | 1.0.2-dev |
 | The Killing Stone | 4.4 GB | 1 min 58 s | 1 min 04 s | **1.9×** | 0.1.0-beta.6 |
 | Witch Cabin Cleanup | 2.4 GB | 39 s | 21 s | **1.9×** | 0.1.0-beta.10 |
-| ENTITY - THE BLACK DAY | 30.8 GB | 28 min 19 s | 16 min 11 s | **1.8×** | 1.0.4 |
 | Fran Bow | 0.9 GB | 1 min 59 s | 1 min 05 s | **1.8×** | 1.0.3-dev |
 | Frontier Paladin | 8.7 GB | 5 min 15 s | 2 min 54 s | **1.8×** | 0.1.0-beta.9 |
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
@@ -118,6 +116,8 @@
 | Marvel's Spider-Man 2 | 64.5 GB | – | – | – | |
 | Red Dead Redemption 2 | 68.8 GB | – | – | – | |
 | The Last of Us: Part I | 38.8 GB | – | – | – | |
+| ENTITY: THE BLACK DAY | 28.7 GB | – | – | – | |
+| Shambles: Sons of Apocalypse | 1.1 GB | – | – | – | |
 | Assassin's Creed Shadows | 77.3 GB | – | – | – | |
 | Call of Duty: Modern Warfare II | 22.5 GB | – | – | – | |
 | The Blood of Dawnwalker | 39.1 GB | – | – | – | |
@@ -208,4 +208,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 109 measured** | | **592 min 12 s** | **359 min 52 s** | **1.6×** | |
+| **All 107 measured** | | **563 min 16 s** | **343 min 24 s** | **1.6×** | |
