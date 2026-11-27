@@ -1183,6 +1183,15 @@ fn batch_touches(bat: &Path, dir: &Path, cfg_name: &str, tmp: &Path) -> bool {
     })
 }
 
+/// arc-unpack's command-line program: this one, or the one next to the GUI.
+fn cli_exe() -> Option<PathBuf> {
+    let me = std::env::current_exe().ok()?;
+    if me.file_name().is_some_and(|n| n.eq_ignore_ascii_case("arc-unpack.exe")) {
+        return Some(me);
+    }
+    Some(me.with_file_name("arc-unpack.exe")).filter(|p| p.is_file())
+}
+
 /// A cmd command line's `&&`-chained commands (quotes respected); None if it uses `&` alone.
 fn split_and_and(line: &str) -> Option<Vec<&str>> {
     let (mut out, mut start, mut quoted) = (Vec::new(), 0, false);
@@ -1924,6 +1933,9 @@ impl ScriptRunner<'_> {
         cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if let Some((_, map, _)) = &self.standins {
             cmd.env(crate::tools::MAP_ENV, map);
+            if let Some(cli) = cli_exe() {
+                cmd.env(crate::tools::SELF_ENV, cli);
+            }
         }
         crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
         cmd.spawn().with_context(|| format!("start {}", program.display()))

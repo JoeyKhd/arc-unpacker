@@ -22,6 +22,11 @@
 //!   the other on one core. Here: the input is cut at segment boundaries and the pieces are
 //!   encoded by copies of the original tool at once, their outputs joined in order (see
 //!   `fgpack_parallel`).
+//! - FreeArc 0.67's console unarc (Prototype's fgpack.exe, Max Payne 3's and Cricket's
+//!   fgpack2.exe): `x -o+ <archive>` extracts into the current folder, one block after the other.
+//!   Here: arc-unpack's own engine extracts it (all cores, every file CRC-checked), with the
+//!   codecs next to the tool; anything it can't do falls back to the original, which rewrites
+//!   every file anyway (-o+).
 
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -34,6 +39,7 @@ pub enum Role {
     Lz4Cli194,
     X2n,
     FgpackSegLzma,
+    FreeArcUnarc,
 }
 
 impl Role {
@@ -43,7 +49,14 @@ impl Role {
             Role::Lz4Cli194 => "lz4-1.9.4",
             Role::X2n => "x2n",
             Role::FgpackSegLzma => "fgpack-seg-lzma",
+            Role::FreeArcUnarc => "freearc-unarc-0.67",
         }
+    }
+
+    /// The original must stay in its own folder (renamed): FreeArc's console unarc finds arc.ini
+    /// and its cls-*.dll codecs next to itself.
+    pub fn keeps_its_folder(self) -> bool {
+        matches!(self, Role::FreeArcUnarc)
     }
 
     pub fn from_name(s: &str) -> Option<Role> {
@@ -57,6 +70,7 @@ const KNOWN: &[(u64, &str, Role)] = &[
     (304640, "f0eb4df3daedbba4764afca1e18a9c4b716df0917f51382c99e120c9733e87f6", Role::Lz4Cli194),
     (7680, "62410f076016456299e3cb5b3311b8a8d66fecd299dde9e7b6815fd581036428", Role::X2n),
     (205312, "f6594b8f7773a9223bc7f1c5c3ecf9971c4988ee34db6321a13673511cdde665", Role::FgpackSegLzma),
+    (333312, "09ea4478b379a1839e21896a8b3fd82b4adf81c1b2b387795abefe5df3e57549", Role::FreeArcUnarc),
 ];
 
 /// Repack tools that touch only the files named on their command line: no fixed-name temp
@@ -91,6 +105,13 @@ pub fn named_files_tool(path: &Path, map: Option<&Path>) -> Option<usize> {
     let i = OVERLAP_SAFE.iter().position(|k| k.0 == meta.len() && k.1 == d)?;
     Some(if i == 0 { 1 } else { 0 })
 }
+
+/// The name ending of an original kept in its own folder (see `Role::keeps_its_folder`).
+const ORIGINAL_SUFFIX: &str = ".arc-unpack-original.exe";
+
+/// The environment variable that tells a stand-in which arc-unpack started it (the FreeArc
+/// stand-in extracts with it).
+pub const SELF_ENV: &str = "ARC_UNPACK_SELF";
 
 /// The stand-in program's file name (shipped next to arc-unpack or embedded in it).
 pub const PROGRAM: &str = "arc-unpack-tool.exe";
@@ -170,12 +191,17 @@ pub fn substitute(dir: &Path, stand_in: &Path, originals: &Path, map: &Path) -> 
                 stack.push(p);
                 continue;
             }
-            if !ft.is_file() || !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) || known.contains(&p) {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            if !ft.is_file() || !name.ends_with(".exe") || name.ends_with(ORIGINAL_SUFFIX) || known.contains(&p) {
                 continue;
             }
             let Some(role) = identify(&p) else { continue };
-            std::fs::create_dir_all(originals)?;
-            let original = originals.join(format!("{}-{}", done.len() + known.len(), p.file_name().unwrap_or_default().to_string_lossy()));
+            let original = if role.keeps_its_folder() {
+                p.with_file_name(format!("{}{ORIGINAL_SUFFIX}", p.file_stem().unwrap_or_default().to_string_lossy()))
+            } else {
+                std::fs::create_dir_all(originals)?;
+                originals.join(format!("{}-{}", done.len() + known.len(), p.file_name().unwrap_or_default().to_string_lossy()))
+            };
             std::fs::rename(&p, &original).with_context(|| format!("move {} aside", p.display()))?;
             if let Err(e) = std::fs::copy(stand_in, &p) {
                 let _ = std::fs::rename(&original, &p);
@@ -760,6 +786,44 @@ impl Drop for CpuSlots {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// FreeArc 0.67's console unarc (see the module doc).
+
+/// `x -o+ <archive>` into `out` with arc-unpack's engine: the arc-unpack program in SELF_ENV,
+/// with the codecs (and arc.ini, if any) next to the `original` tool. An error means: run the
+/// original (which rewrites every file anyway). Returns a note for the log.
+pub fn freearc_extract(archive: &Path, out: &Path, original: &Path) -> Result<String> {
+    let cli = std::env::var_os(SELF_ENV).map(PathBuf::from).filter(|p| p.is_file()).context("arc-unpack's program not known")?;
+    let dir = original.parent().context("the tool's folder")?;
+    let ini = dir.join("arc.ini");
+    let toml = if ini.is_file() {
+        crate::arcini::to_toml(&ini)?
+    } else {
+        // Without arc.ini FreeArc finds cls-<method>.dll next to itself; so does codec_dir.
+        format!("codec_dir = {}\n", toml::Value::String(dir.to_string_lossy().into_owned()))
+    };
+    let cfg = std::env::temp_dir().join(format!("arc-unpack-freearc-{}.toml", std::process::id()));
+    std::fs::write(&cfg, toml)?;
+    let run = std::process::Command::new(&cli)
+        .arg("extract")
+        .arg("-c")
+        .arg(&cfg)
+        .arg("-o")
+        .arg(out)
+        .arg("--overwrite")
+        .arg("-j")
+        .arg("4")
+        .arg(archive)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let _ = std::fs::remove_file(&cfg);
+    let o = run?;
+    let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+    ensure!(o.status.success(), "arc-unpack extract failed: {last}");
+    Ok(format!("arc-unpack's engine: {last}"))
 }
 
 #[cfg(test)]

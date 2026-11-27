@@ -30,7 +30,9 @@ fn run() -> i32 {
         return run_original(&entry, None);
     };
     job.original = entry.original.clone();
-    let verify = std::env::var_os(tools::VERIFY_ENV).is_some_and(|v| v == "1");
+    // (A whole folder can't be redirected for a side-by-side check: the install's own file check
+    // covers FreeArc extractions.)
+    let verify = std::env::var_os(tools::VERIFY_ENV).is_some_and(|v| v == "1") && job.output_arg != usize::MAX;
     if verify {
         return run_verified(&entry, &map, &job);
     }
@@ -59,7 +61,9 @@ fn run() -> i32 {
             1
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&job.output);
+            if job.output.is_file() {
+                let _ = std::fs::remove_file(&job.output);
+            }
             log(&map, "log", &format!("{} failed ({e:#}), running the original: {}", entry.role.name(), job.input.display()));
             run_original(&entry, None)
         }
@@ -98,6 +102,7 @@ impl Job {
                 .map(|_| String::new())
             }
             Role::FgpackSegLzma => tools::fgpack_parallel(&self.input, &self.output, &self.original, threads),
+            Role::FreeArcUnarc => tools::freearc_extract(&self.input, &self.output, &self.original),
         }
     }
 }
@@ -106,6 +111,31 @@ impl Job {
 /// that exists and an output that doesn't (the tools' own handling of other cases is theirs).
 fn understood(role: Role, args: &[OsString]) -> Option<Job> {
     let s: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
+    if role == Role::FreeArcUnarc {
+        // FreeArc 0.67 unarc: `x -o+ [-dp<dir>] [--] <archive>`, nothing else (no file lists, no
+        // other switches): extract everything into the current folder (or -dp), overwriting.
+        let (cmd, rest) = s.split_first()?;
+        if *cmd != "x" {
+            return None;
+        }
+        let (mut overwrite, mut base, mut files, mut options_done) = (false, None, Vec::new(), false);
+        for a in rest {
+            match *a {
+                "--" if !options_done => options_done = true,
+                "-o+" if !options_done => overwrite = true,
+                o if !options_done && o.starts_with("-dp") && o.len() > 3 => base = Some(PathBuf::from(&o[3..])),
+                o if !options_done && o.starts_with('-') => return None,
+                f => files.push(PathBuf::from(f)),
+            }
+        }
+        let [archive] = <[PathBuf; 1]>::try_from(files).ok()?;
+        let out = base.or_else(|| std::env::current_dir().ok())?;
+        if !overwrite || !archive.is_file() || !out.is_dir() {
+            return None;
+        }
+        // (Not in place: when ours fails, the original's -o+ rewrites every file.)
+        return Some(Job { role, input: archive, output: out, key: Vec::new(), output_arg: usize::MAX, in_place: false, extra: None, original: PathBuf::new() });
+    }
     if let (Role::X2n, [t, d, m]) = (role, s.as_slice()) {
         // x2n <target> <data> <map>: all three exist, three different files.
         let paths: Vec<PathBuf> = [t, d, m].iter().map(PathBuf::from).collect();
