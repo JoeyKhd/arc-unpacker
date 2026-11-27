@@ -255,11 +255,13 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                         compressed: job.compsize(),
                         output: job.origsize(),
                     });
+                    let proxies = ProxyUse::begin(proxy_codecs(&job, cfg), matches!(job.kind, JobKind::Unarc), &opts.cancel);
                     let started = Instant::now();
                     let res = match job.kind {
                         JobKind::Block(i) => run_block(&job.archive, &job.archive.blocks[i], cfg, opts, id, sink),
                         JobKind::Unarc => run_unarc(&job.archive, cfg, opts, id, sink),
                     };
+                    drop(proxies);
                     let secs = started.elapsed().as_secs_f64();
                     let mut sm = summary.lock().unwrap();
                     match res {
@@ -438,6 +440,111 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
         })
         .map(|d| d.file_name().unwrap_or_default().to_string_lossy().into_owned())
         .collect()
+}
+
+/// CLS codecs that run their decoder in a helper program (cls-srep.dll + cls-srep_x64.exe) talk
+/// to it through events and shared memory numbered 00-99, each instance taking the first free
+/// number: two that start at the same moment can take the same one and mix their data.
+/// arc-unpack's codec host starts them one at a time (guard::InitLock), but unarc.dll, which
+/// loads them itself for whole-archive jobs, doesn't. So a whole-archive job has such a codec to
+/// itself: it waits until no other job uses it, and jobs using it wait for it. (Assetto Corsa:
+/// setup-fitgirl-08's srep stages started while 09 and 12 ran srep through unarc.dll, and 08's
+/// output ended early, at a different file each time.) Per process: early extractions of later
+/// archives run in the same process.
+static PROXY_USE: Mutex<Vec<(String, usize, bool)>> = Mutex::new(Vec::new());
+static PROXY_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+struct ProxyUse {
+    names: Vec<String>,
+    exclusive: bool,
+}
+
+impl ProxyUse {
+    /// Waits until the codecs `names` are free for this job (`exclusive`: a whole-archive job).
+    fn begin(names: Vec<String>, exclusive: bool, cancel: &AtomicBool) -> ProxyUse {
+        if names.is_empty() {
+            return ProxyUse { names, exclusive };
+        }
+        let mut using = PROXY_USE.lock().unwrap();
+        loop {
+            let free = names.iter().all(|n| match using.iter().find(|u| &u.0 == n) {
+                None => true,
+                Some((_, shared, excl)) => !*excl && (!exclusive || *shared == 0),
+            });
+            if free || cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            using = PROXY_FREED.wait_timeout(using, Duration::from_millis(250)).unwrap().0;
+        }
+        for n in &names {
+            if !using.iter().any(|u| &u.0 == n) {
+                using.push((n.clone(), 0, false));
+            }
+            let u = using.iter_mut().find(|u| &u.0 == n).unwrap();
+            if exclusive {
+                u.2 = true;
+            } else {
+                u.1 += 1;
+            }
+        }
+        ProxyUse { names, exclusive }
+    }
+}
+
+impl Drop for ProxyUse {
+    fn drop(&mut self) {
+        if self.names.is_empty() {
+            return;
+        }
+        let mut using = PROXY_USE.lock().unwrap();
+        for n in &self.names {
+            if let Some(u) = using.iter_mut().find(|u| &u.0 == n) {
+                if self.exclusive {
+                    u.2 = false;
+                } else {
+                    u.1 = u.1.saturating_sub(1);
+                }
+            }
+        }
+        using.retain(|u| u.1 > 0 || u.2);
+        PROXY_FREED.notify_all();
+    }
+}
+
+/// The helper-program CLS codecs a job uses (see `ProxyUse`), by lowercase DLL name.
+fn proxy_codecs(job: &Job, cfg: &Config) -> Vec<String> {
+    let mut dlls = Vec::new();
+    match job.kind {
+        JobKind::Block(i) => {
+            let stages = cfg.resolve(&job.archive.blocks[i].method).unwrap_or_default();
+            for st in Config::flatten(&stages) {
+                if let crate::config::Codec::Cls { dll, .. } = &st.codec {
+                    dlls.push(dll.clone());
+                }
+            }
+        }
+        JobKind::Unarc => {
+            for b in &job.archive.blocks {
+                for word in b.method.split(['+', ':']).map(str::trim).filter(|w| !w.is_empty()) {
+                    let dll = cfg.codec_dir().join(format!("cls-{}.dll", word.to_ascii_lowercase()));
+                    if dll.is_file() {
+                        dlls.push(dll);
+                    }
+                }
+            }
+        }
+    }
+    let mut names: Vec<String> = dlls
+        .iter()
+        .filter(|dll| {
+            let stem = dll.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            ["x64", "x86"].iter().any(|a| dll.with_file_name(format!("{stem}_{a}.exe")).is_file())
+        })
+        .filter_map(|dll| dll.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 struct BlockResult {
