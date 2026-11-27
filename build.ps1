@@ -28,9 +28,11 @@ Copy-Item $td\release\cls-host.exe "$embed\cls-host-x64.exe" -Force -ErrorAction
 Copy-Item $td\i686-pc-windows-msvc\release\cls-host.exe "$embed\cls-host-x86.exe" -Force -ErrorAction Stop
 Copy-Item $td\i686-pc-windows-msvc\release\unarc-host.exe "$embed\unarc-host-x86.exe" -Force -ErrorAction Stop
 
-# The uninstaller every install puts in the game folder.
-Invoke-Cargo build --release --bin arc-unpack-uninstall
+# The uninstaller every install puts in the game folder, and the stand-in for repack tools
+# arc-unpack knows exactly (src/tools.rs).
+Invoke-Cargo build --release --bin arc-unpack-uninstall --bin arc-unpack-tool
 Copy-Item $td\release\arc-unpack-uninstall.exe "$embed\arc-unpack-uninstall.exe" -Force -ErrorAction Stop
+Copy-Item $td\release\arc-unpack-tool.exe "$embed\arc-unpack-tool.exe" -Force -ErrorAction Stop
 
 # The xtool timer plugin (its own tiny crate; 64-bit, like the xtool builds it is for).
 Invoke-Cargo build --release --manifest-path xtool-timer\Cargo.toml --target-dir "$td\xtool-timer"

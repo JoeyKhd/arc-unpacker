@@ -887,6 +887,10 @@ fn run_scripted(
         deferred: Vec::new(),
         background: Vec::new(),
         tuned: HashSet::new(),
+        standins: (std::env::var_os("ARC_UNPACK_NO_TOOL_STANDINS").is_none())
+            .then(|| crate::helpers::find(&[crate::tools::PROGRAM], &opts.host_dir).ok())
+            .flatten()
+            .map(|p| (p, run_dir.join(crate::tools::MAP_FILE), run_dir.join("tool-originals"))),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
@@ -913,6 +917,7 @@ fn run_scripted(
     let script_steps = host.steps.len();
     drop(host);
     runner.finish_background(script_error.is_some());
+    runner.report_standins();
     runner.discard_prefetches();
     let _ = std::fs::remove_dir_all(&staging);
     let mut summary = runner.summary;
@@ -1044,6 +1049,9 @@ struct ScriptRunner<'a> {
     background: Vec<(String, std::process::Child)>,
     /// Processes already tuned (see `exec`).
     tuned: HashSet<u32>,
+    /// Stand-ins for repack tools we know exactly (src/tools.rs): the stand-in program, the
+    /// list of stand-ins and where the originals go. None: disabled or not found.
+    standins: Option<(PathBuf, PathBuf, PathBuf)>,
 }
 
 /// How long programs the script started without waiting may run on after the script ended.
@@ -1494,8 +1502,61 @@ impl ScriptRunner<'_> {
         Ok(true)
     }
 
+    /// Puts stand-ins in place of the known tools in the temporary folder (see src/tools.rs):
+    /// before each program the script runs, as its archives may have unpacked new tools.
+    fn substitute_tools(&mut self) {
+        let Some((program, map, originals)) = &self.standins else { return };
+        match crate::tools::substitute(&self.tmp, program, originals, map) {
+            Ok(done) => {
+                for d in done {
+                    events::info(self.sink, format!("using arc-unpack's own version of {d}"));
+                }
+            }
+            Err(e) => events::warn(self.sink, format!("stand-in for a repack tool: {e:#}")),
+        }
+    }
+
+    /// What the stand-ins did: how often they did the work themselves, and (with
+    /// ARC_UNPACK_TOOL_VERIFY=1) how their output compared with the original tools'.
+    fn report_standins(&mut self) {
+        let Some((_, map, _)) = &self.standins else { return };
+        let log = std::fs::read_to_string(map.with_extension("log")).unwrap_or_default();
+        let mut counts: BTreeMap<String, (usize, f64)> = BTreeMap::new();
+        for l in log.lines() {
+            let mut w = l.split_whitespace();
+            if let (Some(role), Some("native"), Some(secs)) = (w.next(), w.next(), w.next().and_then(|x| x.parse::<f64>().ok())) {
+                let c = counts.entry(role.to_string()).or_default();
+                c.0 += 1;
+                c.1 += secs;
+            }
+            if l.contains(" failed (") {
+                events::warn(self.sink, format!("stand-in: {l}"));
+            }
+        }
+        for (role, (n, secs)) in counts {
+            events::info(self.sink, format!("arc-unpack's own {role}: {n} runs, {secs:.0} s in all"));
+        }
+        let verify = std::fs::read_to_string(map.with_extension("verify.log")).unwrap_or_default();
+        let (mut same, mut different) = (0, 0);
+        for l in verify.lines() {
+            if l.contains(": same (") {
+                same += 1;
+            } else {
+                different += 1;
+                events::warn(self.sink, format!("tool check: {l}"));
+                self.summary.problems.push(format!("a stand-in's output differs from the original tool's: {l}"));
+            }
+        }
+        if same + different > 0 {
+            events::info(self.sink, format!("tool check: {same} of {} outputs identical to the original tools'", same + different));
+        }
+    }
+
     /// Starts the programs the script started without waiting (see `exec`).
     fn start_deferred(&mut self) -> Result<()> {
+        if !self.deferred.is_empty() {
+            self.substitute_tools();
+        }
         for (program, args, dir) in std::mem::take(&mut self.deferred) {
             let child = self.spawn(&program, &args, &dir)?;
             let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1522,6 +1583,9 @@ impl ScriptRunner<'_> {
             }
         }
         cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        if let Some((_, map, _)) = &self.standins {
+            cmd.env(crate::tools::MAP_ENV, map);
+        }
         crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
         cmd.spawn().with_context(|| format!("start {}", program.display()))
     }
@@ -1537,6 +1601,9 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         (self.sink)(Event::Step { index: self.n, total, label: step_label(step) });
         if !matches!(step, Step::Extract { .. }) {
             self.start_deferred()?;
+        }
+        if matches!(step, Step::Exec { .. }) {
+            self.substitute_tools();
         }
         let started = std::time::Instant::now();
         let ok = match step {

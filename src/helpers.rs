@@ -14,6 +14,7 @@ const EMBEDDED: &[(&str, &[u8])] = &[
     ("unarc-host-x86.exe", include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/unarc-host-x86.exe"))),
     (XTOOL_TIMER, include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/zz-arc-unpack-timer.dll"))),
     (crate::uninstall::PROGRAM, include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/arc-unpack-uninstall.exe"))),
+    (crate::tools::PROGRAM, include_bytes!(concat!(env!("ARC_UNPACK_EMBED_DIR"), "/arc-unpack-tool.exe"))),
 ];
 #[cfg(not(feature = "embed-helpers"))]
 const EMBEDDED: &[(&str, &[u8])] = &[];
