@@ -85,7 +85,7 @@ The engine for one archive job:
 
 FitGirl's installers don't contain most runtimes. For each runtime component (`vc_2022_x64`, `dotnet48`, `physx`, ...), the setup wizard downloads the official installer (Inno Download Plugin, `IdpAddFileComp(url, file, component)`), and the Finish page offers to run it. DirectX's web installer comes inside setup.exe.
 
-arc-unpack reads the same information: the runtime components a default install includes, the links the script registers, and the installers setup.exe carries. It checks whether this PC has each runtime (Visual C++ and .NET by their registry keys, DirectX and PhysX by their system DLLs). Only the missing ones are offered, and only on request (`--runtimes`, or the checkbox in the window):
+arc-unpack reads the same information: the runtime components a default install includes, the links the script registers, and the installers setup.exe carries. It checks whether this PC has each runtime (Visual C++ and .NET by their registry keys, DirectX and PhysX by their system DLLs). Only the missing ones are offered: in the window, a checkbox ticked by default (as FitGirl's installer ticks them); on the command line, only with `--runtimes`:
 
 - **The file:** taken from setup.exe if it's there, otherwise downloaded with Windows' `curl.exe` from the link the script registers.
 - **The check:** it runs only with a valid signature from Microsoft (NVIDIA for PhysX).

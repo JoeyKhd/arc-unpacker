@@ -44,9 +44,9 @@ More in [How it works](docs/HOW-IT-WORKS.md).
 - **Check any repack in seconds, without installing:** `arc-unpack script "<repack folder>"` lists every step, or names what isn't supported.
 - **Tested end to end** on 104 repacks ([benchmarks](docs/BENCHMARKS.md)). Every install was compared file by file with the original installer's output.
 
-**Runtimes (DirectX, Visual C++, .NET):** if this PC is missing one the game needs, the window offers **Also install missing runtimes**. They're downloaded from the same Microsoft links the installer uses, checked for Microsoft's signature, and installed silently. Otherwise arc-unpack never connects to the internet.
+**Runtimes (DirectX, Visual C++, .NET):** if this PC is missing one the game needs, the window offers **Install missing runtimes**, ticked by default as in FitGirl's installer. They're downloaded from the same Microsoft links the installer uses, checked for Microsoft's signature, and installed silently. Otherwise arc-unpack never connects to the internet.
 
-Not done: an uninstaller, Start-menu entries or registry entries. Use **Create desktop shortcut** after installing, and delete the folder to uninstall.
+Not done: an uninstaller, Start-menu entries or registry entries. The game's desktop shortcut is made after the install (**Create a desktop shortcut**, ticked by default). Delete the folder to uninstall.
 
 ## Build
 
