@@ -34,10 +34,27 @@ fn run() -> i32 {
         return run_verified(&entry, &map, &job);
     }
     let started = Instant::now();
-    match job.run() {
+    // An x2n map that doesn't check out stays the original's, before anything is touched.
+    let plan = match job.role {
+        Role::X2n => match tools::x2n_plan(&job.input, job.extra.as_deref().unwrap_or(Path::new(""))) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                log(&map, "log", &format!("{} left to the original ({e:#}): {}", entry.role.name(), job.input.display()));
+                return run_original(&entry, None);
+            }
+        },
+        _ => None,
+    };
+    match job.run(plan) {
         Ok(()) => {
             log(&map, "log", &format!("{} native {:.1} s {}", entry.role.name(), started.elapsed().as_secs_f64(), job.input.display()));
             0
+        }
+        Err(e) if job.in_place => {
+            // The target may be half patched: running the original on it now would be wrong.
+            log(&map, "log", &format!("{} FAILED ({e:#}): {}", entry.role.name(), job.output.display()));
+            eprintln!("arc-unpack-tool: {}: {e:#}", entry.role.name());
+            1
         }
         Err(e) => {
             let _ = std::fs::remove_file(&job.output);
@@ -55,15 +72,26 @@ struct Job {
     key: Vec<u8>,
     /// The argument that names the output (to redirect the original's output when verifying).
     output_arg: usize,
+    /// The output is changed in place (x2n's target), not created.
+    in_place: bool,
+    /// x2n: the map.
+    extra: Option<PathBuf>,
 }
 
 impl Job {
-    fn run(&self) -> anyhow::Result<()> {
+    fn run(&self, plan: Option<tools::X2nPlan>) -> anyhow::Result<()> {
         match self.role {
             Role::Xor => tools::xor_file(&self.input, &self.output, &self.key),
             Role::Lz4Cli194 => {
                 let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                 tools::lz4_compress_file(&self.input, &self.output, 12, threads)
+            }
+            Role::X2n => {
+                let map = self.extra.as_deref().unwrap_or(Path::new(""));
+                match plan {
+                    Some(p) => tools::x2n_apply_plan(&self.output, &self.input, p),
+                    None => tools::x2n_apply(&self.output, &self.input, map),
+                }
             }
         }
     }
@@ -73,6 +101,17 @@ impl Job {
 /// that exists and an output that doesn't (the tools' own handling of other cases is theirs).
 fn understood(role: Role, args: &[OsString]) -> Option<Job> {
     let s: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
+    if let (Role::X2n, [t, d, m]) = (role, s.as_slice()) {
+        // x2n <target> <data> <map>: all three exist, three different files.
+        let paths: Vec<PathBuf> = [t, d, m].iter().map(PathBuf::from).collect();
+        let abs: Vec<PathBuf> = paths.iter().filter_map(|p| std::path::absolute(p).ok()).collect();
+        let distinct = abs.len() == 3 && abs[0] != abs[1] && abs[1] != abs[2] && abs[0] != abs[2];
+        if [t, d, m].iter().any(|a| a.starts_with('-')) || !paths.iter().all(|p| p.is_file()) || !distinct {
+            return None;
+        }
+        let [target, data, map] = <[PathBuf; 3]>::try_from(paths).ok()?;
+        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map) });
+    }
     let (input, output, key, output_arg) = match (role, s.as_slice()) {
         (Role::Xor, [i, o, k]) => (*i, *o, tools::xor_key(k)?, 1),
         (Role::Lz4Cli194, ["-12", i, o]) => (*i, *o, Vec::new(), 2),
@@ -86,7 +125,7 @@ fn understood(role: Role, args: &[OsString]) -> Option<Job> {
     if !input.is_file() || output.exists() || same(&input, &output) || output.parent().is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
         return None;
     }
-    Some(Job { role, input, output, key, output_arg })
+    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None })
 }
 
 /// Runs the original tool with this command line (or with argument `replace.0` replaced).
@@ -114,11 +153,15 @@ fn run_original(entry: &Entry, replace: Option<(usize, &Path)>) -> i32 {
 /// Both, compared: the original's output is the one kept.
 fn run_verified(entry: &Entry, map: &Path, job: &Job) -> i32 {
     let check = job.output.with_file_name(format!("{}.arc-unpack-check", job.output.file_name().unwrap_or_default().to_string_lossy()));
+    // A tool that changes its target in place gets a copy of it to work on.
+    if job.in_place && std::fs::copy(&job.output, &check).is_err() {
+        return run_original(entry, None);
+    }
     let t0 = Instant::now();
     let code = run_original(entry, Some((job.output_arg, &check)));
     let t_orig = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
-    let ours = job.run();
+    let ours = job.run(None);
     let t_ours = t1.elapsed().as_secs_f64();
     let verdict = match (&ours, std::fs::read(&check), std::fs::read(&job.output)) {
         (Ok(()), Ok(a), Ok(b)) if a == b => format!("same ({} bytes)", a.len()),

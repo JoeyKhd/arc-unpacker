@@ -15,6 +15,9 @@
 //!   <out>`. It compresses 4 MB blocks one after the other on one core; the blocks are
 //!   independent, so here they are compressed on all cores with the same library (lz4-sys
 //!   bundles LZ4 1.9.4), making the same calls per block.
+//! - FitGirl's x2n.exe patcher: `x2n <target> <data> <map>` writes runs of data into the target
+//!   at the map's offsets, three system calls per run of at most 256 bytes. Here: the target
+//!   mapped into memory, the data read in bulk (see `x2n_apply`).
 
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -25,6 +28,7 @@ use std::path::{Path, PathBuf};
 pub enum Role {
     Xor,
     Lz4Cli194,
+    X2n,
 }
 
 impl Role {
@@ -32,6 +36,7 @@ impl Role {
         match self {
             Role::Xor => "xor",
             Role::Lz4Cli194 => "lz4-1.9.4",
+            Role::X2n => "x2n",
         }
     }
 
@@ -44,6 +49,7 @@ impl Role {
 const KNOWN: &[(u64, &str, Role)] = &[
     (10752, "d363eff713456c2249a9a7197cb0e2fd6b189a83ad7fb3a3d3386517b35a8ccc", Role::Xor),
     (304640, "f0eb4df3daedbba4764afca1e18a9c4b716df0917f51382c99e120c9733e87f6", Role::Lz4Cli194),
+    (7680, "62410f076016456299e3cb5b3311b8a8d66fecd299dde9e7b6815fd581036428", Role::X2n),
 ];
 
 /// The stand-in program's file name (shipped next to arc-unpack or embedded in it).
@@ -404,9 +410,204 @@ fn lz4_sequential(data: &[u8], level: i32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------------------------
+// x2n (FitGirl's patcher, 7,680 B; Rocksmith's audio.psarc, Max Payne 3's audio.rpf, RE2, ...):
+// `x2n <target> <data> <map>`. Reverse-engineered (main FUN_00401240): data and map are read,
+// the target is opened read/write (it must exist). The map is a u64 LE new size, then records of
+// [7-byte LE offset][1-byte length, 0 = 256]; for each, in order, the offset is clamped to the
+// new size and `length` bytes, read in sequence from data, are written there. At the end the
+// target's length is set to the new size. The original makes three unbuffered system calls per
+// record of at most 256 bytes; here the target is mapped into memory and data is read in bulk.
+
+/// The records of an x2n map: (new size, [(offset, length)]). None for a map whose tail isn't a
+/// whole number of records (the original's handling of a half record is its own).
+fn x2n_records(map: &[u8]) -> Option<(u64, Vec<(u64, usize)>)> {
+    if map.len() < 8 || (map.len() - 8) % 8 != 0 {
+        return None;
+    }
+    let new_size = u64::from_le_bytes(map[..8].try_into().ok()?);
+    let records = map[8..]
+        .chunks_exact(8)
+        .map(|r| {
+            let mut off = [0u8; 8];
+            off[..7].copy_from_slice(&r[..7]);
+            let len = if r[7] == 0 { 256 } else { r[7] as usize };
+            (u64::from_le_bytes(off).min(new_size), len)
+        })
+        .collect();
+    Some((new_size, records))
+}
+
+/// An x2n map checked and ready to apply.
+pub struct X2nPlan {
+    new_size: u64,
+    records: Vec<(u64, usize)>,
+}
+
+/// Reads and checks an x2n map against its data. An error here means: leave it to the original
+/// (nothing has been touched).
+pub fn x2n_plan(data: &Path, map: &Path) -> Result<X2nPlan> {
+    let map = std::fs::read(map).with_context(|| format!("read {}", map.display()))?;
+    let Some((new_size, records)) = x2n_records(&map) else { bail!("map of {} bytes: not whole records", map.len()) };
+    let need: u64 = records.iter().map(|r| r.1 as u64).sum();
+    let have = std::fs::metadata(data)?.len();
+    // (The original writes stale buffer bytes after a short read; that case stays the original's.)
+    ensure!(need <= have, "data has {have} bytes, the map takes {need}");
+    Ok(X2nPlan { new_size, records })
+}
+
+/// Applies an x2n map to `target` (see above).
+pub fn x2n_apply(target: &Path, data: &Path, map: &Path) -> Result<()> {
+    let plan = x2n_plan(data, map)?;
+    x2n_apply_plan(target, data, plan)
+}
+
+/// Applies a checked map. An error here may leave the target half patched.
+pub fn x2n_apply_plan(target: &Path, data: &Path, plan: X2nPlan) -> Result<()> {
+    let X2nPlan { new_size, records } = plan;
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(target).with_context(|| format!("open {}", target.display()))?;
+    let end = records.iter().map(|&(o, n)| o + n as u64).max().unwrap_or(0);
+    let len = file.metadata()?.len().max(end);
+    if len > 0 && !records.is_empty() {
+        file.set_len(len)?; // writes past the end extend the file, the gap zero-filled, as WriteFile does
+        let mut map = Mapped::new(&file, len)?;
+        let view = map.bytes();
+        let mut data = std::io::BufReader::with_capacity(4 << 20, std::fs::File::open(data)?);
+        for (off, n) in records {
+            let off = off as usize;
+            data.read_exact(&mut view[off..off + n])?;
+        }
+        map.flush()?;
+    }
+    file.set_len(new_size)?;
+    Ok(())
+}
+
+/// A file mapped into memory, read/write.
+struct Mapped {
+    ptr: *mut u8,
+    len: usize,
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+impl Mapped {
+    #[cfg(windows)]
+    fn new(file: &std::fs::File, len: u64) -> Result<Mapped> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE};
+        let len_usize = usize::try_from(len)?;
+        unsafe {
+            let handle = CreateFileMappingW(file.as_raw_handle() as _, std::ptr::null(), PAGE_READWRITE, (len >> 32) as u32, len as u32, std::ptr::null());
+            ensure!(!handle.is_null(), "CreateFileMapping: {}", std::io::Error::last_os_error());
+            let view = MapViewOfFile(handle, FILE_MAP_WRITE, 0, 0, len_usize);
+            if view.Value.is_null() {
+                let e = std::io::Error::last_os_error();
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                bail!("MapViewOfFile: {e}");
+            }
+            Ok(Mapped { ptr: view.Value as *mut u8, len: len_usize, handle })
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn new(_: &std::fs::File, _: u64) -> Result<Mapped> {
+        bail!("x2n: Windows only")
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    fn flush(&self) -> Result<()> {
+        #[cfg(windows)]
+        unsafe {
+            ensure!(windows_sys::Win32::System::Memory::FlushViewOfFile(self.ptr as _, 0) != 0, "FlushViewOfFile: {}", std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr as _ });
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The original's loop, record by record (FUN_00401240), as the reference.
+    fn x2n_reference(target: &mut Vec<u8>, data: &[u8], map: &[u8]) {
+        let new_size = u64::from_le_bytes(map[..8].try_into().unwrap());
+        let mut pos = 0usize;
+        for r in map[8..].chunks_exact(8) {
+            let mut off = [0u8; 8];
+            off[..7].copy_from_slice(&r[..7]);
+            let off = u64::from_le_bytes(off).min(new_size) as usize;
+            let n = if r[7] == 0 { 256 } else { r[7] as usize };
+            if target.len() < off + n {
+                target.resize(off + n, 0);
+            }
+            target[off..off + n].copy_from_slice(&data[pos..pos + n]);
+            pos += n;
+        }
+        target.resize(new_size as usize, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn x2n_matches_the_tools_own_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = sample(300_000, 5);
+        let data = sample(200_000, 6);
+        // Records: in order, overlapping, past the end, clamped, length 0 (= 256), the file
+        // growing and shrinking.
+        for (case, new_size) in [(0, 280_000u64), (1, 350_000), (2, 100)] {
+            let mut map = new_size.to_le_bytes().to_vec();
+            let mut used = 0usize;
+            let mut x = 99u64 + case;
+            while used + 256 <= data.len() {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let off = match x % 4 {
+                    0 => (x >> 16) % 400_000, // may be past the new size: clamped
+                    1 => used as u64,         // in order
+                    _ => (x >> 20) % 300_000,
+                };
+                let len = (x >> 40) as u8; // 0 = 256
+                map.extend_from_slice(&off.to_le_bytes()[..7]);
+                map.push(len);
+                used += if len == 0 { 256 } else { len as usize };
+            }
+            let (t, d, m) = (dir.path().join("t.bin"), dir.path().join("d.bin"), dir.path().join("m.bin"));
+            std::fs::write(&t, &old).unwrap();
+            std::fs::write(&d, &data).unwrap();
+            std::fs::write(&m, &map).unwrap();
+            x2n_apply(&t, &d, &m).unwrap();
+            let mut want = old.clone();
+            x2n_reference(&mut want, &data, &map);
+            assert_eq!(std::fs::read(&t).unwrap(), want, "case {case}");
+        }
+        // A map that takes more data than there is, or ends in half a record: left to the
+        // original, and the target untouched.
+        let (t, d, m) = (dir.path().join("t2.bin"), dir.path().join("d2.bin"), dir.path().join("m2.bin"));
+        std::fs::write(&t, b"untouched").unwrap();
+        std::fs::write(&d, [1u8; 10]).unwrap();
+        let mut map = 9u64.to_le_bytes().to_vec();
+        map.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 20]);
+        std::fs::write(&m, &map).unwrap();
+        assert!(x2n_apply(&t, &d, &m).is_err());
+        map.extend_from_slice(&[1, 2, 3]);
+        std::fs::write(&m, &map).unwrap();
+        assert!(x2n_apply(&t, &d, &m).is_err());
+        assert_eq!(std::fs::read(&t).unwrap(), b"untouched");
+    }
 
     fn sample(n: usize, seed: u64) -> Vec<u8> {
         // Compressible but varied: runs, text and pseudo-random stretches.
