@@ -1,9 +1,5 @@
 <p align="center"><img src="benchmarks.svg" alt="arc-unpacker benchmarks: every tested repack, its own installer against arc-unpack" width="100%"></p>
 
-# Benchmarks
-
-106 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
-
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
 | Sid Meier's Civilization 6 | 9.6 GB | 6 min 31 s | 1 min 37 s | **4.0×** | 1.0.3-dev |
@@ -213,14 +209,3 @@
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
 | **All 106 measured** | | **542 min 21 s** | **333 min 06 s** | **1.6×** | |
-
-- **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
-- **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** 102 of 106 installs were byte-identical to the original installer's.
-- **Same conditions:** the same parts in both, and the file cache flushed before every run.
-- **A dash:** one of FitGirl's [most popular repacks](https://fitgirl-repacks.site/popular-repacks-of-the-year/), still to be measured; the numbers are filled in as they come in. Adult games, Switch emulator repacks and repacks that need a hypervisor are left out.
-- **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
-
-Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
-
-Every run is kept in [`bench/ledger.jsonl`](../bench/ledger.jsonl), so a new version only needs measuring on the games it should change. To measure, run `.\bench\compare.ps1 -Repacks <folders> -SkipOriginal` from an administrator PowerShell, then `python bench\ledger.py add bench\results\*.json`. `python bench\ledger.py docs` then updates this table and the README's headline, and `python bench\ledger.py table` shows every version side by side.

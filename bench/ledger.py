@@ -282,7 +282,9 @@ def cmd_docs(args):
     doc = repo / "docs" / "BENCHMARKS.md"
     s = doc.read_text(encoding="utf-8")
     start = s.index("| Game |")
-    end = s.index("\n\n", start)
+    end = s.find("\n\n", start)
+    if end < 0:  # the table ends the page
+        end = len(s.rstrip("\n"))
     s = s[:start] + doc_table(out, pending_rows(rows, {x[1].lower() for x in out})) + s[end:]
     s = re.sub(r"^\d+ FitGirl repacks, each installed", f"{n} FitGirl repacks, each installed", s, count=1, flags=re.M)
     # Never claim more than the ledger shows: "all N" only when every row is identical.
