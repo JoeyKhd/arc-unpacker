@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-102 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+104 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -49,6 +49,7 @@
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
+| Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
 | Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
@@ -78,6 +79,7 @@
 | AI LIMIT | 14.8 GB | 4 min 43 s | 3 min 00 s | **1.6×** | 0.1.0-beta.12 |
 | Football Manager 2023 | 2.3 GB | 2 min 40 s | 1 min 40 s | **1.6×** | 0.1.0-beta.8 |
 | MGS 4 - Master Collection Version | 18.5 GB | 8 min 00 s | 4 min 57 s | **1.6×** | 0.1.0-beta.12 |
+| Mad Max | 4.0 GB | 7 min 11 s | 4 min 55 s | **1.5×** | 1.0.3-dev |
 | Motorcycle Ride - Infinity | 3.0 GB | 1 min 45 s | 1 min 10 s | **1.5×** | 0.1.0-beta.9 |
 | Pro Evolution Soccer 2017 | 9.4 GB | 18 min 24 s | 12 min 38 s | **1.5×** | 1.0.1-dev |
 | Stray | 5.0 GB | 4 min 04 s | 2 min 44 s | **1.5×** | 1.0.2 |
@@ -108,11 +110,11 @@
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
 | Prototype | 5.4 GB | 3 min 13 s | 3 min 13 s | **1.0×** | 1.0.3-dev |
-| **All 102** | | **518 min 23 s** | **321 min 53 s** | **1.6×** | |
+| **All 104** | | **533 min 17 s** | **330 min 22 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** 101 of 102 installs were byte-identical to the original installer's.
+- **Same result:** 101 of 104 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
