@@ -55,6 +55,7 @@
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
 | Sniper Elite 3 | 9.1 GB | 11 min 34 s | 5 min 36 s | **2.1×** | 1.0.1 |
 | Solo Leveling - ARISE OVERDRIVE | 17.9 GB | 12 min 26 s | 5 min 49 s | **2.1×** | 0.1.0-beta.11 |
+| Assassin's Creed Black Flag Resynced | 42.0 GB | 20 min 54 s | 10 min 19 s | **2.0×** | 1.0.4 |
 | Dispatch | 13.0 GB | 3 min 03 s | 1 min 32 s | **2.0×** | 0.1.0-beta.11 |
 | Fish and Hike | 0.9 GB | 57 s | 28 s | **2.0×** | 0.1.0-beta.9 |
 | Frontier - Path of Shadows | 0.7 GB | 1 min 45 s | 52 s | **2.0×** | 0.1.0-beta.9 |
@@ -109,8 +110,7 @@
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
 | Prototype | 5.4 GB | 3 min 13 s | 3 min 13 s | **1.0×** | 1.0.3-dev |
 | Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | |
-| Assassin's Creed: Black Flag Resynced | 34.6 GB | – | – | – | |
-| 007 First Light | 36.1 GB | – | – | – | |
+| 007 First Light | 36.1 GB | 11 min 01 s | failed | – | 1.0.4 |
 | Forza Horizon 6 | 81.6 GB | – | – | – | |
 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
 | Marvel's Spider-Man 2 | 64.5 GB | – | – | – | |
@@ -208,4 +208,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 106 measured** | | **542 min 21 s** | **333 min 06 s** | **1.6×** | |
+| **All 107 measured** | | **563 min 16 s** | **343 min 24 s** | **1.6×** | |
