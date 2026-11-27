@@ -886,6 +886,7 @@ fn run_scripted(
         backup: parts.only_optional.then(|| target.join(BACKUP_DIR)),
         deferred: Vec::new(),
         background: Vec::new(),
+        tuned: HashSet::new(),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
@@ -1041,6 +1042,8 @@ struct ScriptRunner<'a> {
     /// name).
     deferred: Vec<(PathBuf, String, PathBuf)>,
     background: Vec<(String, std::process::Child)>,
+    /// Processes already tuned (see `exec`).
+    tuned: HashSet<u32>,
 }
 
 /// How long programs the script started without waiting may run on after the script ended.
@@ -1435,10 +1438,29 @@ impl ScriptRunner<'_> {
             return Ok(true);
         }
         let mut child = self.spawn(program, args, dir)?;
+        // CPU time of the program and everything it starts (cmd.exe -> run.exe -> 32 tools):
+        // shows whether a step is CPU-bound, single-threaded or waiting.
+        let cpu = crate::perf::CpuJob::track(&child);
+        let started = std::time::Instant::now();
         let mut stall = crate::guard::StallCheck::new(self.opts.stall_timeout);
+        let mut next_look = started;
         let status = loop {
             if let Some(st) = child.try_wait()? {
                 break st;
+            }
+            // As during extraction: the tools it starts (through cmd.exe or the repack's own
+            // runner) get the codecs' tuning (above-normal priority, no power throttling, which
+            // would put a single-threaded tool on the slow cores), and error dialogs are closed.
+            if std::time::Instant::now() >= next_look {
+                next_look = std::time::Instant::now() + std::time::Duration::from_millis(300);
+                if self.opts.tune && std::env::var_os("ARC_UNPACK_NO_DESCENDANT_TUNE").is_none() {
+                    crate::guard::tune_descendants(&mut self.tuned);
+                }
+                for m in crate::guard::dismiss_codec_dialogs() {
+                    let note = format!("error dialog (closed automatically): {m}");
+                    events::warn(self.sink, note.clone());
+                    self.summary.notes.push(note);
+                }
             }
             if self.opts.cancel.load(Ordering::Relaxed) {
                 let _ = child.kill();
@@ -1456,8 +1478,14 @@ impl ScriptRunner<'_> {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
+        let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(cpu) = cpu.as_ref().and_then(|j| j.cpu_seconds()) {
+            let wall = started.elapsed().as_secs_f64();
+            if wall >= 1.0 {
+                events::info(self.sink, format!("    {name}: {cpu:.0}s cpu / {wall:.0}s wall ({:.1} cores)", cpu / wall));
+            }
+        }
         if !status.success() {
-            let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let note = format!("{name}{args}: exited with code {}", status.code().unwrap_or(-1));
             events::warn(self.sink, note.clone());
             self.summary.notes.push(note);
