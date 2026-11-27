@@ -675,7 +675,8 @@ impl App {
             limit_ram: flags.ram_limit.is_some(),
             ram_limit_gb: flags.ram_limit.map_or_else(default_ram_limit_gb, |gb| gb.clamp(2, physical_ram_gb())),
             skip_check: false,
-            install_runtimes: false,
+            // As FitGirl's installer, which ticks DirectX and Visual C++ (only offered when missing).
+            install_runtimes: true,
             progress: Progress::default(),
             running: None,
             outcome: None,
