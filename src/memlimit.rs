@@ -9,8 +9,8 @@
 //!
 //! The decoders take these as targets: data packed with a large dictionary still needs it.
 //!
-//! Every install, with or without a limit, also gets `make_safe`: a memory cap for the old lolz
-//! decoder of 2018 repacks, which hangs when it is allowed too much (see `magic_cap_mb`).
+//! Every install, with or without a limit, also gets `make_safe`: at most 16 decode threads for
+//! the old lolz helpers, which hang with more (see `OLD_LOLZ`).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,8 +58,27 @@ fn eval_mb(expr: &str, physical: u64) -> Option<u64> {
     Some(total.max(0) as u64)
 }
 
-/// CLS.ini with the decoders' memory settings lowered to fit `limit` (never raised).
+/// The lolz-family sections that take MaxMemoryUsage.
+const LOLZ_SECTIONS: [&str; 7] = ["magic", "magicl", "magic2", "magic2l", "lolly", "lollypop", "lollypop2"];
+
+/// CLS.ini with the decoders' memory settings lowered to fit `limit` (never raised). A lolz
+/// section without MaxMemoryUsage gets one (A Way Out's [magic] has none, and the helper would
+/// plan with 75% of the RAM).
 pub fn cls_ini(text: &str, limit: u64, physical: u64) -> String {
+    let lolz = |section: &str| if section.starts_with("lollypop") { lolz_mb(limit) * 5 / 4 } else { lolz_mb(limit) };
+    let mut missing: Vec<String> = Vec::new();
+    let mut section = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            section = name.trim().to_ascii_lowercase();
+            if LOLZ_SECTIONS.contains(&section.as_str()) && !missing.contains(&section) {
+                missing.push(section.clone());
+            }
+        } else if t.split_once('=').is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("MaxMemoryUsage")) {
+            missing.retain(|s| *s != section);
+        }
+    }
     let mut section = String::new();
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
@@ -68,11 +87,18 @@ pub fn cls_ini(text: &str, limit: u64, physical: u64) -> String {
         let t = body.trim();
         if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
             section = name.trim().to_ascii_lowercase();
+            if let Some(i) = missing.iter().position(|s| *s == section) {
+                missing.remove(i);
+                out.push_str(line);
+                let sep = if ending.is_empty() { "\r\n" } else { "" };
+                out.push_str(&format!("{sep}MaxMemoryUsage={}m{}", lolz(&section), if ending.is_empty() { "" } else { ending }));
+                continue;
+            }
         } else if let Some((key, value)) = t.split_once('=') {
             let key = key.trim();
             let ours = if key.eq_ignore_ascii_case("MaxMemoryUsage") {
                 // (As in FitGirl's preset: lollypop gets a quarter more than the others.)
-                Some(if section.starts_with("lollypop") { lolz_mb(limit) * 5 / 4 } else { lolz_mb(limit) })
+                Some(lolz(&section))
             } else if key.eq_ignore_ascii_case("Memory") && section == "srep" {
                 Some(srep_mb(limit))
             } else {
@@ -124,37 +150,66 @@ pub fn arc_ini(text: &str, limit: u64, physical: u64) -> String {
     out
 }
 
-/// The most memory the old lolz decoder of 2018 repacks ("magic", `cls-magic.dll`) is given, in
-/// MB: 12 GB, or 40% of this PC's RAM if that is less.
+/// The old lolz helpers that hang with 17 or more decode threads: cls-magic_x64.exe (= magicl),
+/// cls-lolly_x64.exe, cls-lollypop_x64.exe and cls-lollypop2_x64.exe. Each reads the CLS.ini
+/// section named like itself (the helper's name without "cls-" and "_x64").
 ///
-/// That decoder never starts decoding when it is allowed about 16 GB or more: it uses no CPU and
-/// waits forever, whatever memory is free. FitGirl's scripts give it no MaxMemoryUsage unless
-/// "limit RAM" is ticked, so it plans about 0.85 GB per CPU thread and hangs on PCs with 20 or
-/// more threads; FitGirl's own installer hangs the same way. Measured on A Way Out, 32 threads,
-/// 32 GB of RAM: no limit hangs, 16 GB hangs, 12 GB and 8 GB work, 16 threads (13.4 GB) works.
-fn magic_cap_mb(physical: u64) -> u64 {
-    (physical / MB * 2 / 5).min(12 * 1024)
+/// Reverse-engineered: for a multi-threaded ("mtt") stream they decode with
+/// T = min(MaxThreadsUsage, MaxMemoryUsage / memory per thread) threads (magic: also at most the
+/// CPU count), but they keep only 16 thread slots: a 17th runs into a lock nothing ever
+/// releases, so the decoder waits forever with no CPU. MaxThreadsUsage defaults to 75% of the
+/// CPUs (24 on a 32-thread PC), and FitGirl's scripts set no MaxMemoryUsage unless "limit RAM"
+/// is ticked; FitGirl's own installer hangs the same way (A Way Out on 32 threads). magic2 and
+/// magic2l cap themselves at 16. The thread count doesn't change the output.
+pub const OLD_LOLZ: [&str; 5] = ["magic", "magicl", "lolly", "lollypop", "lollypop2"];
+
+/// The most decode threads the old lolz helpers are given.
+pub const OLD_LOLZ_THREADS: u32 = 16;
+
+/// A MaxThreadsUsage value ("100%", "75p", "12", "100%-2") as a thread count on a PC with
+/// `cpus` logical CPUs, as the helpers read it: N% or Np is min(N, 100)% of the CPUs, a bare N
+/// is N threads, terms joined by '-' are subtracted. None for anything else (sizes, text).
+fn threads(expr: &str, cpus: u32) -> Option<u32> {
+    let mut total: i64 = 0;
+    for (i, term) in expr.trim().split('-').enumerate() {
+        let t = term.trim().to_ascii_lowercase();
+        let (num, unit) = t.split_at(t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len()));
+        let n: i64 = num.parse().ok()?;
+        let v = match unit.trim() {
+            "%" | "p" => n.min(100) * cpus as i64 / 100,
+            "" => n,
+            _ => return None,
+        };
+        total += if i == 0 { v } else { -v };
+    }
+    Some(total.max(0) as u32)
 }
 
-/// CLS.ini with what every install needs on this PC: the old "magic" decoder's MaxMemoryUsage
-/// added if it is missing, or lowered if it is above `magic_cap_mb` (never raised).
-pub fn cls_ini_safe(text: &str, physical: u64) -> String {
-    let cap = magic_cap_mb(physical);
+/// CLS.ini with what every install needs on this PC: each old lolz section (`OLD_LOLZ`) present,
+/// or missing but with its helper in the folder (`helpers`, lowercase section names), gets at
+/// most `OLD_LOLZ_THREADS` decode threads. A lower setting stays; memory settings are left alone.
+pub fn cls_ini_safe(text: &str, cpus: u32, helpers: &[&str]) -> String {
+    let cap = OLD_LOLZ_THREADS;
+    let old = |s: &str| OLD_LOLZ.contains(&s);
+    // Which old sections exist, and whether each has an acceptable MaxThreadsUsage.
+    let mut sections: Vec<(String, bool)> = Vec::new();
     let mut section = String::new();
-    let (mut has_magic, mut has_key) = (false, false);
     for line in text.lines() {
         let t = line.trim();
         if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
             section = name.trim().to_ascii_lowercase();
-            has_magic |= section == "magic";
-        } else if section == "magic" && t.split_once('=').is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("MaxMemoryUsage")) {
-            has_key = true;
+            if old(&section) && !sections.iter().any(|(s, _)| *s == section) {
+                sections.push((section.clone(), false));
+            }
+        } else if old(&section)
+            && let Some((k, _)) = t.split_once('=')
+            && k.trim().eq_ignore_ascii_case("MaxThreadsUsage")
+            && let Some(entry) = sections.iter_mut().find(|(s, _)| *s == section)
+        {
+            entry.1 = true;
         }
     }
-    if !has_magic {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len() + 32);
+    let mut out = String::with_capacity(text.len() + 64);
     section.clear();
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\r', '\n']);
@@ -163,26 +218,56 @@ pub fn cls_ini_safe(text: &str, physical: u64) -> String {
         if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
             section = name.trim().to_ascii_lowercase();
             out.push_str(line);
-            if section == "magic" && !has_key {
+            if old(&section) && sections.iter().any(|(s, has)| *s == section && !has) {
                 if ending.is_empty() {
-                    out.push_str(&format!("\r\nMaxMemoryUsage={cap}m"));
+                    out.push_str(&format!("\r\nMaxThreadsUsage={cap}"));
                 } else {
-                    out.push_str(&format!("MaxMemoryUsage={cap}m{ending}"));
+                    out.push_str(&format!("MaxThreadsUsage={cap}{ending}"));
+                }
+                // (Only once, should the section appear twice.)
+                if let Some(e) = sections.iter_mut().find(|(s, _)| *s == section) {
+                    e.1 = true;
                 }
             }
             continue;
         }
-        if section == "magic"
+        if old(&section)
             && let Some((key, value)) = t.split_once('=')
-            && key.trim().eq_ignore_ascii_case("MaxMemoryUsage")
+            && key.trim().eq_ignore_ascii_case("MaxThreadsUsage")
+            && threads(value, cpus).is_none_or(|n| n > cap)
         {
-            let new = eval_mb(value, physical).map_or(cap, |theirs| theirs.min(cap));
-            out.push_str(&format!("{}={new}m{ending}", key.trim()));
+            out.push_str(&format!("{}={cap}{ending}", key.trim()));
             continue;
         }
         out.push_str(line);
     }
+    for name in OLD_LOLZ {
+        if helpers.contains(&name) && !sections.iter().any(|(s, _)| s == name) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push_str("\r\n");
+            }
+            out.push_str(&format!("[{name}]\r\nMaxThreadsUsage={cap}\r\n"));
+        }
+    }
     out
+}
+
+/// The old lolz helpers in `dir` (`cls-<name>_x64.exe`), as CLS.ini section names.
+fn old_lolz_helpers(dir: &Path) -> Vec<&'static str> {
+    OLD_LOLZ.into_iter().filter(|name| dir.join(format!("cls-{name}_x64.exe")).is_file()).collect()
+}
+
+/// Logical CPUs as the helpers count them (GetSystemInfo's dwNumberOfProcessors).
+fn logical_cpus() -> u32 {
+    #[cfg(windows)]
+    unsafe {
+        let mut info: windows_sys::Win32::System::SystemInformation::SYSTEM_INFO = std::mem::zeroed();
+        windows_sys::Win32::System::SystemInformation::GetSystemInfo(&mut info);
+        if info.dwNumberOfProcessors > 0 {
+            return info.dwNumberOfProcessors;
+        }
+    }
+    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4)
 }
 
 /// Runs `edit` on the files in `dir` it picks by lowercase name (CLS.ini, arc.ini). Returns
@@ -206,9 +291,16 @@ fn edit_files(dir: &Path, edit: impl Fn(&str, &str) -> Option<String>) -> bool {
 
 /// Applies `cls_ini_safe` to the installer's CLS.ini in `dir`, for every install. Returns a
 /// line for the log when it changed something.
-pub fn make_safe(dir: &Path, physical: u64) -> Option<String> {
-    let changed = edit_files(dir, |name, text| (name == "cls.ini").then(|| cls_ini_safe(text, physical)));
-    changed.then(|| format!("old lolz decoder (magic): memory capped at {} MB (it hangs when allowed more)", magic_cap_mb(physical)))
+pub fn make_safe(dir: &Path, _physical: u64) -> Option<String> {
+    let cpus = logical_cpus();
+    let helpers = old_lolz_helpers(dir);
+    let changed = edit_files(dir, |name, text| (name == "cls.ini").then(|| cls_ini_safe(text, cpus, &helpers)));
+    changed.then(|| {
+        format!(
+            "old lolz decoders ({}): at most {OLD_LOLZ_THREADS} threads (they hang with 17 or more)",
+            OLD_LOLZ.join(", ")
+        )
+    })
 }
 
 /// Applies the limit to the installer's CLS.ini and arc.ini in `tmp`. Returns what it set, for
@@ -263,23 +355,46 @@ mod tests {
     }
 
     #[test]
-    fn the_old_magic_decoder_gets_a_safe_memory_cap() {
-        // A Way Out's CLS.ini: [magic] has no MaxMemoryUsage. 32 GB PC: 40% = 13107 MB, so 12 GB.
-        let ini = "[lollypop2]\r\nMaxMemoryUsage=75%-10m\r\n\r\n[magic]\r\nBufsize=512k\r\nMaxThreadsUsage=100%\r\n\r\n[magicl]\r\nldmfMaxMemoryUsage=1024\r\n";
-        let got = cls_ini_safe(ini, 32 * GB);
+    fn old_lolz_helpers_get_at_most_16_threads() {
+        // A Way Out's CLS.ini on 32 threads: [magic] and [magicl] get MaxThreadsUsage=16 (100% would
+        // be 32); memory is left alone; magic2 caps itself and stays as it is.
+        let ini = "[lollypop2]\r\nMaxMemoryUsage=75%-10m\r\n\r\n[magic]\r\nBufsize=512k\r\nMaxThreadsUsage=100%\r\n\r\n[magicl]\r\nldmfMaxMemoryUsage=1024\r\n[magic2]\r\nMaxThreadsUsage=100%\r\n";
+        let got = cls_ini_safe(ini, 32, &[]);
         assert_eq!(
             got,
-            "[lollypop2]\r\nMaxMemoryUsage=75%-10m\r\n\r\n[magic]\r\nMaxMemoryUsage=12288m\r\nBufsize=512k\r\nMaxThreadsUsage=100%\r\n\r\n[magicl]\r\nldmfMaxMemoryUsage=1024\r\n"
+            "[lollypop2]\r\nMaxThreadsUsage=16\r\nMaxMemoryUsage=75%-10m\r\n\r\n[magic]\r\nBufsize=512k\r\nMaxThreadsUsage=16\r\n\r\n[magicl]\r\nMaxThreadsUsage=16\r\nldmfMaxMemoryUsage=1024\r\n[magic2]\r\nMaxThreadsUsage=100%\r\n"
         );
-        // 16 GB PC: 40% of it. A lower setting (FitGirl's "limit RAM" 1024m) stays; a higher one
-        // is lowered; other decoders' sections are left alone.
-        assert!(cls_ini_safe(ini, 16 * GB).contains("[magic]\r\nMaxMemoryUsage=6553m\r\n"));
-        let low = "[magic]\r\nMaxMemoryUsage=1024m\r\n";
-        assert_eq!(cls_ini_safe(low, 32 * GB), "[magic]\r\nMaxMemoryUsage=1024m\r\n");
-        assert_eq!(cls_ini_safe("[magic]\r\nMaxMemoryUsage=75%-10m\r\n", 32 * GB), "[magic]\r\nMaxMemoryUsage=12288m\r\n");
-        assert_eq!(cls_ini_safe("[magic2]\r\nMaxThreadsUsage=100%\r\n", 32 * GB), "[magic2]\r\nMaxThreadsUsage=100%\r\n");
+        assert_eq!(cls_ini_safe(&got, 32, &[]), got, "running it again changes nothing");
+        // 16 CPUs: 100% is 16, kept. A bare 12 is kept; 75% of 32 (24) is lowered.
+        assert_eq!(cls_ini_safe("[magic]\r\nMaxThreadsUsage=100%\r\n", 16, &[]), "[magic]\r\nMaxThreadsUsage=100%\r\n");
+        assert_eq!(cls_ini_safe("[lolly]\r\nMaxThreadsUsage=12\r\n", 32, &[]), "[lolly]\r\nMaxThreadsUsage=12\r\n");
+        assert_eq!(cls_ini_safe("[lollypop]\r\nMaxThreadsUsage=75%\r\n", 32, &[]), "[lollypop]\r\nMaxThreadsUsage=16\r\n");
+        assert_eq!(cls_ini_safe("[lollypop]\r\nMaxThreadsUsage=lots\r\n", 32, &[]), "[lollypop]\r\nMaxThreadsUsage=16\r\n");
+        // No section, but the helper is there: it would use its default (75%), so a section is added.
+        assert_eq!(cls_ini_safe("[Srep]\r\nMemory=60%\r\n", 32, &["lollypop"]), "[Srep]\r\nMemory=60%\r\n[lollypop]\r\nMaxThreadsUsage=16\r\n");
+        assert_eq!(cls_ini_safe("[Srep]", 32, &["magic"]), "[Srep]\r\n[magic]\r\nMaxThreadsUsage=16\r\n");
         // A section header on the last line, without a line ending.
-        assert_eq!(cls_ini_safe("[magic]", 32 * GB), "[magic]\r\nMaxMemoryUsage=12288m");
+        assert_eq!(cls_ini_safe("[magic]", 32, &[]), "[magic]\r\nMaxThreadsUsage=16");
+    }
+
+    #[test]
+    fn thread_settings() {
+        assert_eq!(threads("100%", 32), Some(32));
+        assert_eq!(threads("75p", 32), Some(24));
+        assert_eq!(threads("150%", 8), Some(8));
+        assert_eq!(threads("12", 32), Some(12));
+        assert_eq!(threads("100%-2", 32), Some(30));
+        assert_eq!(threads("1024m", 32), None);
+    }
+
+    #[test]
+    fn a_limit_reaches_lolz_sections_without_a_memory_key() {
+        let ini = "[magic]\r\nMaxThreadsUsage=16\r\n[lollypop]\r\nMaxThreadsUsage=16\r\n[magic2]\r\nMaxMemoryUsage=75%-10m\r\n";
+        // 8 GB: lolz 4096m (lollypop 5120m); an existing key is lowered as before.
+        assert_eq!(
+            cls_ini(ini, 8 * GB, 32 * GB),
+            "[magic]\r\nMaxMemoryUsage=4096m\r\nMaxThreadsUsage=16\r\n[lollypop]\r\nMaxMemoryUsage=5120m\r\nMaxThreadsUsage=16\r\n[magic2]\r\nMaxMemoryUsage=4096m\r\n"
+        );
     }
 
     #[test]
