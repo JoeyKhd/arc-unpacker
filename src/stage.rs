@@ -29,6 +29,9 @@ type Workers = Vec<(String, JoinHandle<Result<()>>)>;
 pub struct Registry {
     pub children: Arc<Mutex<Vec<ChildInfo>>>,
     pub workers: Arc<Mutex<Workers>>,
+    /// arc-unpack's own stages (the built-in LZMA): (label, cpu seconds, wall seconds), so the
+    /// logs show them like the codec programs.
+    pub native: Arc<Mutex<Vec<(String, f64, f64)>>>,
     /// Set once the block is being torn down; later failures are consequences, not causes.
     pub aborted: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -102,6 +105,15 @@ impl Registry {
                 None => out.push((c.label.clone(), cpu, wall)),
             }
         }
+        for (label, cpu, wall) in self.native.lock().unwrap().iter() {
+            match out.iter_mut().find(|o| &o.0 == label) {
+                Some(o) => {
+                    o.1 = Some(o.1.unwrap_or(0.0) + cpu);
+                    o.2 = o.2.max(*wall);
+                }
+                None => out.push((label.clone(), Some(*cpu), *wall)),
+            }
+        }
         out
     }
 }
@@ -127,10 +139,16 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                 let params = *params;
                 let (mut w, r) = pipe(8);
                 let size = (i == 0).then_some(final_size);
+                let native = ctx.reg.native.clone();
+                let report = label.clone();
                 ctx.reg.worker(format!("lzma ({label})"), move || {
+                    let (t0, c0) = (Instant::now(), crate::perf::thread_cpu_seconds());
                     let mut input = BufReader::with_capacity(IO_BUF, stream);
                     crate::lzma::decode(&params, &mut input, &mut w, size)?;
                     w.finish()?;
+                    if let (Some(c0), Some(c1)) = (c0, crate::perf::thread_cpu_seconds()) {
+                        native.lock().unwrap().push((report, c1 - c0, t0.elapsed().as_secs_f64()));
+                    }
                     Ok(())
                 });
                 Box::new(r)

@@ -125,6 +125,19 @@ mod imp {
         Some(t(k) + t(u))
     }
 
+    /// User + kernel CPU seconds the calling thread has used.
+    pub fn thread_cpu_seconds() -> Option<f64> {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+        let ok = unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) };
+        if ok == 0 {
+            return None;
+        }
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+        Some(t(k) + t(u))
+    }
+
     /// Adds up the CPU time of a codec process and everything it starts. A CLS proxy runs the
     /// real decoder as a child process (cls-magic2.dll -> cls-magic2_x64.exe), and unarc.dll
     /// runs external codecs (bcm, rzw, ...) as children, so the process alone shows next to
@@ -229,6 +242,9 @@ mod imp {
     pub fn tune_child(_: &std::process::Child, _: bool) {}
     pub fn performance_cpu_sets() -> Vec<u32> {
         Vec::new()
+    }
+    pub fn thread_cpu_seconds() -> Option<f64> {
+        None
     }
     pub fn cpu_seconds(_: &std::process::Child) -> Option<f64> {
         None
