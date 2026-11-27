@@ -1210,7 +1210,7 @@ impl App {
                 ui.checkbox(&mut self.create_shortcut, if shortcuts == 1 { "Create a desktop shortcut" } else { "Create desktop shortcuts" });
             }
             if menu_entries > 0 {
-                ui.checkbox(&mut self.start_menu, "Create a Start menu entry");
+                ui.checkbox(&mut self.start_menu, if menu_entries == 1 { "Create a Start menu entry" } else { "Create Start menu entries" });
             }
             if !runtimes.is_empty() {
                 let names = arc_unpack::runtimes::labels(&runtimes);

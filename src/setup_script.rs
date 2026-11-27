@@ -168,11 +168,19 @@ fn part_file_matches(component: &crate::inno::Component, file: &str) -> bool {
     }
     // Every telling word of the part found in the description, a prefix being enough:
     // `...-selective-speech-brazilian.bin` is "Portuguese-Brazil", while
-    // `...-chinese-simplified.bin` is not "Chinese Traditional".
+    // `...-chinese-simplified.bin` is not "Chinese Traditional". A word with a number matches
+    // that number in the component's name or description: `...-videos-720p.bin` is `p720`,
+    // "Videos ... for 1280x720 Resolution", not "... 1920x1080 ...".
     let generic = |w: &str| matches!(w, "speech" | "voice" | "voices" | "vo" | "audio" | "sound" | "sounds" | "language" | "lang" | "pack");
     let telling: Vec<&str> = words.iter().copied().filter(|w| w.len() >= 3 && !generic(w)).collect();
     let described: Vec<&str> = word.split(|c: char| !c.is_ascii_alphanumeric()).filter(|d| d.len() >= 4).collect();
-    if !telling.is_empty() && telling.iter().all(|w| described.iter().any(|d| w.starts_with(d) || d.starts_with(w))) {
+    let numbers = |s: &str| -> Vec<String> { s.split(|c: char| !c.is_ascii_digit()).filter(|n| !n.is_empty()).map(str::to_string).collect() };
+    let component_numbers: Vec<String> = numbers(&leaf).into_iter().chain(numbers(&word)).collect();
+    let found = |w: &&str| {
+        let n = numbers(w);
+        described.iter().any(|d| w.starts_with(d) || d.starts_with(*w)) || (!n.is_empty() && n.iter().all(|x| component_numbers.contains(x)))
+    };
+    if !telling.is_empty() && telling.iter().all(found) {
         return true;
     }
     if words.len() < 2 {
@@ -1296,6 +1304,11 @@ mod tests {
         assert!(!downloaded_part(&c(r"local\cht", "Chinese Traditional"), &scb));
         assert!(!downloaded_part(&c(r"local\eng", "English"), &scb));
         assert!(!downloaded_part(&c("text", "Main game files"), &scb));
+        // Hades: p720/p1080 "Videos and GUI support for 1280x720 / 1920x1080 Resolution".
+        let hades: Vec<String> = ["fg-01.bin", "fg-selective-videos-720p.bin"].iter().map(|s| s.to_string()).collect();
+        assert!(downloaded_part(&c("p720", "Videos and GUI support for 1280x720 Resolution"), &hades));
+        assert!(!downloaded_part(&c("p1080", "Videos and GUI support for 1920x1080 Resolution"), &hades));
+        assert!(!downloaded_part(&c("text", "Main game files"), &hades));
     }
 
     fn component(name: &str, fixed: bool) -> crate::inno::Component {
