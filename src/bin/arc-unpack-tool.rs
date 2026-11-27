@@ -26,9 +26,10 @@ fn run() -> i32 {
         return 1;
     };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let Some(job) = understood(entry.role, &args) else {
+    let Some(mut job) = understood(entry.role, &args) else {
         return run_original(&entry, None);
     };
+    job.original = entry.original.clone();
     let verify = std::env::var_os(tools::VERIFY_ENV).is_some_and(|v| v == "1");
     if verify {
         return run_verified(&entry, &map, &job);
@@ -46,8 +47,9 @@ fn run() -> i32 {
         _ => None,
     };
     match job.run(plan) {
-        Ok(()) => {
-            log(&map, "log", &format!("{} native {:.1} s {}", entry.role.name(), started.elapsed().as_secs_f64(), job.input.display()));
+        Ok(summary) => {
+            let summary = if summary.is_empty() { summary } else { format!(" ({summary})") };
+            log(&map, "log", &format!("{} native {:.1} s {}{summary}", entry.role.name(), started.elapsed().as_secs_f64(), job.input.display()));
             0
         }
         Err(e) if job.in_place => {
@@ -76,23 +78,26 @@ struct Job {
     in_place: bool,
     /// x2n: the map.
     extra: Option<PathBuf>,
+    /// The original tool (Cricket's fgpack runs it on pieces of the input).
+    original: PathBuf,
 }
 
 impl Job {
-    fn run(&self, plan: Option<tools::X2nPlan>) -> anyhow::Result<()> {
+    /// Does the job; returns a note for the log (or nothing).
+    fn run(&self, plan: Option<tools::X2nPlan>) -> anyhow::Result<String> {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         match self.role {
-            Role::Xor => tools::xor_file(&self.input, &self.output, &self.key),
-            Role::Lz4Cli194 => {
-                let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-                tools::lz4_compress_file(&self.input, &self.output, 12, threads)
-            }
+            Role::Xor => tools::xor_file(&self.input, &self.output, &self.key).map(|_| String::new()),
+            Role::Lz4Cli194 => tools::lz4_compress_file(&self.input, &self.output, 12, threads).map(|_| String::new()),
             Role::X2n => {
                 let map = self.extra.as_deref().unwrap_or(Path::new(""));
                 match plan {
                     Some(p) => tools::x2n_apply_plan(&self.output, &self.input, p),
                     None => tools::x2n_apply(&self.output, &self.input, map),
                 }
+                .map(|_| String::new())
             }
+            Role::FgpackSegLzma => tools::fgpack_parallel(&self.input, &self.output, &self.original, threads),
         }
     }
 }
@@ -110,11 +115,12 @@ fn understood(role: Role, args: &[OsString]) -> Option<Job> {
             return None;
         }
         let [target, data, map] = <[PathBuf; 3]>::try_from(paths).ok()?;
-        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map) });
+        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map), original: PathBuf::new() });
     }
     let (input, output, key, output_arg) = match (role, s.as_slice()) {
         (Role::Xor, [i, o, k]) => (*i, *o, tools::xor_key(k)?, 1),
         (Role::Lz4Cli194, ["-12", i, o]) => (*i, *o, Vec::new(), 2),
+        (Role::FgpackSegLzma, ["e", i, o]) => (*i, *o, Vec::new(), 2),
         _ => return None,
     };
     if input.starts_with('-') || output.starts_with('-') {
@@ -125,7 +131,7 @@ fn understood(role: Role, args: &[OsString]) -> Option<Job> {
     if !input.is_file() || output.exists() || same(&input, &output) || output.parent().is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
         return None;
     }
-    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None })
+    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None, original: PathBuf::new() })
 }
 
 /// Runs the original tool with this command line (or with argument `replace.0` replaced).
@@ -164,8 +170,8 @@ fn run_verified(entry: &Entry, map: &Path, job: &Job) -> i32 {
     let ours = job.run(None);
     let t_ours = t1.elapsed().as_secs_f64();
     let verdict = match (&ours, std::fs::read(&check), std::fs::read(&job.output)) {
-        (Ok(()), Ok(a), Ok(b)) if a == b => format!("same ({} bytes)", a.len()),
-        (Ok(()), Ok(a), Ok(b)) => {
+        (Ok(_), Ok(a), Ok(b)) if a == b => format!("same ({} bytes)", a.len()),
+        (Ok(_), Ok(a), Ok(b)) => {
             let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
             format!("DIFFERENT (original {} bytes, ours {} bytes, first difference at {at})", a.len(), b.len())
         }

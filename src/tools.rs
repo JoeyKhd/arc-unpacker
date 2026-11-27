@@ -18,6 +18,10 @@
 //! - FitGirl's x2n.exe patcher: `x2n <target> <data> <map>` writes runs of data into the target
 //!   at the map's offsets, three system calls per run of at most 256 bytes. Here: the target
 //!   mapped into memory, the data read in bulk (see `x2n_apply`).
+//! - Cricket 19's fgpack.exe: `fgpack e <in> <out>` LZMA-encodes independent segments one after
+//!   the other on one core. Here: the input is cut at segment boundaries and the pieces are
+//!   encoded by copies of the original tool at once, their outputs joined in order (see
+//!   `fgpack_parallel`).
 
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -29,6 +33,7 @@ pub enum Role {
     Xor,
     Lz4Cli194,
     X2n,
+    FgpackSegLzma,
 }
 
 impl Role {
@@ -37,6 +42,7 @@ impl Role {
             Role::Xor => "xor",
             Role::Lz4Cli194 => "lz4-1.9.4",
             Role::X2n => "x2n",
+            Role::FgpackSegLzma => "fgpack-seg-lzma",
         }
     }
 
@@ -50,6 +56,7 @@ const KNOWN: &[(u64, &str, Role)] = &[
     (10752, "d363eff713456c2249a9a7197cb0e2fd6b189a83ad7fb3a3d3386517b35a8ccc", Role::Xor),
     (304640, "f0eb4df3daedbba4764afca1e18a9c4b716df0917f51382c99e120c9733e87f6", Role::Lz4Cli194),
     (7680, "62410f076016456299e3cb5b3311b8a8d66fecd299dde9e7b6815fd581036428", Role::X2n),
+    (205312, "f6594b8f7773a9223bc7f1c5c3ecf9971c4988ee34db6321a13673511cdde665", Role::FgpackSegLzma),
 ];
 
 /// Repack tools that touch only the files named on their command line: no fixed-name temp
@@ -572,9 +579,220 @@ impl Drop for Mapped {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Cricket 19's fgpack.exe (205,312 B): `fgpack e <in> <out>`. Reverse-engineered (main
+// FUN_00401000): the input is a sequence of segments [u32 LE n][n bytes], read until the 4-byte
+// header can't be read; each segment is encoded by a NEW LZMA SDK 4.x encoder (d 8 KB, lc3 lp0
+// pb2, a2, fb128, bt4, no end marker) and written as [u32 csize][13-byte .lzma header + data].
+// Nothing carries from one segment to the next, so the output is the concatenation of the
+// segments' outputs, and the file can be cut at segment boundaries, the pieces encoded by copies
+// of the original tool at once, and their outputs joined in order. It runs on one core and
+// Cricket's lists give it GB-sized files, 8-10 at a time on a 32-thread PC.
+
+/// Where the segments of an `fgpack e` input end, and the file length. A header whose length
+/// runs past the end, and a tail too short for a header, are left to the last piece (the tool
+/// handles them the same way whether it sees the whole file or that piece).
+pub fn fgpack_segment_ends(path: &Path) -> Result<(Vec<u64>, u64)> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut ends = Vec::new();
+    let mut pos = 0u64;
+    let mut head = [0u8; 4];
+    while pos + 4 <= len {
+        f.seek(SeekFrom::Start(pos))?;
+        f.read_exact(&mut head)?;
+        let end = pos + 4 + u32::from_le_bytes(head) as u64;
+        if end > len {
+            break;
+        }
+        ends.push(end);
+        pos = end;
+    }
+    Ok((ends, len))
+}
+
+/// Up to `k` contiguous pieces of about equal size, cut at segment ends: the end offset of each
+/// piece (the last is `len`).
+pub fn balanced_cuts(ends: &[u64], len: u64, k: usize) -> Vec<u64> {
+    let mut cuts = Vec::new();
+    let mut last = 0u64;
+    for i in 1..k.max(1) as u64 {
+        let target = len * i / k as u64;
+        // The first segment end at or after the target, if it leaves room for later pieces.
+        if let Some(&c) = ends.iter().find(|&&e| e >= target && e > last && e < len) {
+            if cuts.last() != Some(&c) {
+                cuts.push(c);
+                last = c;
+            }
+        }
+    }
+    cuts.push(len);
+    cuts
+}
+
+/// `fgpack e <input> <output>` with the original tool `original`, piece by piece in parallel (at
+/// most `cpus` copies at once machine-wide, through a semaphore shared with the other stand-ins
+/// Cricket's lists start at the same time). An error means nothing usable was written: the caller
+/// runs the original on the whole file. Returns a summary for the log.
+pub fn fgpack_parallel(input: &Path, output: &Path, original: &Path, cpus: usize) -> Result<String> {
+    let (ends, len) = fgpack_segment_ends(input)?;
+    // The tool keeps 32-bit file offsets: past 2 GB it is the original's business.
+    ensure!(len < (2u64 << 30) - (64 << 20), "input of {len} bytes: near the tool's 2 GB limit");
+    ensure!(ends.len() >= 2, "{} segment(s): nothing to split", ends.len());
+    let cuts = balanced_cuts(&ends, len, ends.len().min(cpus.max(1)));
+    ensure!(cuts.len() >= 2, "one piece only");
+    if let Some(free) = crate::guard::free_space(input.parent().unwrap_or(Path::new("."))) {
+        ensure!(free > 2 * len + (1 << 30), "not enough free space for the pieces");
+    }
+    let piece = |p: &Path, i: usize| p.with_file_name(format!("{}.arc-unpack-piece{i}", p.file_name().unwrap_or_default().to_string_lossy()));
+    let pieces: Vec<(PathBuf, PathBuf)> = (0..cuts.len()).map(|i| (piece(input, i), piece(output, i))).collect();
+    let cleanup = || {
+        for (a, b) in &pieces {
+            let _ = std::fs::remove_file(a);
+            let _ = std::fs::remove_file(b);
+        }
+    };
+    let result = (|| -> Result<()> {
+        let mut src = std::fs::File::open(input)?;
+        let mut start = 0u64;
+        for (&end, (pin, _)) in cuts.iter().zip(&pieces) {
+            let mut dst = std::io::BufWriter::with_capacity(4 << 20, std::fs::File::create(pin)?);
+            let n = std::io::copy(&mut (&mut src).take(end - start), &mut dst)?;
+            ensure!(n == end - start, "short read of {}", input.display());
+            dst.flush()?;
+            start = end;
+        }
+        let slots = CpuSlots::open(cpus);
+        let failed: Vec<String> = std::thread::scope(|s| {
+            let jobs: Vec<_> = pieces
+                .iter()
+                .map(|(pin, pout)| {
+                    let slots = &slots;
+                    s.spawn(move || -> std::result::Result<(), String> {
+                        let _slot = slots.take();
+                        let st = std::process::Command::new(original)
+                            .arg("e")
+                            .arg(pin)
+                            .arg(pout)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .map_err(|e| e.to_string())?;
+                        if st.success() && pout.is_file() { Ok(()) } else { Err(format!("exit {:?}", st.code())) }
+                    })
+                })
+                .collect();
+            jobs.into_iter().filter_map(|j| j.join().unwrap_or_else(|_| Err("panicked".into())).err()).collect()
+        });
+        ensure!(failed.is_empty(), "a piece failed: {}", failed.join(", "));
+        let mut out = std::io::BufWriter::with_capacity(4 << 20, std::fs::File::create(output)?);
+        for (_, pout) in &pieces {
+            std::io::copy(&mut std::fs::File::open(pout)?, &mut out)?;
+        }
+        out.flush()?;
+        Ok(())
+    })();
+    cleanup();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(output);
+        return Err(e);
+    }
+    let mut sizes: Vec<u64> = ends.iter().scan(0u64, |p, &e| { let s = e - *p; *p = e; Some(s) }).collect();
+    sizes.sort_unstable();
+    Ok(format!(
+        "{} segments (min {} / median {} / max {} bytes) in {} pieces",
+        ends.len(),
+        sizes[0],
+        sizes[sizes.len() / 2],
+        sizes[sizes.len() - 1],
+        cuts.len()
+    ))
+}
+
+/// A machine-wide count of CPUs for the stand-ins' own child processes (a named semaphore), so
+/// that ten stand-ins started at once don't start ten times as many tools as there are cores.
+struct CpuSlots(#[cfg(windows)] windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: a semaphore handle can be used from any thread.
+unsafe impl Sync for CpuSlots {}
+
+struct CpuSlot<'a>(&'a CpuSlots);
+
+impl CpuSlots {
+    fn open(cpus: usize) -> CpuSlots {
+        #[cfg(windows)]
+        {
+            let name: Vec<u16> = "Local\\arc-unpack-tool-cpu".encode_utf16().chain([0]).collect();
+            let n = cpus.clamp(1, 1024) as i32;
+            CpuSlots(unsafe { windows_sys::Win32::System::Threading::CreateSemaphoreW(std::ptr::null(), n, n, name.as_ptr()) })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = cpus;
+            CpuSlots()
+        }
+    }
+
+    fn take(&self) -> CpuSlot<'_> {
+        #[cfg(windows)]
+        if !self.0.is_null() {
+            unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(self.0, u32::MAX) };
+        }
+        CpuSlot(self)
+    }
+}
+
+impl Drop for CpuSlot<'_> {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if !(self.0).0.is_null() {
+            unsafe { windows_sys::Win32::System::Threading::ReleaseSemaphore((self.0).0, 1, std::ptr::null_mut()) };
+        }
+    }
+}
+
+impl Drop for CpuSlots {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if !self.0.is_null() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fgpack_inputs_are_cut_at_segment_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("22.fgpack");
+        // Segments of 10, 0, 5 and 20 bytes, then a 2-byte tail the tool ignores.
+        let mut data = Vec::new();
+        for n in [10u32, 0, 5, 20] {
+            data.extend(n.to_le_bytes());
+            data.extend(std::iter::repeat_n(n as u8, n as usize));
+        }
+        data.extend([1, 2]);
+        std::fs::write(&f, &data).unwrap();
+        let (ends, len) = fgpack_segment_ends(&f).unwrap();
+        assert_eq!((ends.clone(), len), (vec![14, 18, 27, 51], 53));
+        assert_eq!(balanced_cuts(&ends, len, 2), vec![27, 53]);
+        assert_eq!(balanced_cuts(&ends, len, 4), vec![14, 27, 51, 53]);
+        assert_eq!(balanced_cuts(&ends, len, 1), vec![53]);
+        // A header longer than what is left: that segment and the rest stay in the last piece.
+        let mut data = 10u32.to_le_bytes().to_vec();
+        data.extend([0u8; 10]);
+        data.extend(1000u32.to_le_bytes());
+        data.extend([9, 9, 9]);
+        std::fs::write(&f, &data).unwrap();
+        let (ends, len) = fgpack_segment_ends(&f).unwrap();
+        assert_eq!((ends.clone(), len), (vec![14], 21));
+        assert_eq!(balanced_cuts(&ends, len, 2), vec![14, 21]);
+    }
 
     /// The original's loop, record by record (FUN_00401240), as the reference.
     fn x2n_reference(target: &mut Vec<u8>, data: &[u8], map: &[u8]) {
