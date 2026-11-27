@@ -1436,6 +1436,25 @@ impl ScriptRunner<'_> {
         Ok(true)
     }
 
+    /// IS7zipExtract: unpacks a 7z archive the way ISDone does (src/sevenz.rs). A failure is
+    /// the call returning FALSE; the script decides what happens then.
+    fn seven_zip(&mut self, archive: &Path, out: &Path, password: &str) -> bool {
+        let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let started = std::time::Instant::now();
+        match crate::sevenz::extract(archive, out, password, &self.opts.cancel) {
+            Ok(r) => {
+                let mb = r.bytes as f64 / 1e6;
+                events::info(self.sink, format!("{name} (7z): {} files, {mb:.1} MB in {:.0}s", r.files, started.elapsed().as_secs_f64()));
+                self.summary.problems.extend(r.problems);
+                true
+            }
+            Err(e) => {
+                events::warn(self.sink, format!("{name}: {e:#}"));
+                false
+            }
+        }
+    }
+
     fn exec(&mut self, program: &Path, args: &str, dir: &Path, wait: bool) -> Result<bool> {
         if !wait {
             // Started once the archives up to the next other step are fully unpacked: such a
@@ -1614,6 +1633,7 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
             Step::Extract { archive, out, cfg, base } => self.extract(archive, out, cfg, base.as_deref())?,
             Step::Exec { program, args, dir, wait } => self.exec(program, args, dir, *wait)?,
             Step::Rar { archive, out, unrar, password } => self.unrar(archive, out, unrar, password)?,
+            Step::SevenZip { archive, out, password } => self.seven_zip(archive, out, password),
         };
         let secs = started.elapsed().as_secs_f64();
         events::info(self.sink, format!("step {}: {step} ({secs:.1}s){}", self.n, if ok { "" } else { " FAILED" }));
@@ -1633,7 +1653,9 @@ fn step_label(step: &crate::setup_script::Step) -> String {
     use crate::setup_script::Step;
     let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match step {
-        Step::Extract { archive, .. } | Step::Rar { archive, .. } => format!("Unpacking {}", name(archive)),
+        Step::Extract { archive, .. } | Step::Rar { archive, .. } | Step::SevenZip { archive, .. } => {
+            format!("Unpacking {}", name(archive))
+        }
         Step::Exec { program, args, .. } => {
             // `cmd /C tool.exe ...`: name the tool, not cmd.
             let tool = args

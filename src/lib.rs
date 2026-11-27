@@ -15,6 +15,7 @@ pub mod pascal;
 pub mod perf;
 pub mod pipe;
 pub mod setup_script;
+pub mod sevenz;
 pub mod progress;
 pub mod runtimes;
 pub mod stage;

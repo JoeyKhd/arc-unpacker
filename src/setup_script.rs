@@ -27,6 +27,9 @@ pub enum Step {
     /// Extract the RAR archive `archive` into `out` with the installer's `unrar` (Unrar.dll), as
     /// ISDone's ISRarExtract does (older repacks rebuild a RAR file and unpack it).
     Rar { archive: PathBuf, out: PathBuf, unrar: PathBuf, password: String },
+    /// Unpack the 7z archive `archive` into `out`, as ISDone's IS7zipExtract does (Farming
+    /// Simulator 17 rebuilds `{app}\inner.pack` and unpacks it that way).
+    SevenZip { archive: PathBuf, out: PathBuf, password: String },
 }
 
 impl std::fmt::Display for Step {
@@ -42,6 +45,7 @@ impl std::fmt::Display for Step {
                 write!(f, "run {name}{args} (in {}{background})", dir.display())
             }
             Step::Rar { archive, out, .. } => write!(f, "unrar {} -> {}", archive.display(), out.display()),
+            Step::SevenZip { archive, out, .. } => write!(f, "un7z {} -> {}", archive.display(), out.display()),
         }
     }
 }
@@ -423,6 +427,19 @@ impl<'a> InnoHost<'a> {
         self.messages.push(format!("refused: {what}"));
     }
 
+    /// ISDone's CurComponent gate (ISArcExtract, ISRarExtract, IS7zipExtract, ISExec): the call
+    /// for component n only runs if bit n-1 of the masks given to ISDoneInit is set (0 = always);
+    /// a skipped call reports success.
+    fn isdone_skips(&self, n: i64) -> bool {
+        match (n, self.isdone_components) {
+            (n @ 1..=96, Some(masks)) => {
+                let bit = (n - 1) as usize;
+                masks[bit / 32] & (1 << (bit % 32)) == 0
+            }
+            _ => false,
+        }
+    }
+
     fn step(&mut self, step: Step) -> Result<bool> {
         // Each repack archive starts a part: its extraction and the steps after it, up to the
         // next repack archive, which process its files.
@@ -503,7 +520,7 @@ impl Host for InnoHost<'_> {
             "WIZARDFORM" | "MAINFORM" | "GETCMDTAIL" => (0, true),
             "EXTRACTTEMPORARYFILE" => (1, false),
             "dll:ISARCEXTRACT" => (10, true),
-            "dll:ISRAREXTRACT" => (6, true),
+            "dll:ISRAREXTRACT" | "dll:IS7ZIPEXTRACT" => (6, true),
             "dll:ISEXEC" => (8, true),
             "dll:ISDONEINIT" => (8, true),
             "dll:ISDONESTOP" => (0, true),
@@ -691,11 +708,8 @@ impl Host for InnoHost<'_> {
             "dll:ISEXEC" => {
                 // CurComponent, as for ISArcExtract: Kerbal Space Program ties rus.bat, esp.bat, ...
                 // to their language's component, and ISDone skips the others.
-                if let (n @ 1..=96, Some(masks)) = (int(0), self.isdone_components) {
-                    let bit = (n - 1) as usize;
-                    if masks[bit / 32] & (1 << (bit % 32)) == 0 {
-                        return Ok(yes(true));
-                    }
+                if self.isdone_skips(int(0)) {
+                    return Ok(yes(true));
                 }
                 // ISDone creates a missing working folder: Sleeping Dogs runs build01.bat in
                 // {app}\temp\04\, which nothing before it creates. (Only where the script may write.)
@@ -711,13 +725,43 @@ impl Host for InnoHost<'_> {
                 let tmp = self.folders.tmp.to_string_lossy().into_owned();
                 yes(self.exec(&s(0), &s(1), &tmp, true)?)
             }
+            "dll:IS7ZIPEXTRACT" => {
+                // IS7zipExtract(CurComponent, PctOfTotal, InName, OutPath, DeleteInFile, Password).
+                // Farming Simulator 17: ('{app}\inner.pack', '{app}', True, '').
+                if self.isdone_skips(int(0)) {
+                    return Ok(yes(true));
+                }
+                let (archive, dest, password) = (s(2), s(3), s(5));
+                if dest.chars().count() < 2 {
+                    // ISDone: ERROR_PARSE_OUTPUTPATH.
+                    self.messages.push(format!("IS7zipExtract: no output folder for {archive}"));
+                    return Ok(yes(false));
+                }
+                ensure!(
+                    !archive.rsplit(['\\', '/']).next().unwrap_or("").contains('*'),
+                    "IS7zipExtract with a file mask ({archive}) is not supported"
+                );
+                let Some(out_dir) = self.writable(&dest) else {
+                    self.refuse(format!("unpacking into {dest}"));
+                    return Ok(yes(false));
+                };
+                // (No check that the archive exists here: in a dry run it doesn't yet, and the
+                // plan must go on to the archives after it.)
+                let ok = self.step(Step::SevenZip { archive: PathBuf::from(&archive), out: out_dir, password })?;
+                if ok && int(4) != 0 {
+                    match self.writable(&archive) {
+                        Some(p) => {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        None => self.messages.push(format!("kept {archive} (the script asked to delete it after unpacking)")),
+                    }
+                }
+                yes(ok)
+            }
             "dll:ISRAREXTRACT" => {
                 // ISRarExtract(CurComponent, PctOfTotal, InName, OutPath, DeleteInFile, Password).
-                if let (n @ 1..=96, Some(masks)) = (int(0), self.isdone_components) {
-                    let bit = (n - 1) as usize;
-                    if masks[bit / 32] & (1 << (bit % 32)) == 0 {
-                        return Ok(yes(true));
-                    }
+                if self.isdone_skips(int(0)) {
+                    return Ok(yes(true));
                 }
                 let (archive, dest, password) = (s(2), s(3), s(5));
                 let Some(out_dir) = self.writable(&dest) else {
@@ -738,13 +782,8 @@ impl Host for InnoHost<'_> {
                 yes(ok)
             }
             "dll:ISARCEXTRACT" => {
-                // CurComponent: ISDone extracts an archive of component n only if bit n-1 of the
-                // masks given to ISDoneInit is set (0 = always), and reports success either way.
-                if let (n @ 1..=96, Some(masks)) = (int(0), self.isdone_components) {
-                    let bit = (n - 1) as usize;
-                    if masks[bit / 32] & (1 << (bit % 32)) == 0 {
-                        return Ok(yes(true));
-                    }
+                if self.isdone_skips(int(0)) {
+                    return Ok(yes(true));
                 }
                 let (archive, dest, inner, password, cfg) = (s(2), s(3), s(4), s(6), s(7));
                 let base = inner.trim_matches(['\\', '/']).to_string();
