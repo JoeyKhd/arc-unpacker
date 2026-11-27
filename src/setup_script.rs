@@ -161,6 +161,11 @@ fn part_file_matches(component: &crate::inno::Component, file: &str) -> bool {
     let stem = file.rsplit_once('.').map_or(file.as_str(), |(s, _)| s);
     let part = ["optional-", "selective-"].iter().find_map(|k| stem.split_once(k).map(|(_, rest)| rest)).unwrap_or("");
     let words: Vec<&str> = part.split(['-', '_', ' ']).filter(|w| !w.is_empty()).collect();
+    // A soundtrack goes by several names: "Bonus OST (OGG)" is `fg-optional-soundtrack.bin`.
+    let music = |w: &str| matches!(w, "ost" | "soundtrack" | "soundtracks" | "music");
+    if words.iter().any(|w| music(w)) && (music(&leaf) || word.split(|c: char| !c.is_ascii_alphanumeric()).any(music)) {
+        return true;
+    }
     if words.len() < 2 {
         return false;
     }
@@ -1221,6 +1226,12 @@ mod tests {
         assert!(downloaded_part(&c("lim", "Install Limited Edition as well"), &sd), "the phrase alone");
         assert!(downloaded_part(&c("le", ""), &sd), "the initials alone");
         assert!(!downloaded_part(&c("text", "Definitive Edition"), &sd));
+        // Civilization 6: component "bonus" "Bonus OST (OGG)", archive fg-optional-soundtrack.bin.
+        let civ: Vec<String> = ["fg-01.bin", "fg-optional-soundtrack.bin"].iter().map(|s| s.to_string()).collect();
+        assert!(downloaded_part(&c("bonus", "Bonus OST (OGG)"), &civ));
+        assert!(downloaded_part(&c("ost", ""), &civ));
+        assert!(!downloaded_part(&c("bonus", "Bonus Content"), &civ));
+        assert!(!downloaded_part(&c("ost", "Bonus OST (OGG)"), &files), "no soundtrack downloaded");
     }
 
     fn component(name: &str, fixed: bool) -> crate::inno::Component {
