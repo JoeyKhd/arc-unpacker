@@ -124,6 +124,23 @@ fn has_prefix(path: &Path, magic: &[u8]) -> bool {
     std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut buf)).is_ok() && buf == magic
 }
 
+/// The repack's installer: `setup.exe`, or else the first Inno Setup program in the folder (older
+/// repacks call it `setup-multi6.exe` and the like).
+pub fn find_setup(repack_dir: &Path) -> Option<PathBuf> {
+    let plain = repack_dir.join("setup.exe");
+    if plain.is_file() {
+        return Some(plain);
+    }
+    let mut exes: Vec<PathBuf> = std::fs::read_dir(repack_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+        .collect();
+    exes.sort();
+    exes.into_iter().find(|p| is_inno_setup(p))
+}
+
 fn is_inno_setup(path: &Path) -> bool {
     // The offset-table magic sits in the loader's resources, well inside the first megabytes.
     std::fs::read(path).map(|b| b.windows(12).any(|w| w == b"rDlPtS\xcd\xe6\xd7{\x0b*")).unwrap_or(false)
@@ -735,6 +752,17 @@ fn run_scripted(
     let _ = std::fs::remove_dir_all(&run_dir);
     let tmp = run_dir.join("tmp");
     ss::prepare_tmp(inno, &tmp).context("unpacking the installer's temporary files")?;
+    // CLS.ini carries "{app}" placeholders (codecs' temp folders) the installer fills in.
+    for name in ["CLS.ini", "cls.ini"] {
+        let p = tmp.join(name);
+        if let Ok(b) = std::fs::read(&p) {
+            let text = String::from_utf8_lossy(&b);
+            if text.contains("{app}") {
+                std::fs::write(&p, text.replace("{app}", &target.to_string_lossy()))?;
+            }
+            break;
+        }
+    }
     crate::memlimit::set(opts.memory_limit);
     let (_, physical) = crate::guard::memory();
     if let Some(note) = crate::memlimit::make_safe(&tmp, physical) {

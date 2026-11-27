@@ -656,8 +656,21 @@ impl Host for InnoHost<'_> {
                 self.isdone_components = Some([int(2) as u64, int(3) as u64, int(4) as u64]);
                 yes(true)
             }
-            "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" | "dll:SREPINIT"
-            | "dll:PRECOMPINIT" => yes(true),
+            "dll:PRECOMPINIT" => {
+                // PrecompInit(TmpPath, VirtMem, PrecompVers): ISDone gives the precomp CLS codec
+                // its temp folder and memory in {tmp}\CLS.ini, [Precomp]. Without them it keeps
+                // CLS.ini's "{app}" placeholder and fails (Pro Evolution Soccer 2017).
+                let cls = self.folders.tmp.join("CLS.ini").to_string_lossy().into_owned();
+                let (path, memory) = (s(0), int(1));
+                if !path.is_empty() {
+                    self.ini(true, "Precomp", "TempPath", &path, &cls)?;
+                }
+                if memory > 0 {
+                    self.ini(true, "Precomp", "Memory", &memory.to_string(), &cls)?;
+                }
+                yes(true)
+            }
+            "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" | "dll:SREPINIT" => yes(true),
             "dll:WRAPCALLBACK" => Some(Value::Int(0)),
             "dll:SUSPENDPROC" | "dll:RESUMEPROC" | "dll:SETTASKBARPROGRESSVALUE" | "dll:SETTASKBARPROGRESSSTATE" => None,
             _ => bail!("{key} is declared but not implemented"),
