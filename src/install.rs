@@ -239,6 +239,13 @@ pub fn prepare_codecs(setup: &Path, cache_dir: &Path, sink: &Sink) -> Result<Pat
     let config = root.join("codecs.toml");
     if root.join(".ready").is_file() && config.is_file() {
         events::info(sink, format!("using prepared codecs in {}", root.display()));
+        // (Caches made before `make_safe` existed get it too; it changes nothing twice.)
+        let unpacked = root.join("setup");
+        let codec_dir = if unpacked.join("tmp").is_dir() { unpacked.join("tmp") } else { unpacked };
+        let (_, physical) = crate::guard::memory();
+        if let Some(note) = crate::memlimit::make_safe(&codec_dir, physical) {
+            events::info(sink, note);
+        }
         return Ok(config);
     }
     events::info(sink, format!("extracting codecs from {}", setup.display()));
@@ -259,6 +266,10 @@ pub fn prepare_codecs(setup: &Path, cache_dir: &Path, sink: &Sink) -> Result<Pat
             std::fs::write(&p, text)?;
             break;
         }
+    }
+    let (_, physical) = crate::guard::memory();
+    if let Some(note) = crate::memlimit::make_safe(&codec_dir, physical) {
+        events::info(sink, note);
     }
     let toml = if codec_dir.join("arc.ini").is_file() {
         crate::arcini::to_toml(&codec_dir.join("arc.ini"))?
@@ -725,8 +736,11 @@ fn run_scripted(
     let tmp = run_dir.join("tmp");
     ss::prepare_tmp(inno, &tmp).context("unpacking the installer's temporary files")?;
     crate::memlimit::set(opts.memory_limit);
+    let (_, physical) = crate::guard::memory();
+    if let Some(note) = crate::memlimit::make_safe(&tmp, physical) {
+        events::info(sink, note);
+    }
     if let Some(limit) = opts.memory_limit {
-        let (_, physical) = crate::guard::memory();
         events::info(sink, crate::memlimit::apply(&tmp, limit, physical));
     }
     std::fs::create_dir_all(&target)?;
@@ -1147,8 +1161,13 @@ impl ScriptRunner<'_> {
                     Ok(s) => s.problems.join("; "),
                     Err(e) => format!("{e:#}"),
                 };
-                events::warn(self.sink, format!("early extraction of {} failed ({why}); extracting again", archive.display()));
                 let _ = std::fs::remove_dir_all(&stage);
+                // A codec that made no progress for the whole stall timeout would hang the same
+                // way again: don't make the user wait for it twice.
+                if why.contains("no progress for") {
+                    bail!("{}: {why}", archive.display());
+                }
+                events::warn(self.sink, format!("early extraction of {} failed ({why}); extracting again", archive.display()));
                 Ok(None)
             }
         }
