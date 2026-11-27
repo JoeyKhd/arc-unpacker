@@ -46,7 +46,7 @@ More in [How it works](docs/HOW-IT-WORKS.md).
 
 **Runtimes (DirectX, Visual C++, .NET):** if this PC is missing one the game needs, the window offers **Install missing runtimes**, ticked by default as in FitGirl's installer. They're downloaded from the same Microsoft links the installer uses, checked for Microsoft's signature, and installed silently. Otherwise arc-unpack never connects to the internet.
 
-Not done: an uninstaller, Start-menu entries or registry entries. The game's desktop shortcut is made after the install (**Create a desktop shortcut**, ticked by default). Delete the folder to uninstall.
+**Shortcuts and uninstalling:** the game's desktop shortcut and Start menu entry are made after the install (both ticked by default). Every install gets an uninstaller, listed in Settings → Apps like any other program (`uninstall.exe` in the game folder). It removes exactly what the install added; saves and settings the game made itself stay.
 
 ## Build
 

@@ -288,6 +288,11 @@ fn real_main() -> Result<()> {
                 return Ok(());
             }
             let plan = arc_unpack::setup_script::plan(&setup_exe, &repack, &target, None)?;
+            if let Ok(setup) = arc_unpack::inno::Setup::open(&setup_exe)
+                && let Some(name) = setup.app.display_name()
+            {
+                println!("Game: {name}\n");
+            }
             println!("Components (default install + downloaded optional parts):");
             for (name, desc, on) in &plan.components {
                 println!("  [{}] {name}  {desc}", if *on { "x" } else { " " });
@@ -404,6 +409,13 @@ struct InstallArgs {
     /// bundled), checked for a Microsoft or NVIDIA signature, run silently.
     #[arg(long)]
     runtimes: bool,
+    /// Don't put an uninstaller in the game folder (uninstall.exe, also listed in Settings >
+    /// Apps). It removes exactly what the install added; saves and settings stay.
+    #[arg(long)]
+    no_uninstaller: bool,
+    /// Create the installer's desktop shortcut and Start menu entry after a successful install.
+    #[arg(long)]
+    shortcuts: bool,
     /// Wait for Enter before exiting (used when relaunched in its own elevated window).
     #[arg(long, hide = true)]
     keep_open: bool,
@@ -429,7 +441,7 @@ fn install(a: InstallArgs) -> Result<()> {
             args.extend(["--memory-limit".into(), gb.to_string()]);
         }
         for (flag, on) in
-            [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune), ("--no-script", a.no_script), ("--runtimes", a.runtimes)]
+            [("--no-verify", a.no_verify), ("--overwrite", a.overwrite), ("--no-tune", a.no_tune), ("--no-script", a.no_script), ("--runtimes", a.runtimes), ("--no-uninstaller", a.no_uninstaller), ("--shortcuts", a.shortcuts)]
         {
             if on {
                 args.push(flag.into());
@@ -472,6 +484,9 @@ fn install(a: InstallArgs) -> Result<()> {
         components: a.components,
         runtimes: a.runtimes,
         memory_limit: a.memory_limit.map(|gb| gb.max(1) << 30),
+        uninstaller: !a.no_uninstaller,
+        desktop_shortcut: a.shortcuts,
+        start_menu: a.shortcuts,
     };
     let started = Instant::now();
     let (sink, term) = arc_unpack::progress::terminal();
@@ -507,6 +522,12 @@ fn install(a: InstallArgs) -> Result<()> {
             }
             for line in &r.runtimes {
                 println!("runtime {line}");
+            }
+            for link in &r.shortcuts_made {
+                println!("shortcut: {}", link.display());
+            }
+            if let Some(u) = &r.uninstaller {
+                println!("uninstaller: {} (also in Settings > Apps)", u.display());
             }
             if !r.scripts.is_empty() {
                 println!("\nThe installer would run these scripts afterwards (not run; review them first):");

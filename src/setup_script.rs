@@ -1127,6 +1127,18 @@ pub struct Shortcut {
 
 /// The installer's desktop shortcuts for this selection, pointing into `app`.
 pub fn desktop_shortcuts(setup: &Setup, selected: &BTreeSet<String>, app: &Path) -> Vec<Shortcut> {
+    let on_desktop = |n: &str| n.starts_with("{commondesktop}") || n.starts_with("{userdesktop}") || n.starts_with("{desktop}");
+    icon_shortcuts(setup, selected, app, on_desktop, |tasks| tasks.is_empty() || tasks.contains("desktop"))
+}
+
+/// The installer's Start menu shortcuts (`{group}\...`) for this selection, pointing into `app`.
+/// Its uninstaller and web-link entries don't point into the game folder and are left out.
+pub fn start_menu_shortcuts(setup: &Setup, selected: &BTreeSet<String>, app: &Path) -> Vec<Shortcut> {
+    icon_shortcuts(setup, selected, app, |n| n.starts_with("{group}\\"), |tasks| tasks.is_empty())
+}
+
+/// `[Icons]` entries whose name (lower case) and tasks pass the filters, as shortcuts into `app`.
+fn icon_shortcuts(setup: &Setup, selected: &BTreeSet<String>, app: &Path, place: impl Fn(&str) -> bool, tasks_ok: impl Fn(&str) -> bool) -> Vec<Shortcut> {
     let expand = |s: &str| -> Option<PathBuf> {
         let rest = s.strip_prefix("{app}")?;
         Some(app.join(rest.trim_start_matches('\\')))
@@ -1135,11 +1147,10 @@ pub fn desktop_shortcuts(setup: &Setup, selected: &BTreeSet<String>, app: &Path)
         .icons
         .iter()
         .filter(|i| {
-            let n = i.name.to_ascii_lowercase();
-            (n.starts_with("{commondesktop}") || n.starts_with("{userdesktop}") || n.starts_with("{desktop}"))
+            place(&i.name.to_ascii_lowercase())
                 && crate::install::english_or_neutral(&i.languages)
                 && (i.components.is_empty() || eval_components(&i.components, selected).unwrap_or(false))
-                && (i.tasks.is_empty() || i.tasks.to_ascii_lowercase().contains("desktop"))
+                && tasks_ok(&i.tasks.to_ascii_lowercase())
         })
         .filter_map(|i| {
             let target = expand(&i.filename)?;
@@ -1150,10 +1161,34 @@ pub fn desktop_shortcuts(setup: &Setup, selected: &BTreeSet<String>, app: &Path)
         .collect()
 }
 
+/// Characters a file or folder name can't have.
+fn file_name_safe(s: &str) -> String {
+    s.trim().replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_")
+}
+
 /// Creates the shortcuts on the current user's desktop. Returns the .lnk paths.
 #[cfg(windows)]
 pub fn create_desktop_shortcuts(shortcuts: &[Shortcut]) -> Result<Vec<PathBuf>> {
     create_shortcuts(shortcuts, None)
+}
+
+/// Creates Start menu shortcuts in the folder `group` (such as `Games\Stray`): for all users
+/// when running as administrator (as the repack's installer does), else for this user. Returns
+/// the .lnk paths and the folders it made.
+#[cfg(windows)]
+pub fn create_start_menu_shortcuts(group: &str, shortcuts: &[Shortcut]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let root = special_folder(if crate::guard::is_elevated() { "CommonPrograms" } else { "Programs" })?;
+    let mut dir = root.clone();
+    let mut made = Vec::new();
+    for part in group.split(['\\', '/']).map(file_name_safe).filter(|p| !p.is_empty() && p != "." && p != "..") {
+        dir.push(part);
+        if !dir.exists() {
+            std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+            made.push(dir.clone());
+        }
+    }
+    let links = create_shortcuts(shortcuts, Some(&dir))?;
+    Ok((links, made))
 }
 
 /// Creates the shortcuts in `dir` (None: the current user's desktop). Returns the .lnk paths.
@@ -1162,12 +1197,12 @@ pub fn create_shortcuts(shortcuts: &[Shortcut], dir: Option<&Path>) -> Result<Ve
     let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let dir = match dir {
         Some(d) => d.to_path_buf(),
-        None => desktop_dir()?,
+        None => special_folder("Desktop")?,
     };
     let mut script = String::from("$ErrorActionPreference='Stop'; $w = New-Object -ComObject WScript.Shell; ");
     let mut out = Vec::new();
     for sc in shortcuts {
-        let file = dir.join(format!("{}.lnk", sc.name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_")));
+        let file = dir.join(format!("{}.lnk", file_name_safe(&sc.name)));
         script.push_str(&format!(
             "$s = $w.CreateShortcut({}); $s.TargetPath = {}; $s.Arguments = {}; $s.WorkingDirectory = {}; $s.Save(); ",
             q(&file.to_string_lossy()),
@@ -1186,21 +1221,27 @@ pub fn create_shortcuts(shortcuts: &[Shortcut], dir: Option<&Path>) -> Result<Ve
     Ok(out)
 }
 
-/// The current user's Desktop folder (it can be redirected, e.g. to OneDrive).
+/// One of Windows' special folders by its .NET name ("Desktop", "Programs", "CommonPrograms");
+/// they can be redirected, e.g. to OneDrive.
 #[cfg(windows)]
-fn desktop_dir() -> Result<PathBuf> {
+fn special_folder(name: &str) -> Result<PathBuf> {
     let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "[Environment]::GetFolderPath('Desktop')"])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &format!("[Environment]::GetFolderPath('{name}')")])
         .creation_flags(0x0800_0000)
         .output()
         .context("start PowerShell")?;
     let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    ensure!(!dir.is_empty(), "no Desktop folder");
+    ensure!(!dir.is_empty(), "no {name} folder");
     Ok(PathBuf::from(dir))
 }
 
 #[cfg(not(windows))]
 pub fn create_desktop_shortcuts(_: &[Shortcut]) -> Result<Vec<PathBuf>> {
+    bail!("shortcuts are only supported on Windows")
+}
+
+#[cfg(not(windows))]
+pub fn create_start_menu_shortcuts(_: &str, _: &[Shortcut]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     bail!("shortcuts are only supported on Windows")
 }
 

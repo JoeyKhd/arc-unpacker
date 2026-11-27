@@ -111,6 +111,8 @@ pub struct Setup {
     pub icons: Vec<Icon>,
     /// Compiled `[Code]` section (empty if the installer has none).
     pub code: Vec<u8>,
+    /// The game's name, publisher, Start menu folder, ...
+    pub app: AppInfo,
     data: Vec<DataEntry>,
     data_offset: u64,
     blob: Vec<u8>,
@@ -224,6 +226,47 @@ fn header_counts(b: &[u8]) -> Result<Vec<usize>> {
         r.bstr()?;
     }
     (0..16).map(|_| r.u32().map(|v| v as usize)).collect()
+}
+
+/// What the installer says about the game (the first of the header's strings). Values may still
+/// hold Inno constants such as `{app}` or `{cm:...}`.
+#[derive(Debug, Clone, Default)]
+pub struct AppInfo {
+    pub name: String,
+    pub ver_name: String,
+    pub publisher: String,
+    pub version: String,
+    /// The Start menu folder (`{group}`).
+    pub group: String,
+    /// The name in Windows' list of installed apps (empty: `ver_name`).
+    pub uninstall_name: String,
+    /// The icon there, e.g. `{app}\Game.exe`.
+    pub uninstall_icon: String,
+}
+
+impl AppInfo {
+    /// The name Windows' list of installed apps shows for it, as Inno would register it.
+    pub fn display_name(&self) -> Option<String> {
+        [&self.uninstall_name, &self.ver_name, &self.name].into_iter().find(|s| !s.trim().is_empty() && !s.contains('{')).map(|s| s.trim().to_string())
+    }
+}
+
+/// The header's first strings, in Inno 5.5's order: AppName, AppVerName, AppId, AppCopyright,
+/// AppPublisher, AppPublisherURL, AppSupportPhone, AppSupportURL, AppUpdatesURL, AppVersion,
+/// DefaultDirName, DefaultGroupName, BaseFilename, UninstallFilesDir, UninstallDisplayName,
+/// UninstallDisplayIcon, ...
+fn app_info(b: &[u8]) -> Result<AppInfo> {
+    let mut r = Reader { b, o: 0 };
+    let s: Vec<String> = (0..16).map(|_| r.wstr()).collect::<Result<_>>()?;
+    Ok(AppInfo {
+        name: s[0].clone(),
+        ver_name: s[1].clone(),
+        publisher: s[4].clone(),
+        version: s[9].clone(),
+        group: s[11].clone(),
+        uninstall_name: s[14].clone(),
+        uninstall_icon: s[15].clone(),
+    })
 }
 
 /// The 31st header string: the compiled `[Code]` section (Pascal Script bytecode).
@@ -429,7 +472,8 @@ impl Setup {
         // Types and components only matter for running the install script; don't fail on them.
         let (types, components) = find_component_tables(&b1, counts[3], counts[4]).unwrap_or_default();
         let code = compiled_code(&b1)?;
-        Ok(Setup { version, files, types, components, icons, code, data, data_offset, blob })
+        let app = app_info(&b1).unwrap_or_default();
+        Ok(Setup { version, files, types, components, icons, code, app, data, data_offset, blob })
     }
 
     /// Identifies this installer's contents (for caches).

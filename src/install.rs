@@ -90,8 +90,16 @@ pub struct InstallOptions {
     pub runtimes: bool,
     /// Keep RAM use to about this many bytes (see `memlimit`). Callers also set `heavy_jobs` to 1.
     pub memory_limit: Option<u64>,
+    /// Make the uninstaller: `uninstall.exe` in the game folder and an entry in Windows' list of
+    /// installed apps (see `uninstall`).
+    pub uninstaller: bool,
+    /// After a successful install, create the installer's desktop shortcuts and Start menu
+    /// entries.
+    pub desktop_shortcut: bool,
+    pub start_menu: bool,
 }
 
+#[derive(Default)]
 pub struct InstallReport {
     pub summary: Summary,
     pub codec_dir: PathBuf,
@@ -108,6 +116,16 @@ pub struct InstallReport {
     /// Desktop shortcuts the original installer would create (not created yet: see
     /// `setup_script::create_shortcuts`).
     pub shortcuts: Vec<crate::setup_script::Shortcut>,
+    /// The installer's Start menu entries for this selection (made if `start_menu` is set).
+    pub start_menu: Vec<crate::setup_script::Shortcut>,
+    /// The shortcuts made (desktop and Start menu).
+    pub shortcuts_made: Vec<PathBuf>,
+    /// The uninstaller put in the game folder.
+    pub uninstaller: Option<PathBuf>,
+    /// The game's name and Start menu folder, as the installer gives them.
+    pub app: Option<crate::inno::AppInfo>,
+    /// Only parts were added to a game that was already installed.
+    pub added_parts: bool,
     /// What happened to each runtime installed after the game (one line each).
     pub runtimes: Vec<String>,
 }
@@ -416,7 +434,67 @@ fn run_role(
     extract::run(reopened, cfg, &eopts, sink)
 }
 
+/// Installs a repack into `opts.target_dir` (see `install_game`), then makes the shortcuts and
+/// the uninstaller.
 pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
+    let target = std::path::absolute(&opts.target_dir).unwrap_or_else(|_| opts.target_dir.clone());
+    // What the folder holds already: the uninstaller removes only what the install adds.
+    let before = (opts.uninstaller && !opts.dry_run).then(|| crate::uninstall::before_install(&target, &opts.cache_dir));
+    let mut report = install_game(opts, sink)?;
+    if opts.dry_run || report.summary.cancelled {
+        return Ok(report);
+    }
+    let app = report.app.clone().unwrap_or_default();
+    let name = app.display_name().unwrap_or_else(|| target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Game".into()));
+    let mut made = Vec::new();
+    let mut made_dirs = Vec::new();
+    if report.summary.problems.is_empty() && !report.added_parts {
+        if opts.desktop_shortcut && !report.shortcuts.is_empty() {
+            match crate::setup_script::create_desktop_shortcuts(&report.shortcuts) {
+                Ok(links) => made.extend(links),
+                Err(e) => report.summary.problems.push(format!("the desktop shortcut: {e:#}")),
+            }
+        }
+        if opts.start_menu && !report.start_menu.is_empty() {
+            let group = Some(app.group.trim()).filter(|g| !g.is_empty() && !g.contains('{')).map_or_else(|| name.clone(), str::to_string);
+            match crate::setup_script::create_start_menu_shortcuts(&group, &report.start_menu) {
+                Ok((links, dirs)) => {
+                    made.extend(links);
+                    made_dirs = dirs;
+                }
+                Err(e) => report.summary.problems.push(format!("the Start menu entry: {e:#}")),
+            }
+        }
+    }
+    report.shortcuts_made = made.clone();
+    // When parts are added to a game installed some other way (FitGirl's own installer), that
+    // game's own uninstaller is left as it is.
+    if let Some(before) = before
+        && (!report.added_parts || target.join(crate::uninstall::LIST).is_file())
+    {
+        let icon = app
+            .uninstall_icon
+            .strip_prefix("{app}")
+            .map(|rest| target.join(rest.trim_start_matches('\\')))
+            .filter(|p| p.is_file())
+            .or_else(|| report.shortcuts.iter().chain(&report.start_menu).map(|s| s.target.clone()).next());
+        let details = crate::uninstall::Details { name, publisher: app.publisher.clone(), version: app.version.clone(), icon };
+        let made_uninstaller = crate::helpers::find(&[crate::uninstall::PROGRAM], &opts.host_dir)
+            .and_then(|program| crate::uninstall::create(&target, &before, &details, &made, &made_dirs, &program, true));
+        match made_uninstaller {
+            Ok(notes) => {
+                report.summary.notes.extend(notes);
+                report.uninstaller = Some(target.join(crate::uninstall::EXE));
+                crate::uninstall::forget_before(&target, &opts.cache_dir);
+            }
+            Err(e) => report.summary.problems.push(format!("the uninstaller: {e:#}")),
+        }
+    }
+    Ok(report)
+}
+
+/// The install itself.
+fn install_game(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
     sink(Event::Phase { name: "Scanning".into() });
     let first = scan(&opts.repack_dir, None)?;
     // Preferred: run the installer's own install script (exact result, any post-processing).
@@ -474,7 +552,7 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
             files_md5: 0,
             script_steps: 0,
             shortcuts: Vec::new(),
-        runtimes: Vec::new(),
+            ..Default::default()
         });
     }
 
@@ -590,8 +668,8 @@ pub fn install(opts: &InstallOptions, sink: &Sink) -> Result<InstallReport> {
         setup_files,
         files_md5,
         script_steps: 0,
-        shortcuts: Vec::new(),
-        runtimes: Vec::new(),
+        app: inno.as_ref().map(|i| i.app.clone()),
+        ..Default::default()
     })
 }
 
@@ -868,6 +946,7 @@ fn run_scripted(
     }
     let _ = std::fs::remove_dir_all(&run_dir);
     let shortcuts = ss::desktop_shortcuts(inno, &selected, &target).into_iter().filter(|s| s.target.is_file()).collect();
+    let start_menu = ss::start_menu_shortcuts(inno, &selected, &target).into_iter().filter(|s| s.target.is_file()).collect();
     sink(Event::Phase { name: if summary.cancelled { "Cancelled".into() } else { "Done".into() } });
     Ok(InstallReport {
         summary,
@@ -879,7 +958,10 @@ fn run_scripted(
         files_md5,
         script_steps,
         shortcuts,
-        runtimes: Vec::new(),
+        start_menu,
+        app: Some(inno.app.clone()),
+        added_parts: parts.only_optional,
+        ..Default::default()
     })
 }
 
@@ -910,8 +992,7 @@ fn empty_report(codec_dir: PathBuf) -> InstallReport {
         setup_files: 0,
         files_md5: 0,
         script_steps: 0,
-        shortcuts: Vec::new(),
-        runtimes: Vec::new(),
+        ..Default::default()
     }
 }
 

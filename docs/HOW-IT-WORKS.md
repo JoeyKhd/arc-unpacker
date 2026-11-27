@@ -93,6 +93,16 @@ arc-unpack reads the same information: the runtime components a default install 
 
 `arc-unpack runtimes "<repack>"` lists them for a repack (only setup.exe is needed); `--install` installs the missing ones.
 
+## Uninstaller
+
+Every install gets `uninstall.exe` and its list `uninstall.dat` in the game folder, and an entry in Windows' list of installed apps (Settings > Apps; for all users when installed as administrator). arc-unpack's own uninstaller is used rather than the repack's `unins000.exe`, which needs a log in its exact Inno Setup build's format and runs the repack's script and DLLs.
+
+- **What it removes:** the files and folders the install added. The game folder is listed before installing (kept until an install into it succeeds, so a retry after a stopped one still counts what that left) and again afterwards; the difference is the list. The shortcuts made, and Start menu folders made for them, are listed too.
+- **What it keeps:** files that were in the folder before, and files the game makes later (saves, settings). Folders go once they are empty; the last dialog says what's left and offers to open the folder.
+- **How it runs:** it copies itself to the temporary folder and runs from there, so the copy in the game folder can be removed too, and asks for administrator rights only if the entry or shortcuts are for all users. `/S` uninstalls without asking (as `QuietUninstallString`).
+- **Adding parts** to a game it installed extends its list; a game installed by FitGirl's own installer keeps that installer's uninstaller.
+- **Runtimes** (DirectX, Visual C++) are never removed: other programs may use them.
+
 ## Safety
 
 - **unarc.dll only where needed.** FreeArc's old unarc.dll handles archives that need its built-in codecs. On Cities: Skylines' bonus content it corrupted a PDF in more than half the runs, even alone, while arc-unpack's own engine decoded the same block correctly every time; that archive only went to unarc.dll for its `4x4` block, which arc-unpack now decodes itself. Each unarc.dll job runs in its own working folder (hard links to the codec folder), because some codecs keep fixed-name temp files where they run.
@@ -125,6 +135,8 @@ To measure a single codec: run `test` or `install` with `ARC_UNPACK_TEE_DIR=<fol
 | `--no-verify` | `install`: skip the MD5 check of the downloaded archives. |
 | `--no-script` | `install`: don't run the installer's script; extract every archive into the target. |
 | `--runtimes` | `install`: afterwards, install the runtimes the game needs that this PC is missing (downloads them; see Runtimes). |
+| `--shortcuts` | `install`: create the installer's desktop shortcut and Start menu entry. |
+| `--no-uninstaller` | `install`: don't add an uninstaller (see Uninstaller). |
 | `-j, --jobs N` | Jobs at once. Light jobs fill in around heavy ones. |
 | `--heavy-jobs N` | Memory-heavy jobs at once, machine-wide (default 2). The first always runs; the others start only while at least a quarter of RAM (and 8 GB) is free. |
 | `--memory-limit GB` | `install`: keep RAM use to about this much (see *A RAM limit you set*). One memory-heavy job at a time. Slower. |
@@ -162,6 +174,7 @@ src/setup_script.rs    the Inno Setup / ISDone functions an install script calls
 src/inno.rs            read-only Inno Setup 5.5 Unicode reader (files, components, icons, compiled code)
 src/install.rs         one-step install: script run, early extraction, MD5 checks
 src/runtimes.rs        runtimes a game needs (DirectX, Visual C++, ...): detection, download, install
+src/uninstall.rs       the uninstaller's list, the Settings > Apps entry, the removal
 src/format.rs          FreeArc container: footer, control blocks, directory, varints
 src/extract.rs         scheduling, splitting, writer pool, watchdog, path safety
 src/stage.rs           stage runners: built-ins, external programs, CLS hosts
@@ -172,6 +185,7 @@ src/guard.rs           job objects, dialog handling, cross-process locks, elevat
 xtool-timer/           the xtool timer plugin (its own tiny crate)
 src/events.rs          progress events (terminal and window are listeners)
 src/bin/arc-unpack-gui.rs   the window (egui)
+src/bin/arc-unpack-uninstall.rs   the uninstaller put in every game folder
 src/bin/cls-host.rs    CLS DLL host (x86 + x64)
 src/bin/unarc-host.rs  unarc.dll host (x86)
 tests/synthetic.rs     builds FreeArc archives byte by byte and runs the real binary

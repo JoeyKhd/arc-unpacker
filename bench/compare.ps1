@@ -252,15 +252,18 @@ function Read-Manifest($path) {
     $m
 }
 
+# The installers' own uninstallers (Inno's unins000.*, arc-unpack's uninstall.*) aren't game files.
+function Test-Uninstaller($k) { $k -in 'unins000.exe', 'unins000.dat', 'uninstall.exe', 'uninstall.dat' }
+
 function Compare-Manifests($origPath, $arcPath) {
     $a = Read-Manifest $origPath; $b = Read-Manifest $arcPath
     if ($a.Count -eq 0) { return $null }
     $same = 0; $differ = @(); $onlyOrig = @(); $onlyArc = @()
     foreach ($k in $a.Keys) {
-        if ($k -eq 'unins000.exe' -or $k -eq 'unins000.dat') { continue }
+        if (Test-Uninstaller $k) { continue }
         if (-not $b.ContainsKey($k)) { $onlyOrig += $k } elseif ($a[$k][1] -eq $b[$k][1]) { $same++ } else { $differ += $k }
     }
-    foreach ($k in $b.Keys) { if (-not $a.ContainsKey($k)) { $onlyArc += $k } }
+    foreach ($k in $b.Keys) { if (-not $a.ContainsKey($k) -and -not (Test-Uninstaller $k)) { $onlyArc += $k } }
     [ordered]@{
         identical = $same; differ = $differ.Count; only_original = $onlyOrig.Count; only_arc_unpack = $onlyArc.Count
         examples = (@($differ | Select-Object -First 3) + @($onlyOrig | Select-Object -First 3 | ForEach-Object { "only original: $_" }) + @($onlyArc | Select-Object -First 3 | ForEach-Object { "only arc-unpack: $_" })) -join '; '
@@ -270,7 +273,7 @@ function Compare-Manifests($origPath, $arcPath) {
 function Get-ManifestTotals($path) {
     $m = Read-Manifest $path
     $files = 0; $bytes = [int64]0
-    foreach ($k in $m.Keys) { if ($k -eq 'unins000.exe' -or $k -eq 'unins000.dat') { continue }; $files++; $bytes += $m[$k][0] }
+    foreach ($k in $m.Keys) { if (Test-Uninstaller $k) { continue }; $files++; $bytes += $m[$k][0] }
     @{ files = $files; bytes = $bytes }
 }
 
@@ -342,6 +345,16 @@ foreach ($repack in $Repacks) {
         $tot = Get-ManifestTotals $arcManifest
         $res.arc_unpack.files = $tot.files; $res.arc_unpack.bytes = $tot.bytes
         $res.compare = Compare-Manifests $origManifest $arcManifest
+        # Clean up with arc-unpack's own uninstaller (which tests it), then delete what's left.
+        $un = Join-Path $targetA 'uninstall.exe'
+        if (Test-Path -LiteralPath $un) {
+            $u = Start-Process -FilePath $un -ArgumentList '/S' -PassThru -Wait
+            Start-Sleep -Seconds 4
+            $left = @(Get-ChildItem -LiteralPath $targetA -Recurse -File -Force -ErrorAction SilentlyContinue)
+            $res.arc_unpack.uninstall = if (-not (Test-Path -LiteralPath $targetA)) { 'removed everything' } else { "exit $($u.ExitCode), left $($left.Count) files: $((@($left | Select-Object -First 3 | ForEach-Object { $_.FullName.Substring($targetA.Length + 1) })) -join ', ')" }
+        } else {
+            $res.arc_unpack.uninstall = 'no uninstaller'
+        }
         Remove-Item -LiteralPath $targetA -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath "$targetA.arc-unpack-staging" -Recurse -Force -ErrorAction SilentlyContinue
         $res | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Out "result-$tag.json") -Encoding UTF8

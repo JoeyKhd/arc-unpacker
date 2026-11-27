@@ -393,7 +393,7 @@ fn count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -501,11 +501,12 @@ fn analyze(repack: PathBuf) -> Result<Analysis, String> {
 }
 
 /// Creates the installer's desktop shortcuts: "Created <names> on the desktop", or why not.
-fn make_shortcuts(shortcuts: &[ss::Shortcut]) -> Result<String, String> {
-    match ss::create_desktop_shortcuts(shortcuts) {
-        Ok(made) => Ok(format!("Created {} on the desktop", made.iter().filter_map(|p| p.file_stem()).map(|n| n.to_string_lossy()).collect::<Vec<_>>().join(", "))),
-        Err(e) => Err(format!("{e:#}")),
-    }
+/// Creates the installer's desktop shortcuts after the install (and adds them to the game's
+/// uninstall list, so uninstalling removes them too).
+fn make_shortcuts(shortcuts: &[ss::Shortcut], game: &Path) -> Result<String, String> {
+    let made = ss::create_desktop_shortcuts(shortcuts).map_err(|e| format!("{e:#}"))?;
+    let _ = arc_unpack::uninstall::add_shortcuts(game, &made);
+    Ok(format!("Created {} on the desktop", made.iter().filter_map(|p| p.file_stem()).map(|n| n.to_string_lossy()).collect::<Vec<_>>().join(", ")))
 }
 
 /// "1 step" / "35 steps".
@@ -640,8 +641,11 @@ struct App {
     progress: Progress,
     running: Option<Running>,
     outcome: Option<Outcome>,
-    /// "Create a desktop shortcut" (made once the install succeeded).
+    /// "Create a desktop shortcut" and "Create a Start menu entry" (made once the install
+    /// succeeded), and whether the desktop one was asked for in the install that ran.
     create_shortcut: bool,
+    start_menu: bool,
+    desktop_asked: bool,
     shortcut_result: Option<Result<String, String>>,
     cpu: f64,
     ram: (u64, u64),
@@ -681,6 +685,8 @@ impl App {
             running: None,
             outcome: None,
             create_shortcut: true,
+            start_menu: true,
+            desktop_asked: false,
             shortcut_result: None,
             cpu: 0.0,
             ram: (0, 0),
@@ -828,7 +834,11 @@ impl App {
             components: script.then(|| self.selected.iter().cloned().collect()),
             runtimes: self.install_runtimes && self.adding.is_none(),
             memory_limit: self.limit_ram.then(|| (self.ram_limit_gb.max(1) as u64) << 30),
+            uninstaller: true,
+            desktop_shortcut: self.create_shortcut && self.adding.is_none(),
+            start_menu: self.start_menu && self.adding.is_none(),
         };
+        self.desktop_asked = opts.desktop_shortcut;
         let done_ctx = ctx.clone();
         std::thread::spawn(move || {
             let r = install::install(&opts, &sink);
@@ -897,15 +907,6 @@ impl App {
                 Err(e) => Outcome::Failed(format!("{e:#}")),
             });
             self.running = None;
-            if let Some(Outcome::Done { report, .. }) = &self.outcome
-                && self.create_shortcut
-                && self.adding.is_none()
-                && report.summary.problems.is_empty()
-                && !report.summary.cancelled
-                && !report.shortcuts.is_empty()
-            {
-                self.shortcut_result = Some(make_shortcuts(&report.shortcuts));
-            }
         }
     }
 
@@ -1193,9 +1194,12 @@ impl App {
         }
 
         // Options, as the repack's own installer offers them.
-        let shortcuts = match &a.inno {
-            Some(inno) if !adding => ss::desktop_shortcuts(inno, &self.selected, Path::new(self.target.trim())).len(),
-            _ => 0,
+        let (shortcuts, menu_entries) = match &a.inno {
+            Some(inno) if !adding => {
+                let app = Path::new(self.target.trim());
+                (ss::desktop_shortcuts(inno, &self.selected, app).len(), ss::start_menu_shortcuts(inno, &self.selected, app).len())
+            }
+            _ => (0, 0),
         };
         // Runtimes are only offered when this PC lacks something the game needs (most PCs have them all).
         let runtimes = if adding { Vec::new() } else { arc_unpack::runtimes::missing(&a.runtimes) };
@@ -1204,6 +1208,9 @@ impl App {
             ui.label(sb("Options", 15.0));
             if shortcuts > 0 {
                 ui.checkbox(&mut self.create_shortcut, if shortcuts == 1 { "Create a desktop shortcut" } else { "Create desktop shortcuts" });
+            }
+            if menu_entries > 0 {
+                ui.checkbox(&mut self.start_menu, "Create a Start menu entry");
             }
             if !runtimes.is_empty() {
                 let names = arc_unpack::runtimes::labels(&runtimes);
@@ -1389,13 +1396,12 @@ impl App {
             ui.label(&text);
         }
         ui.horizontal(|ui| {
-            if let Some(r) = &self.running {
-                if p.phase == "Verifying archives"
-                    && !r.skip_verify.load(Ordering::Relaxed)
-                    && ui.button("Skip archive check").on_hover_text("Stop checking the downloaded files and start installing now.").clicked()
-                {
-                    r.skip_verify.store(true, Ordering::Relaxed);
-                }
+            if let Some(r) = &self.running
+                && p.phase == "Verifying archives"
+                && !r.skip_verify.load(Ordering::Relaxed)
+                && ui.button("Skip archive check").on_hover_text("Stop checking the downloaded files and start installing now.").clicked()
+            {
+                r.skip_verify.store(true, Ordering::Relaxed);
             }
             ui.label(
                 RichText::new(format!("CPU {:.0}% · RAM {} of {}", self.cpu * 100.0, human(self.ram.0), human(self.ram.1))).weak(),
@@ -1465,15 +1471,31 @@ impl App {
                 for line in &report.runtimes {
                     ui.colored_label(OK, line);
                 }
+                // Where the shortcuts went, and how to uninstall.
+                let in_menu = |p: &PathBuf| p.to_string_lossy().to_lowercase().contains("\\start menu\\");
+                let places: Vec<&str> = [
+                    report.shortcuts_made.iter().any(|p| !in_menu(p)).then_some("on the desktop"),
+                    report.shortcuts_made.iter().any(in_menu).then_some("in the Start menu"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if !places.is_empty() {
+                    status(ui, OK, format!("Shortcut created {}", places.join(" and ")));
+                }
+                if report.uninstaller.is_some() {
+                    ui.label(RichText::new("To uninstall it: Settings → Apps, or uninstall.exe in the game folder").color(MUTED));
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button("Open game folder").clicked() {
                         let _ = std::process::Command::new("explorer").arg(self.target.trim()).spawn();
                     }
-                    if ok && !report.shortcuts.is_empty() && self.shortcut_result.is_none() {
+                    // A desktop shortcut that wasn't asked for can still be made.
+                    if ok && !self.desktop_asked && !report.shortcuts.is_empty() && self.shortcut_result.is_none() {
                         let label = if report.shortcuts.len() == 1 { "Create desktop shortcut" } else { "Create desktop shortcuts" };
                         if ui.button(label).clicked() {
-                            self.shortcut_result = Some(make_shortcuts(&report.shortcuts));
+                            self.shortcut_result = Some(make_shortcuts(&report.shortcuts, Path::new(self.target.trim())));
                         }
                     }
                 });
