@@ -88,9 +88,11 @@ pub fn default_components(setup: &Setup, repack_files: &[String]) -> BTreeSet<St
     with_exclusive_choices(setup, out)
 }
 
-/// Inno Setup keeps one choice of a "pick one" group (components with the exclusive flag, such
-/// as FitGirl's game language) ticked whenever the group's parent is ticked: the first one,
-/// unless another is ticked already. `/COMPONENTS=text,local` installs the first language.
+/// Inno Setup keeps exactly one choice of a "pick one" group (components with the exclusive
+/// flag, such as FitGirl's game language) ticked whenever the group's parent is ticked: the first
+/// one, unless another is ticked already, and of several ticked ones the first. Both measured:
+/// `/COMPONENTS=text,local` installs the first language (Ancient Wars: Sparta HD), and
+/// `/COMPONENTS=text,local,local\eng,local\rus,...` installs only English (Call of Duty: Black Ops).
 pub fn with_exclusive_choices(setup: &Setup, selected: BTreeSet<String>) -> BTreeSet<String> {
     exclusive_choices_of(&setup.components, selected)
 }
@@ -112,10 +114,19 @@ fn exclusive_choices_of(components: &[crate::inno::Component], mut selected: BTr
             .filter(|(name, exclusive)| *exclusive && name.strip_prefix(&prefix).is_some_and(|rest| !rest.contains('\\')))
             .map(|(name, _)| name)
             .collect();
-        if let Some(first) = group.first()
-            && !group.iter().any(|name| selected.contains(*name))
-        {
-            selected.insert((*first).clone());
+        let ticked: Vec<&String> = group.iter().copied().filter(|name| selected.contains(*name)).collect();
+        match ticked.as_slice() {
+            [] => {
+                if let Some(first) = group.first() {
+                    selected.insert((*first).clone());
+                }
+            }
+            [_] => {}
+            [_keep, rest @ ..] => {
+                for name in rest {
+                    selected.remove(*name);
+                }
+            }
         }
     }
     selected
@@ -495,7 +506,22 @@ impl Host for InnoHost<'_> {
             }
             "ISTASKSELECTED" => yes(false),
             "WIZARDSILENT" => yes(true),
-            "FILEEXISTS" => yes(Path::new(&s(0)).is_file()),
+            "FILEEXISTS" => {
+                let path = s(0);
+                // A plan doesn't extract or run anything, so files a successful install makes in
+                // the game folder don't exist yet. Scripts that check their own results (FitGirl's
+                // "_Redist\QuickSFV.good" self-check in older repacks) would take their failure
+                // path, and the plan would end there: no early extraction at all.
+                let inside = |root: &Path| normalize(Path::new(&path)).zip(normalize(root)).is_some_and(|(p, r)| starts_with_ci(&p, &r));
+                let in_app = self.dry && inside(&self.folders.app);
+                // FitGirl's "Checking folder name..." step: check.bat writes {src}\fg-99.bin, the
+                // script fails without it (Max Payne 3). Only that name: other files a script looks
+                // for in the repack folder are downloaded archives, which really may be missing.
+                let sentinel = self.dry
+                    && inside(&self.folders.src)
+                    && Path::new(&path).file_name().is_some_and(|n| n.eq_ignore_ascii_case("fg-99.bin"));
+                yes(in_app || sentinel || Path::new(&path).is_file())
+            }
             "DIREXISTS" => yes(Path::new(&s(0)).is_dir()),
             "DELETEFILE" => match self.writable(&s(0)) {
                 Some(p) => yes(std::fs::remove_file(p).is_ok()),
@@ -1189,6 +1215,8 @@ mod tests {
         let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
         // Ancient Wars: Sparta HD with /COMPONENTS=text,local: Inno Setup installs English.
         assert_eq!(exclusive_choices_of(&comps, sel(&["text", "local"])), sel(&["text", "local", r"local\eng"]));
+        // Of several ticked choices only the first stays, like Inno's radio buttons.
+        assert_eq!(exclusive_choices_of(&comps, sel(&["text", "local", r"local\rus", r"local\eng"])), sel(&["text", "local", r"local\eng"]));
         // A choice already made stays; an unticked group stays empty.
         assert_eq!(exclusive_choices_of(&comps, sel(&["text", "local", r"local\rus"])), sel(&["text", "local", r"local\rus"]));
         assert_eq!(exclusive_choices_of(&comps, sel(&["text"])), sel(&["text"]));
