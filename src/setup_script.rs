@@ -23,6 +23,9 @@ pub enum Step {
     Extract { archive: PathBuf, out: PathBuf, cfg: PathBuf, base: Option<String> },
     /// Run `program` with the command-line tail `args` in `dir`.
     Exec { program: PathBuf, args: String, dir: PathBuf },
+    /// Extract the RAR archive `archive` into `out` with the installer's `unrar` (Unrar.dll), as
+    /// ISDone's ISRarExtract does (older repacks rebuild a RAR file and unpack it).
+    Rar { archive: PathBuf, out: PathBuf, unrar: PathBuf, password: String },
 }
 
 impl std::fmt::Display for Step {
@@ -36,6 +39,7 @@ impl std::fmt::Display for Step {
                 let name = program.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
                 write!(f, "run {name}{args} (in {})", dir.display())
             }
+            Step::Rar { archive, out, .. } => write!(f, "unrar {} -> {}", archive.display(), out.display()),
         }
     }
 }
@@ -447,6 +451,7 @@ impl Host for InnoHost<'_> {
             "WIZARDFORM" | "MAINFORM" | "GETCMDTAIL" => (0, true),
             "EXTRACTTEMPORARYFILE" => (1, false),
             "dll:ISARCEXTRACT" => (10, true),
+            "dll:ISRAREXTRACT" => (6, true),
             "dll:ISEXEC" => (8, true),
             "dll:ISDONEINIT" => (8, true),
             "dll:ISDONESTOP" => (0, true),
@@ -617,6 +622,32 @@ impl Host for InnoHost<'_> {
             "dll:EXEC2" => {
                 let tmp = self.folders.tmp.to_string_lossy().into_owned();
                 yes(self.exec(&s(0), &s(1), &tmp)?)
+            }
+            "dll:ISRAREXTRACT" => {
+                // ISRarExtract(CurComponent, PctOfTotal, InName, OutPath, DeleteInFile, Password).
+                if let (n @ 1..=96, Some(masks)) = (int(0), self.isdone_components) {
+                    let bit = (n - 1) as usize;
+                    if masks[bit / 32] & (1 << (bit % 32)) == 0 {
+                        return Ok(yes(true));
+                    }
+                }
+                let (archive, dest, password) = (s(2), s(3), s(5));
+                let Some(out_dir) = self.writable(&dest) else {
+                    self.refuse(format!("unpacking into {dest}"));
+                    return Ok(yes(false));
+                };
+                let unrar = self.folders.tmp.join("Unrar.dll");
+                let ok = self.step(Step::Rar { archive: PathBuf::from(&archive), out: out_dir, unrar, password })?;
+                if ok && int(4) != 0 {
+                    // DeleteInFile: only files the install itself produced, never the downloads.
+                    match self.writable(&archive) {
+                        Some(p) => {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        None => self.messages.push(format!("kept {archive} (the script asked to delete it after unpacking)")),
+                    }
+                }
+                yes(ok)
             }
             "dll:ISARCEXTRACT" => {
                 // CurComponent: ISDone extracts an archive of component n only if bit n-1 of the

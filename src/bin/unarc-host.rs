@@ -42,8 +42,88 @@ unsafe extern "system" fn callback(what: *const c_char, n1: i32, _n2: i32, s: *c
     }
 }
 
+/// `unarc-host --rar <Unrar.dll> <archive> <out dir> [password]`: extracts a RAR archive with
+/// the repack's own Unrar.dll (RARLAB's unrar.dll API, as ISDone's ISRarExtract does).
+/// Prints "file <name>" per file; exits 1 on an error, with the reason on stderr.
+fn rar(args: &[String]) -> ! {
+    use std::os::windows::ffi::OsStrExt;
+    type OpenEx = unsafe extern "system" fn(data: *mut u8) -> isize;
+    type Close = unsafe extern "system" fn(h: isize) -> i32;
+    type ReadHeaderEx = unsafe extern "system" fn(h: isize, header: *mut u8) -> i32;
+    type ProcessFileW = unsafe extern "system" fn(h: isize, op: i32, dest_path: *const u16, dest_name: *const u16) -> i32;
+    type SetPassword = unsafe extern "system" fn(h: isize, password: *const c_char);
+    const RAR_OM_EXTRACT: u32 = 1;
+    const RAR_EXTRACT: i32 = 2;
+    const ERAR_END_ARCHIVE: i32 = 10;
+    let fail = |msg: String| -> ! {
+        eprintln!("unarc-host: {msg}");
+        std::process::exit(1)
+    };
+    if args.len() < 3 {
+        fail("usage: unarc-host --rar <Unrar.dll> <archive> <out dir> [password]".into());
+    }
+    let wide = |s: &str| -> Vec<u16> { std::ffi::OsStr::new(s).encode_wide().chain([0]).collect() };
+    let lib = unsafe { libloading::Library::new(&args[0]) }.unwrap_or_else(|e| fail(format!("cannot load {}: {e}", args[0])));
+    let (open, close, read, process, set_password) = unsafe {
+        let get = |name: &[u8]| lib.get::<*const ()>(name).map(|s| *s).unwrap_or_else(|e| fail(format!("{}: {e}", String::from_utf8_lossy(name))));
+        (
+            std::mem::transmute::<*const (), OpenEx>(get(b"RAROpenArchiveEx\0")),
+            std::mem::transmute::<*const (), Close>(get(b"RARCloseArchive\0")),
+            std::mem::transmute::<*const (), ReadHeaderEx>(get(b"RARReadHeaderEx\0")),
+            std::mem::transmute::<*const (), ProcessFileW>(get(b"RARProcessFileW\0")),
+            std::mem::transmute::<*const (), SetPassword>(get(b"RARSetPassword\0")),
+        )
+    };
+    let archive = wide(&args[1]);
+    let dest = wide(&args[2]);
+    // RAROpenArchiveDataEx (32-bit): ArcName, ArcNameW, OpenMode, OpenResult, ... The rest stays
+    // zero; the buffer is larger than any version of the structure.
+    let mut open_data = vec![0u8; 512];
+    open_data[4..8].copy_from_slice(&(archive.as_ptr() as u32).to_le_bytes());
+    open_data[8..12].copy_from_slice(&RAR_OM_EXTRACT.to_le_bytes());
+    let h = unsafe { open(open_data.as_mut_ptr()) };
+    let open_result = u32::from_le_bytes(open_data[12..16].try_into().unwrap());
+    if h == 0 || open_result != 0 {
+        fail(format!("can't open {} as a RAR archive (error {open_result})", args[1]));
+    }
+    if let Some(pw) = args.get(3).filter(|p| !p.is_empty()) {
+        let pw = CString::new(pw.as_str()).unwrap_or_default();
+        unsafe { set_password(h, pw.as_ptr()) };
+    }
+    // RARHeaderDataEx: ArcName[1024], ArcNameW[1024], FileName[1024], FileNameW[1024], ...
+    let mut header = vec![0u8; 16384];
+    let mut out = std::io::stdout().lock();
+    let mut files = 0u64;
+    loop {
+        match unsafe { read(h, header.as_mut_ptr()) } {
+            0 => {}
+            ERAR_END_ARCHIVE => break,
+            e => {
+                unsafe { close(h) };
+                fail(format!("reading {}: unrar error {e}", args[1]));
+            }
+        }
+        let name: Vec<u16> = header[4096..4096 + 2048].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+        let name = String::from_utf16_lossy(&name);
+        let rc = unsafe { process(h, RAR_EXTRACT, dest.as_ptr(), std::ptr::null()) };
+        if rc != 0 {
+            unsafe { close(h) };
+            fail(format!("extracting {name} from {}: unrar error {rc}", args[1]));
+        }
+        files += 1;
+        let _ = writeln!(out, "file {name}");
+    }
+    unsafe { close(h) };
+    let _ = writeln!(out, "done {files}");
+    let _ = out.flush();
+    std::process::exit(0)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--rar") {
+        rar(&args[1..]);
+    }
     if args.len() < 3 || args.len() > 14 {
         eprintln!("usage: unarc-host <unarc.dll> <x|t> <archive> [options...]   (at most 11 options)");
         std::process::exit(64);

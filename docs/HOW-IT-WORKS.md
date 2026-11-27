@@ -8,6 +8,8 @@ arc-unpack includes a small Pascal Script interpreter ([`src/pascal.rs`](../src/
 
 - **Archive extraction** (ISDone's `ISArcExtract`) goes through arc-unpack's parallel engine.
 - **The repack's own tools** (`ISExec`, `Exec`) run exactly as the script says, in the same order, without windows.
+- **RAR archives** some older repacks rebuild and then unpack (ISDone's `ISRarExtract`) go through the installer's own `Unrar.dll`, in a 32-bit helper like `unarc.dll`.
+- **Codec settings** the script hands to ISDone (`PrecompInit`'s temp folder and memory) are written into the installer's `CLS.ini`, as ISDone does.
 - **The installer's window**, progress bars and music are accepted and ignored.
 
 The script runs under rules:

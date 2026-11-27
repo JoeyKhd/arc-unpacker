@@ -1269,6 +1269,38 @@ impl ScriptRunner<'_> {
         Ok(ok)
     }
 
+    /// ISRarExtract: unpacks a RAR archive with the installer's Unrar.dll, through the 32-bit
+    /// helper (Unrar.dll is 32-bit, like unarc.dll).
+    fn unrar(&mut self, archive: &Path, out: &Path, unrar: &Path, password: &str) -> Result<bool> {
+        if !unrar.is_file() {
+            events::warn(self.sink, format!("{}: the installer has no Unrar.dll", archive.display()));
+            return Ok(false);
+        }
+        let host = crate::stage::helper_exe(&["unarc-host-x86.exe"], &self.opts.host_dir)?;
+        std::fs::create_dir_all(out)?;
+        // (A trailing separator: Unrar.dll treats the destination as a folder.)
+        let dest = format!("{}\\", out.display().to_string().trim_end_matches(['\\', '/']));
+        let mut cmd = std::process::Command::new(&host);
+        cmd.arg("--rar").arg(unrar).arg(archive).arg(&dest);
+        if !password.is_empty() {
+            cmd.arg(password);
+        }
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
+        let child = cmd.spawn().with_context(|| format!("start {}", host.display()))?;
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let files = stdout.lines().filter(|l| l.starts_with("file ")).count();
+        if !output.status.success() {
+            let why = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            events::warn(self.sink, format!("unrar {}: {why}", archive.display()));
+            return Ok(false);
+        }
+        let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        events::info(self.sink, format!("{name} (RAR): {files} files"));
+        Ok(true)
+    }
+
     fn exec(&mut self, program: &Path, args: &str, dir: &Path) -> Result<bool> {
         let mut cmd;
         let is_batch = program.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
@@ -1322,6 +1354,7 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         let ok = match step {
             Step::Extract { archive, out, cfg, base } => self.extract(archive, out, cfg, base.as_deref())?,
             Step::Exec { program, args, dir } => self.exec(program, args, dir)?,
+            Step::Rar { archive, out, unrar, password } => self.unrar(archive, out, unrar, password)?,
         };
         let secs = started.elapsed().as_secs_f64();
         events::info(self.sink, format!("step {}: {step} ({secs:.1}s){}", self.n, if ok { "" } else { " FAILED" }));
@@ -1341,7 +1374,7 @@ fn step_label(step: &crate::setup_script::Step) -> String {
     use crate::setup_script::Step;
     let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match step {
-        Step::Extract { archive, .. } => format!("Unpacking {}", name(archive)),
+        Step::Extract { archive, .. } | Step::Rar { archive, .. } => format!("Unpacking {}", name(archive)),
         Step::Exec { program, args, .. } => {
             // `cmd /C tool.exe ...`: name the tool, not cmd.
             let tool = args
