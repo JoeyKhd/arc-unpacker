@@ -225,6 +225,7 @@ dependencies = [
  "libloading 0.9.1",
  "lz4-sys",
  "lzma-rs",
+ "lzma-rust2",
  "md5",
  "png",
  "raw-window-handle",

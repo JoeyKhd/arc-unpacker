@@ -12,6 +12,9 @@ eframe = { version = "0.37.0", default-features = false, features = ["default_fo
 indicatif = "0.18.6"
 libloading = "0.9.1"
 lzma-rs = { version = "0.3.0", features = ["stream"] }
+# The LZMA1 decoder for archive data (1.5x the speed of lzma-rs on FitGirl data; it takes lc up to 8,
+# which FitGirl uses: lc8:lp3:pb3). lzma-rs stays for the installer's own LZMA headers.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "optimization"] }
 md5 = "0.8.1"
 # Exactly LZ4 1.9.4: the stand-in for FitGirl's LZ4 1.9.4 tool must compress identically.
 lz4-sys = "=1.9.4"
