@@ -371,11 +371,10 @@ fn next_job(
     }
 }
 
-/// Memory-hungry jobs: CLS codecs (lolz-class decoders size their buffers by a share of RAM)
-/// and whole-archive unarc runs (which load them too).
-/// Whether a job needs a memory-heavy slot. What decides is the codec, not how it is run:
-/// context-mixing decoders (the lolz family) size their models by a share of RAM, and srep
-/// keeps the data it may need again in memory.
+/// Whether a job needs a memory-heavy slot (whole-archive unarc runs included, which load the
+/// same codecs). What decides is the codec, not how it is run: the multi-threaded lolz
+/// decoders (magic*, lolly*) size their thread count by a share of RAM, and srep keeps the data
+/// it may need again in memory. The single-threaded lolzi/lolzx/lolz take what the stream says.
 fn is_heavy(job: &Job, cfg: &Config) -> bool {
     let block = |b: &DataBlock| method_is_heavy(&b.method, b.origsize, cfg);
     match job.kind {
@@ -385,15 +384,45 @@ fn is_heavy(job: &Job, cfg: &Config) -> bool {
 }
 
 fn method_is_heavy(chain: &str, block_size: u64, cfg: &Config) -> bool {
-    const HUNGRY: [&str; 3] = ["magic", "lolly", "lolz"];
+    method_is_heavy_with(chain, block_size, cfg, crate::memlimit::get())
+}
+
+/// `method_is_heavy` with the RAM limit (`limit`, bytes) given.
+fn method_is_heavy_with(chain: &str, block_size: u64, cfg: &Config, limit: Option<u64>) -> bool {
+    // magic*, lolly*: they size their threads from the free RAM (and sit inside 4x4 as "lolz").
+    const HUNGRY: [&str; 2] = ["magic", "lolly"];
     let hungry = |s: &str| HUNGRY.iter().any(|h| s.to_ascii_lowercase().starts_with(h));
+    let lolz_inside = |s: &str| s.to_ascii_lowercase().starts_with("lolz");
+    // lolzi, lolzx, lolz: single-threaded decoders whose memory comes from the stream (about
+    // 0.5 GB for d512; reverse-engineered), so several can run beside the heavy jobs.
+    const SINGLE: [&str; 3] = ["lolzi", "lolzx", "lolz"];
     crate::method::parse_chain(chain).iter().any(|m| {
-        if hungry(&m.name) || m.params.iter().any(|p| hungry(p)) {
+        let name = m.name.to_ascii_lowercase();
+        if hungry(&name) || m.params.iter().any(|p| hungry(p) || lolz_inside(p)) {
             return true;
         }
-        if m.name.eq_ignore_ascii_case("srep") {
+        if SINGLE.contains(&name.as_str()) {
+            // "d512": the dictionary in MB.
+            let dict_mb = m.params.iter().find_map(|p| {
+                let rest = p.strip_prefix('d')?;
+                if rest.chars().all(|c| c.is_ascii_digit()) { rest.parse::<u64>().ok() } else { crate::method::parse_size(rest).map(|b| b >> 20) }
+            });
+            return limit.is_some() || dict_mb.is_some_and(|d| d >= 1024);
+        }
+        if name.starts_with("lolz") {
+            return true;
+        }
+        if name == "srep" {
             // "mem228mb": how much the compressor says decompression needs. Without it, go by size.
             let declared = m.params.iter().find_map(|p| p.strip_prefix("mem").and_then(crate::method::parse_size));
+            // With a RAM limit srep gets less memory and spills to one fixed-name temp file
+            // (srep-virtual-memory.tmp) in a shared folder: two spilling at once corrupt each
+            // other, so such blocks are heavy (and a limit runs heavy jobs one at a time).
+            if let (Some(limit), Some(need)) = (limit, declared)
+                && need > crate::memlimit::srep_mb(limit) << 20
+            {
+                return true;
+            }
             return declared.map(|need| need > 1 << 30).unwrap_or(block_size > 2 << 30);
         }
         // Any other CLS codec has an unknown appetite: heavy when the block is big.
@@ -454,40 +483,48 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
 static PROXY_USE: Mutex<Vec<(String, usize, bool)>> = Mutex::new(Vec::new());
 static PROXY_FREED: std::sync::Condvar = std::sync::Condvar::new();
 
+/// Helper-program codecs that spill to fixed-name temp files in one shared folder: magic2l and
+/// magicl write `<ldmfTempPath>temp_<worker>.ldmf` (fopen "w+b"); a second instance shows
+/// "Can't create vm temp file!" and crashes. So one runs at a time.
+const SPILLING_PROXIES: [&str; 2] = ["cls-magic2l", "cls-magicl"];
+
 struct ProxyUse {
-    names: Vec<String>,
-    exclusive: bool,
+    /// Codec names, and whether this job holds each one exclusively.
+    names: Vec<(String, bool)>,
 }
 
 impl ProxyUse {
-    /// Waits until the codecs `names` are free for this job (`exclusive`: a whole-archive job).
+    /// Waits until the codecs `names` are free for this job (`exclusive`: a whole-archive job,
+    /// which holds them all exclusively; the spilling ones are always held exclusively).
     fn begin(names: Vec<String>, exclusive: bool, cancel: &AtomicBool) -> ProxyUse {
+        let names: Vec<(String, bool)> =
+            names.into_iter().map(|n| { let excl = exclusive || SPILLING_PROXIES.contains(&n.as_str()); (n, excl) }).collect();
         if names.is_empty() {
-            return ProxyUse { names, exclusive };
+            return ProxyUse { names };
         }
         let mut using = PROXY_USE.lock().unwrap();
         loop {
-            let free = names.iter().all(|n| match using.iter().find(|u| &u.0 == n) {
+            let free = names.iter().all(|(n, want_excl)| match using.iter().find(|u| &u.0 == n) {
                 None => true,
-                Some((_, shared, excl)) => !*excl && (!exclusive || *shared == 0),
+                Some((_, shared, excl)) => !*excl && (!*want_excl || *shared == 0),
             });
             if free || cancel.load(Ordering::Relaxed) {
                 break;
             }
             using = PROXY_FREED.wait_timeout(using, Duration::from_millis(250)).unwrap().0;
         }
-        for n in &names {
+        for (n, excl) in &names {
             if !using.iter().any(|u| &u.0 == n) {
                 using.push((n.clone(), 0, false));
             }
             let u = using.iter_mut().find(|u| &u.0 == n).unwrap();
-            if exclusive {
+            if *excl {
                 u.2 = true;
             } else {
                 u.1 += 1;
             }
         }
-        ProxyUse { names, exclusive }
+        ProxyUse { names }
     }
 }
 
@@ -497,9 +534,9 @@ impl Drop for ProxyUse {
             return;
         }
         let mut using = PROXY_USE.lock().unwrap();
-        for n in &self.names {
+        for (n, excl) in &self.names {
             if let Some(u) = using.iter_mut().find(|u| &u.0 == n) {
-                if self.exclusive {
+                if *excl {
                     u.2 = false;
                 } else {
                     u.1 = u.1.saturating_sub(1);
@@ -1160,10 +1197,19 @@ mod tests {
     fn heavy_is_decided_by_codec() {
         let cfg = Config::default();
         let gb = 1u64 << 30;
-        // lolz-family decoders are always heavy, also as the inner method of 4x4.
+        // The multi-threaded lolz decoders are always heavy, also as the inner method of 4x4.
         assert!(method_is_heavy("xt3u+srep:m3yf+magic2", 6 * gb, &cfg));
         assert!(method_is_heavy("precomp+lollypop2", 100 << 20, &cfg));
         assert!(method_is_heavy("4x4:b64mb:lolz", gb, &cfg));
+        // The single-threaded ones only with a big dictionary or a RAM limit (Assetto Corsa's
+        // lolzi blocks run beside the heavy jobs).
+        assert!(!method_is_heavy_with("srep:m3f:mem228mb:l256+lolzi:d512:al1:mc1023:tt8", 6 * gb, &cfg, None));
+        assert!(!method_is_heavy_with("lolz:d512:al1:mc1023:tt2:cm1:pa4", gb, &cfg, None));
+        assert!(method_is_heavy_with("lolzi:d1024:al1", gb, &cfg, None));
+        assert!(method_is_heavy_with("lolzi:d512:al1:mc1023:tt8", gb, &cfg, Some(8 * gb)));
+        // With a RAM limit, srep blocks that would spill to its one temp file are heavy.
+        assert!(method_is_heavy_with("srep:m3f:mem900mb+lzma", gb / 2, &cfg, Some(2 * gb)));
+        assert!(!method_is_heavy_with("srep:m3f:mem228mb+lzma", gb / 2, &cfg, Some(2 * gb)));
         // srep says what it needs; without that, only big blocks count.
         assert!(!method_is_heavy("4x4:b128mb:mpzz+srep:m3f:mem228mb+4x4:tor:16mb:c3", gb / 2, &cfg));
         assert!(method_is_heavy("srep:m3f:mem3gb+lzma", gb / 2, &cfg));

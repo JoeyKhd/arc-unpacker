@@ -35,7 +35,7 @@ fn lolz_mb(limit: u64) -> u64 {
 }
 
 /// srep's Memory, in MB.
-fn srep_mb(limit: u64) -> u64 {
+pub(crate) fn srep_mb(limit: u64) -> u64 {
     (limit / MB / 4).max(512)
 }
 
