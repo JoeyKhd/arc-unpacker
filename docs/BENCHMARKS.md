@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-91 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+94 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -21,6 +21,7 @@
 | Castlevania - Belmont's Curse | 5.1 GB | 3 min 40 s | 1 min 09 s | **3.2×** | 0.1.0-beta.6 |
 | Factorio | 4.9 GB | 9 min 57 s | 3 min 04 s | **3.2×** | 0.1.0-beta.8 |
 | Mr. Prepper | 2.2 GB | 1 min 39 s | 32 s | **3.1×** | 0.1.0-beta.10 |
+| Neighbours Back From Hell | 0.7 GB | 33 s | 11 s | **3.1×** | 1.0.3-dev |
 | Bendy and the Dark Revival | 3.0 GB | 1 min 40 s | 33 s | **3.0×** | 0.1.0-beta.8 |
 | Slime Rancher 2 | 1.7 GB | 2 min 29 s | 50 s | **3.0×** | 0.1.0-beta.6 |
 | Cities - Skylines | 7.6 GB | 3 min 51 s | 1 min 21 s | **2.9×** | 0.1.0-beta.8 |
@@ -42,6 +43,7 @@
 | Silver Pines | 2.1 GB | 2 min 28 s | 1 min 04 s | **2.3×** | 0.1.0-beta.8 |
 | BALL x PIT | 0.4 GB | 50 s | 22 s | **2.2×** | 0.1.0-beta.8 |
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
+| GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
@@ -82,6 +84,7 @@
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Palworld | 25.4 GB | 10 min 48 s | 8 min 18 s | **1.3×** | 0.1.0-beta.11 |
 | Resident Evil 2 | 18.5 GB | 7 min 02 s | 5 min 33 s | **1.3×** | 0.1.0-beta.11 |
+| Rocksmith 2014 Remastered | 11.7 GB | 5 min 19 s | 4 min 13 s | **1.3×** | 1.0.3-dev |
 | The Sims 3 | 16.5 GB | 15 min 42 s | 11 min 58 s | **1.3×** | 1.0.0 |
 | Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
@@ -97,11 +100,11 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 91** | | **470 min 08 s** | **295 min 37 s** | **1.6×** | |
+| **All 94** | | **480 min 40 s** | **302 min 05 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 91 installs were byte-identical to the original installer's.
+- **Same result:** all 94 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
