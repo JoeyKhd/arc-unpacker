@@ -64,8 +64,18 @@ function Stop-Tree([int]$rootPid) {
     foreach ($p in $tree) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
+# The repack's installer: setup.exe, or (older repacks) setup-multi6.exe and the like.
+function Get-SetupExe($repack) {
+    $plain = Join-Path $repack 'setup.exe'
+    if (Test-Path -LiteralPath $plain) { return $plain }
+    $other = Get-ChildItem -LiteralPath $repack -Filter 'setup*.exe' -File | Sort-Object Name | Select-Object -First 1
+    if ($other) { return $other.FullName }
+    $plain
+}
+
 function Stop-SetupOnly([int]$setupPid) {
-    Get-CimInstance Win32_Process -Filter "Name='setup.tmp'" | Where-Object { $_.ParentProcessId -eq $setupPid } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    # (Inno's second process is named after the installer: setup.tmp, setup-multi6.tmp, ...)
+    Get-CimInstance Win32_Process -Filter "Name LIKE '%.tmp'" | Where-Object { $_.ParentProcessId -eq $setupPid } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Stop-Process -Id $setupPid -Force -ErrorAction SilentlyContinue
 }
 
@@ -116,7 +126,7 @@ function Invoke-Original($tag, $repack, $target, $parts) {
     Set-Content $samples 't,cpu_pct,used_gb'
     $r = [ordered]@{ install_s = $null; verify_s = $null; total_s = $null; note = ''; window_text = ''; log_succeeded = $false }
     $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = Join-Path $repack 'setup.exe'
+    $psi.FileName = Get-SetupExe $repack
     $psi.WorkingDirectory = $repack
     $psi.Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LANG=en /COMPONENTS=`"$parts`" /DIR=`"$target`" /LOG=`"$log`""
     $psi.UseShellExecute = $false
