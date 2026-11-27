@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-76 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+78 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -43,6 +43,7 @@
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
+| Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
 | over the hill | 2.1 GB | 3 min 35 s | 1 min 44 s | **2.1×** | 0.1.0-beta.8 |
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
 | Solo Leveling - ARISE OVERDRIVE | 17.9 GB | 12 min 26 s | 5 min 49 s | **2.1×** | 0.1.0-beta.11 |
@@ -64,6 +65,7 @@
 | The Rogue Prince of Persia | 0.5 GB | 41 s | 25 s | **1.7×** | 0.1.0-beta.9 |
 | AI LIMIT | 14.8 GB | 4 min 43 s | 3 min 00 s | **1.6×** | 0.1.0-beta.12 |
 | Football Manager 2023 | 2.3 GB | 2 min 40 s | 1 min 40 s | **1.6×** | 0.1.0-beta.8 |
+| MGS 4 - Master Collection Version | 18.5 GB | 8 min 00 s | 4 min 57 s | **1.6×** | 0.1.0-beta.12 |
 | Motorcycle Ride - Infinity | 3.0 GB | 1 min 45 s | 1 min 10 s | **1.5×** | 0.1.0-beta.9 |
 | Red Dead Redemption | 6.4 GB | 5 min 18 s | 3 min 48 s | **1.4×** | 0.1.0-beta.7 |
 | Takeover 2 | 4.2 GB | 3 min 15 s | 2 min 15 s | **1.4×** | 0.1.0-beta.9 |
@@ -82,11 +84,11 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 76** | | **317 min 59 s** | **193 min 12 s** | **1.6×** | |
+| **All 78** | | **328 min 32 s** | **199 min 24 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 76 installs were byte-identical to the original installer's.
+- **Same result:** all 78 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.
