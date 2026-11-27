@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-100 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+102 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -24,6 +24,7 @@
 | Mr. Prepper | 2.2 GB | 1 min 39 s | 32 s | **3.1×** | 0.1.0-beta.10 |
 | Neighbours Back From Hell | 0.7 GB | 33 s | 11 s | **3.1×** | 1.0.3-dev |
 | Bendy and the Dark Revival | 3.0 GB | 1 min 40 s | 33 s | **3.0×** | 0.1.0-beta.8 |
+| Crysis 3 Remastered | 12.5 GB | 5 min 37 s | 1 min 53 s | **3.0×** | 1.0.3-dev |
 | Slime Rancher 2 | 1.7 GB | 2 min 29 s | 50 s | **3.0×** | 0.1.0-beta.6 |
 | Cities - Skylines | 7.6 GB | 3 min 51 s | 1 min 21 s | **2.9×** | 0.1.0-beta.8 |
 | Enshrouded | 25.3 GB | 4 min 54 s | 1 min 41 s | **2.9×** | 0.1.0-beta.11 |
@@ -68,6 +69,7 @@
 | Sleeping Dogs Pack | 10.4 GB | 7 min 08 s | 3 min 42 s | **1.9×** | 1.0.2-dev |
 | The Killing Stone | 4.4 GB | 1 min 58 s | 1 min 04 s | **1.9×** | 0.1.0-beta.6 |
 | Witch Cabin Cleanup | 2.4 GB | 39 s | 21 s | **1.9×** | 0.1.0-beta.10 |
+| Fran Bow | 0.9 GB | 1 min 59 s | 1 min 05 s | **1.8×** | 1.0.3-dev |
 | Frontier Paladin | 8.7 GB | 5 min 15 s | 2 min 54 s | **1.8×** | 0.1.0-beta.9 |
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
 | Batman - Arkham City | 13.5 GB | 12 min 27 s | 7 min 30 s | **1.7×** | 1.0.3-dev |
@@ -106,11 +108,11 @@
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
 | Prototype | 5.4 GB | 3 min 13 s | 3 min 13 s | **1.0×** | 1.0.3-dev |
-| **All 100** | | **510 min 47 s** | **318 min 55 s** | **1.6×** | |
+| **All 102** | | **518 min 23 s** | **321 min 53 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** 99 of 100 installs were byte-identical to the original installer's.
+- **Same result:** 101 of 102 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
