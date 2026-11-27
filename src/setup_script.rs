@@ -1069,10 +1069,17 @@ pub struct Choice {
 pub fn choices(setup: &Setup, plan: &Plan, repack: &Path) -> Vec<Choice> {
     let files = repack_files(repack);
     let defaults = default_components(setup, &files);
+    let parent = |name: &str| name.rsplit_once('\\').map(|(p, _)| p.to_string());
+    let components = || setup.components.iter().filter(|c| crate::install::english_or_neutral(&c.languages));
+    // A pick-one group is offered whole once the script asks about one of it: the default
+    // (often English, in the main archives) is never asked about, but is one of the choices.
+    let groups: BTreeSet<String> =
+        components().filter(|c| c.exclusive && plan.queried.contains(&c.name.to_ascii_lowercase())).filter_map(|c| parent(&c.name.to_ascii_lowercase())).collect();
     let mut out: Vec<Choice> = Vec::new();
-    for c in setup.components.iter().filter(|c| crate::install::english_or_neutral(&c.languages)) {
+    for c in components() {
         let name = c.name.to_ascii_lowercase();
-        if out.iter().any(|x| x.name == name) || !(c.fixed || plan.queried.contains(&name)) {
+        let in_group = c.exclusive && parent(&name).is_some_and(|p| groups.contains(&p));
+        if out.iter().any(|x| x.name == name) || !(c.fixed || in_group || plan.queried.contains(&name)) {
             continue;
         }
         let file = files.iter().find(|f| part_file_matches(c, f)).cloned();

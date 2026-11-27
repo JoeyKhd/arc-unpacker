@@ -144,7 +144,7 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 /// streams, white, green and white, trail a folder that the pointer carries in. While a folder is
 /// dragged over the window, the area turns green and the folder settles. (Run as administrator,
 /// the window only hears of the drop itself, not the drag before it, so then nothing lights up.)
-fn drop_zone(ui: &mut egui::Ui, active: bool) {
+fn drop_zone(ui: &mut egui::Ui, active: bool) -> egui::Response {
     use egui::epaint::RectShape;
     use egui::{CornerRadius, Rect, Shape, Stroke, pos2, vec2};
     let ctx = ui.ctx().clone();
@@ -153,13 +153,16 @@ fn drop_zone(ui: &mut egui::Ui, active: bool) {
     // below it, two lines of text.
     let s = 0.55;
     let (pad, text_h) = (30.0, 16.0 + 29.0 + 20.0);
-    let (zone, _) = ui.allocate_exact_size(vec2(ui.available_width(), pad + 230.0 * s + text_h + pad), egui::Sense::hover());
+    let (zone, response) = ui.allocate_exact_size(vec2(ui.available_width(), pad + 230.0 * s + text_h + pad), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // Clicking it opens the folder picker: a lighter border says so on hover.
+    let border = if response.hovered() && !active { MUTED.gamma_multiply(0.7) } else { BORDER_STRONG };
     let painter = ui.painter_at(zone);
     painter.rect(
         zone,
         12u8,
         Color32::TRANSPARENT.lerp_to_gamma(ACCENT.gamma_multiply(0.08), t),
-        Stroke::new(1.0 + t, BORDER_STRONG.lerp_to_gamma(ACCENT, t)),
+        Stroke::new(1.0 + t, border.lerp_to_gamma(ACCENT, t)),
         egui::StrokeKind::Inside,
     );
 
@@ -211,7 +214,7 @@ fn drop_zone(ui: &mut egui::Ui, active: bool) {
     painter.add(Shape::mesh(mesh));
     painter.add(Shape::closed_line(outline, Stroke::new(1.4, BG)));
 
-    let title = if active { "Drop to use this repack" } else { "Drop a repack folder here, or press Browse" };
+    let title = if active { "Drop to use this repack" } else { "Drop a repack folder here, or click to browse" };
     let y = at(0.0, 350.0).y + 16.0;
     painter.text(pos2(zone.center().x, y), egui::Align2::CENTER_TOP, title, egui::FontId::new(17.0, semibold()), TEXT.lerp_to_gamma(Color32::WHITE, t));
     painter.text(
@@ -221,6 +224,7 @@ fn drop_zone(ui: &mut egui::Ui, active: bool) {
         egui::TextStyle::Body.resolve(ui.style()),
         MUTED,
     );
+    response
 }
 
 fn main() -> eframe::Result {
@@ -412,12 +416,52 @@ struct Analysis {
     runtimes: Vec<arc_unpack::runtimes::Runtime>,
     /// Why the script can't be used (then the archives are extracted directly).
     note: Option<String>,
+    /// Optional parts that weren't downloaded, with their missing archives.
+    not_downloaded: BTreeMap<String, Vec<String>>,
+}
+
+/// The optional parts whose archives aren't in the repack folder, with those archives (the
+/// repack's own installer greys these out too). Each part is planned on its own on top of the
+/// base game: the optional archives it adds that are missing are its own.
+fn not_downloaded(inno: &Setup, script: &Script, exe: &Path, repack: &Path, choices: &[Choice], base: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
+    let missing = |selected: BTreeSet<String>| -> Vec<String> {
+        match ss::plan_with(inno, script, exe, repack, Path::new("C:\\arc-unpack-plan"), Some(selected)) {
+            Ok(plan) => ss::preflight(&plan, repack).missing.into_iter().filter(|m| ss::is_optional_archive(m)).collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let always: BTreeSet<String> = choices.iter().filter(|c| c.fixed || base.contains(&c.name)).map(|c| c.name.clone()).collect();
+    let before = missing(always.clone());
+    let mut out = BTreeMap::new();
+    for c in choices.iter().filter(|c| !always.contains(&c.name)) {
+        let mut selected = always.clone();
+        selected.insert(c.name.clone());
+        if let Some((parent, _)) = c.name.rsplit_once('\\') {
+            selected.insert(parent.to_string());
+        }
+        let own: Vec<String> = missing(selected).into_iter().filter(|m| !before.contains(m)).collect();
+        if !own.is_empty() {
+            out.insert(c.name.clone(), own);
+        }
+    }
+    out
 }
 
 fn analyze(repack: PathBuf) -> Result<Analysis, String> {
     let scan = install::scan(&repack, None).map_err(|e| format!("{e:#}"))?;
     let setup_exe = scan.setup.clone();
-    let mut a = Analysis { repack: repack.clone(), setup_exe: setup_exe.clone(), inno: None, script: None, scan: Arc::new(scan), choices: Vec::new(), base: BTreeSet::new(), runtimes: Vec::new(), note: None };
+    let mut a = Analysis {
+        repack: repack.clone(),
+        setup_exe: setup_exe.clone(),
+        inno: None,
+        script: None,
+        scan: Arc::new(scan),
+        choices: Vec::new(),
+        base: BTreeSet::new(),
+        runtimes: Vec::new(),
+        note: None,
+        not_downloaded: BTreeMap::new(),
+    };
     let Some(exe) = setup_exe else {
         a.note = Some("No setup.exe here, so its install steps can't be run.".into());
         return Ok(a);
@@ -442,14 +486,26 @@ fn analyze(repack: PathBuf) -> Result<Analysis, String> {
     match usable {
         Ok((script, choices)) => {
             a.runtimes = arc_unpack::runtimes::of_repack(&inno, Some(&script), &ss::repack_files(&repack));
+            a.base = ss::base_components(&inno);
+            a.not_downloaded = not_downloaded(&inno, &script, &exe, &repack, &choices, &a.base);
             a.script = Some(Arc::new(script));
             a.choices = choices;
         }
-        Err(e) => a.note = Some(format!("The installer's own steps can't be run ({e:#}); the archives will be extracted directly.")),
+        Err(e) => {
+            a.note = Some(format!("The installer's own steps can't be run ({e:#}); the archives will be extracted directly."));
+            a.base = ss::base_components(&inno);
+        }
     }
-    a.base = ss::base_components(&inno);
     a.inno = Some(inno);
     Ok(a)
+}
+
+/// Creates the installer's desktop shortcuts: "Created <names> on the desktop", or why not.
+fn make_shortcuts(shortcuts: &[ss::Shortcut]) -> Result<String, String> {
+    match ss::create_desktop_shortcuts(shortcuts) {
+        Ok(made) => Ok(format!("Created {} on the desktop", made.iter().filter_map(|p| p.file_stem()).map(|n| n.to_string_lossy()).collect::<Vec<_>>().join(", "))),
+        Err(e) => Err(format!("{e:#}")),
+    }
 }
 
 /// "1 step" / "35 steps".
@@ -562,6 +618,8 @@ struct App {
     target_auto: bool,
     edited: Instant,
     analysis: Option<Result<Arc<Analysis>, String>>,
+    /// The folder `analysis` is about (also when reading it failed, so it isn't read again and again).
+    analyzed: Option<String>,
     analyzing: Option<(String, Receiver<Result<Analysis, String>>)>,
     selected: BTreeSet<String>,
     check: Option<Check>,
@@ -582,6 +640,8 @@ struct App {
     progress: Progress,
     running: Option<Running>,
     outcome: Option<Outcome>,
+    /// "Create a desktop shortcut" (made once the install succeeded).
+    create_shortcut: bool,
     shortcut_result: Option<Result<String, String>>,
     cpu: f64,
     ram: (u64, u64),
@@ -603,6 +663,7 @@ impl App {
             target_auto: true,
             edited: Instant::now(),
             analysis: None,
+            analyzed: None,
             analyzing: None,
             selected: BTreeSet::new(),
             check: None,
@@ -618,6 +679,7 @@ impl App {
             progress: Progress::default(),
             running: None,
             outcome: None,
+            create_shortcut: true,
             shortcut_result: None,
             cpu: 0.0,
             ram: (0, 0),
@@ -651,10 +713,7 @@ impl App {
     /// Reads the repack folder in the background once its path has stopped changing.
     fn analyze_if_needed(&mut self, ctx: &egui::Context) {
         let path = self.repack.trim().to_string();
-        let current = self.analyzing.as_ref().map(|(p, _)| p.clone()).or_else(|| match &self.analysis {
-            Some(Ok(a)) => Some(a.repack.display().to_string()),
-            _ => None,
-        });
+        let current = self.analyzing.as_ref().map(|(p, _)| p.clone()).or_else(|| self.analyzed.clone());
         if path.is_empty() || current.as_deref() == Some(path.as_str()) || self.edited.elapsed() < Duration::from_millis(300) {
             return;
         }
@@ -679,16 +738,23 @@ impl App {
         if let Some((path, rx)) = &self.analyzing
             && let Ok(r) = rx.try_recv()
         {
+            let path = path.clone();
             let stale = path.as_str() != self.repack.trim();
             self.analyzing = None;
             if !stale {
                 if let Ok(a) = &r {
                     self.selected = match &self.preset {
                         Some(p) => p.clone(),
-                        None => a.choices.iter().filter(|c| c.fixed || c.default).map(|c| c.name.clone()).collect(),
+                        None => a
+                            .choices
+                            .iter()
+                            .filter(|c| (c.fixed || c.default) && !a.not_downloaded.contains_key(&c.name))
+                            .map(|c| c.name.clone())
+                            .collect(),
                     };
                 }
                 self.analysis = Some(r.map(Arc::new));
+                self.analyzed = Some(path.clone());
             }
         }
         let key = (self.selected.clone(), self.target.trim().to_string());
@@ -830,6 +896,15 @@ impl App {
                 Err(e) => Outcome::Failed(format!("{e:#}")),
             });
             self.running = None;
+            if let Some(Outcome::Done { report, .. }) = &self.outcome
+                && self.create_shortcut
+                && self.adding.is_none()
+                && report.summary.problems.is_empty()
+                && !report.summary.cancelled
+                && !report.shortcuts.is_empty()
+            {
+                self.shortcut_result = Some(make_shortcuts(&report.shortcuts));
+            }
         }
     }
 
@@ -957,6 +1032,12 @@ impl eframe::App for App {
             .get_or_insert_with(|| ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied([128, 128], LOGO), egui::TextureOptions::LINEAR))
             .clone();
         egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(22, 18)).show(ui, |ui| {
+            // Panels come first: the Install bar keeps the foot of the window.
+            if self.offers_install() && !dragging {
+                egui::Panel::bottom("install-bar")
+                    .frame(egui::Frame::new().inner_margin(egui::Margin { top: 12, ..Default::default() }))
+                    .show(ui, |ui| self.install_bar(ui, &ctx));
+            }
             ui.horizontal(|ui| {
                 ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(44.0, 44.0)));
                 ui.add_space(4.0);
@@ -983,10 +1064,10 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 if dragging {
                     ui.add_space(8.0);
-                    drop_zone(ui, true);
+                    let _ = drop_zone(ui, true);
                     return;
                 }
-                self.before_install(ui, &ctx, busy);
+                self.before_install(ui, busy);
                 self.installing(ui, busy);
                 self.result(ui);
                 if !self.progress.log.is_empty() {
@@ -1009,10 +1090,14 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn before_install(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
+    fn before_install(&mut self, ui: &mut egui::Ui, busy: bool) {
         if self.repack.trim().is_empty() {
             ui.add_space(8.0);
-            drop_zone(ui, false);
+            if drop_zone(ui, false).clicked()
+                && let Some(dir) = rfd::FileDialog::new().pick_folder().and_then(repack_dir_of)
+            {
+                self.set_repack(&dir);
+            }
             return;
         }
         if self.analyzing.is_some() || (self.analysis.is_none() && Path::new(self.repack.trim()).is_dir()) {
@@ -1046,35 +1131,47 @@ impl App {
             return;
         }
 
-        // What to install.
+        // What to install. Parts that weren't downloaded are greyed out, as in the repack's own
+        // installer; a pick-one group (such as the voice language) gets radio buttons.
+        let adding = adding_parts(&a, &self.selected);
         if !a.choices.is_empty() {
             let mut toggled: Option<(String, bool, bool)> = None;
-            let adding = adding_parts(&a, &self.selected);
             let installed_parts = match &self.check {
                 Some(Check { installed: Some(Ok(g)), .. }) if adding => g.parts.clone(),
                 _ => BTreeSet::new(),
             };
             card(ui, |ui| {
-            ui.label(sb("What to install", 15.0));
-            for c in &a.choices {
-                ui.horizontal(|ui| {
-                    let mut on = self.selected.contains(&c.name);
-                    let mut resp = ui.add_enabled(!busy, egui::Checkbox::new(&mut on, &c.label));
-                    if a.base.contains(&c.name) {
-                        resp = resp.on_hover_text("Untick to add only the parts below to a game that's already installed");
-                    }
-                    if resp.changed() {
-                        toggled = Some((c.name.clone(), on, c.exclusive));
-                    }
-                    if a.base.contains(&c.name) {
-                        ui.label(RichText::new(if adding { "not reinstalled: adding parts to the installed game" } else { "base game" }).weak());
-                    } else if installed_parts.contains(&c.name) {
-                        ui.label(RichText::new("already installed").weak());
-                    } else if let Some(f) = &c.file {
-                        ui.label(RichText::new(format!("downloaded · {f}")).weak());
-                    }
-                });
-            }
+                ui.label(sb("What to install", 15.0));
+                for c in &a.choices {
+                    ui.horizontal(|ui| {
+                        ui.add_space(22.0 * c.name.matches('\\').count() as f32);
+                        let on = self.selected.contains(&c.name);
+                        let missing = a.not_downloaded.get(&c.name);
+                        let explain = |resp: egui::Response| match missing {
+                            Some(files) => {
+                                let verb = if files.len() == 1 { "isn't" } else { "aren't" };
+                                resp.on_disabled_hover_text(format!("Not downloaded: {} {verb} in the repack folder", files.join(", ")))
+                            }
+                            None if a.base.contains(&c.name) => resp.on_hover_text("Untick to add only the parts below to a game that's already installed"),
+                            None => resp,
+                        };
+                        if c.exclusive {
+                            if explain(ui.add_enabled(missing.is_none(), egui::RadioButton::new(on, &c.label))).clicked() && !on {
+                                toggled = Some((c.name.clone(), true, true));
+                            }
+                        } else {
+                            let mut ticked = on;
+                            if explain(ui.add_enabled(missing.is_none(), egui::Checkbox::new(&mut ticked, &c.label))).changed() {
+                                toggled = Some((c.name.clone(), ticked, false));
+                            }
+                        }
+                        if adding && a.base.contains(&c.name) {
+                            ui.label(RichText::new("not reinstalled: adding parts to the installed game").weak());
+                        } else if installed_parts.contains(&c.name) {
+                            ui.label(RichText::new("already installed").weak());
+                        }
+                    });
+                }
             });
             if let Some((name, on, exclusive)) = toggled {
                 if on {
@@ -1094,9 +1191,55 @@ impl App {
             ui.add_space(6.0);
         }
 
+        // Options, as the repack's own installer offers them.
+        let shortcuts = match &a.inno {
+            Some(inno) if !adding => ss::desktop_shortcuts(inno, &self.selected, Path::new(self.target.trim())).len(),
+            _ => 0,
+        };
+        // Runtimes are only offered when this PC lacks something the game needs (most PCs have them all).
+        let runtimes = if adding { Vec::new() } else { arc_unpack::runtimes::missing(&a.runtimes) };
+        let has_list = a.scan.md5_file.is_some();
+        card(ui, |ui| {
+            ui.label(sb("Options", 15.0));
+            if shortcuts > 0 {
+                ui.checkbox(&mut self.create_shortcut, if shortcuts == 1 { "Create a desktop shortcut" } else { "Create desktop shortcuts" });
+            }
+            if !runtimes.is_empty() {
+                let names = arc_unpack::runtimes::labels(&runtimes);
+                ui.checkbox(&mut self.install_runtimes, format!("Install missing runtimes: {names}")).on_hover_text(
+                    "This PC doesn't have them, and the game may not start without them. They're downloaded from Microsoft \
+                     (DirectX's installer comes with the repack), checked for Microsoft's signature, and installed silently \
+                     after the game. FitGirl's installer offers the same.",
+                );
+            }
+            ui.horizontal(|ui| {
+                let hint = "Tells the decoders to stay within this much RAM and runs one memory-hungry decoder at a time. Slower. A game packed with very large settings can still need more.";
+                ui.checkbox(&mut self.limit_ram, "Limit RAM to").on_hover_text(hint);
+                ui.add_enabled(self.limit_ram, egui::DragValue::new(&mut self.ram_limit_gb).range(2..=physical_ram_gb()).speed(0.1).suffix(" GB"))
+                    .on_hover_text(hint);
+            });
+            ui.add_enabled(has_list, egui::Checkbox::new(&mut self.skip_check, "Skip archive check")).on_hover_text(if has_list {
+                "Don't check the downloaded .bin files before installing. Faster; installed files are still checked as they're written."
+            } else {
+                "This repack has no MD5 list for its .bin files."
+            });
+        });
+    }
+
+    /// Whether the window offers to install: a repack was read, nothing is running, and it
+    /// hasn't just been installed (picking another folder offers it again).
+    fn offers_install(&self) -> bool {
+        let installed = matches!(&self.outcome, Some(Outcome::Done { report, .. }) if report.summary.problems.is_empty() && !report.summary.cancelled);
+        matches!(&self.analysis, Some(Ok(_))) && self.analyzing.is_none() && self.running.is_none() && !installed
+    }
+
+    /// The foot of the window before installing: whether everything needed is here, and the
+    /// Install button, in view however long the list of parts is.
+    fn install_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(Ok(a)) = self.analysis.clone() else { return };
         // Pre-flight: are the needed files here, and does it fit? While a changed selection is
         // re-checked, the previous result stays in place (dimmed if it takes a moment), so
-        // nothing below moves.
+        // nothing moves.
         let free = self.free_space();
         let mut ready = false;
         let line_h = ui.text_style_height(&egui::TextStyle::Body);
@@ -1151,66 +1294,33 @@ impl App {
             status(ui, WARN, note.clone());
         }
 
-        // Options, in FitGirl's words.
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let hint = "Tells the decoders to stay within this much RAM and runs one memory-hungry decoder at a time. Slower. A game packed with very large settings can still need more.";
-            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.limit_ram, "Limit RAM to")).on_hover_text(hint);
-            ui.add_enabled(
-                !busy && self.limit_ram,
-                egui::DragValue::new(&mut self.ram_limit_gb).range(2..=physical_ram_gb()).speed(0.1).suffix(" GB"),
-            )
-            .on_hover_text(hint);
-            ui.add_space(12.0);
-            let has_list = a.scan.md5_file.is_some();
-            ui.add_enabled(!busy && has_list, egui::Checkbox::new(&mut self.skip_check, "Skip archive check")).on_hover_text(if has_list {
-                "Don't check the downloaded .bin files before installing. Faster; installed files are still checked as they're written."
-            } else {
-                "This repack has no MD5 list for its .bin files."
-            });
-        });
-        // Only offered when this PC lacks something the game needs (most PCs have them all).
-        let missing = arc_unpack::runtimes::missing(&a.runtimes);
-        if !missing.is_empty() && !adding_parts(&a, &self.selected) {
-            let names = arc_unpack::runtimes::labels(&missing);
-            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.install_runtimes, format!("Also install missing runtimes: {names}")))
-                .on_hover_text(
-                    "This PC doesn't have them, and the game may not start without them. They're downloaded from Microsoft \
-                     (DirectX's installer comes with the repack), checked for Microsoft's signature, and installed silently \
-                     after the game. FitGirl's installer offers the same.",
-                );
+        // The one primary action.
+        ui.add_space(8.0);
+        let can = ready && !self.target.trim().is_empty();
+        let adding = matches!(&self.check, Some(c) if c.parts.only_optional);
+        let label = sb(if adding { "Add to installed game" } else { "Install" }, 17.0);
+        let button = egui::Button::new(if can { label.color(Color32::from_rgb(5, 24, 12)) } else { label.color(MUTED) })
+            .fill(if can { ACCENT } else { Color32::from_rgb(32, 32, 36) })
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(10);
+        let clicked = ui
+            .with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+                ui.add_enabled(can, button.min_size(egui::vec2(0.0, 46.0))).clicked()
+            })
+            .inner;
+        if clicked {
+            self.start(ctx);
         }
-
-        // The one primary action (gone once this install succeeded; picking another folder
-        // brings it back).
-        ui.add_space(10.0);
-        if !busy && !installed {
-            let can = ready && !self.target.trim().is_empty();
-            let adding = matches!(&self.check, Some(c) if c.parts.only_optional);
-            let label = sb(if adding { "Add to installed game" } else { "Install" }, 17.0);
-            let button = egui::Button::new(if can { label.color(Color32::from_rgb(5, 24, 12)) } else { label.color(MUTED) })
-                .fill(if can { ACCENT } else { Color32::from_rgb(32, 32, 36) })
-                .stroke(egui::Stroke::NONE)
-                .corner_radius(10);
-            let clicked = ui
-                .with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
-                    ui.add_enabled(can, button.min_size(egui::vec2(0.0, 46.0))).clicked()
-                })
-                .inner;
-            if clicked {
-                self.start(ctx);
-            }
-            if let Some(c) = &self.check
-                && c.steps > 0
-                && can
-            {
-                let line = if c.parts.only_optional {
-                    format!("Runs {} in {}", steps(c.steps), self.target.trim())
-                } else {
-                    format!("Runs the installer's {} into {}", steps(c.steps), self.target.trim())
-                };
-                ui.label(RichText::new(line).weak());
-            }
+        if let Some(c) = &self.check
+            && c.steps > 0
+            && can
+        {
+            let line = if c.parts.only_optional {
+                format!("Runs {} in {}", steps(c.steps), self.target.trim())
+            } else {
+                format!("Runs the installer's {} into {}", steps(c.steps), self.target.trim())
+            };
+            ui.label(RichText::new(line).weak());
         }
     }
 
@@ -1237,7 +1347,7 @@ impl App {
         let elapsed = p.phase_started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         let cancelled = self.running.as_ref().is_some_and(|r| r.cancel.load(Ordering::Relaxed));
         let (title, sub) = match p.phase.as_str() {
-            _ if cancelled => ("Cancelling…".to_string(), String::new()),
+            _ if cancelled => ("Stopping…".to_string(), String::new()),
             "Verifying archives" => ("Checking the downloaded files".to_string(), String::new()),
             "Checking files" => ("Checking the installed files".to_string(), String::new()),
             "Installing" | "Installing game files" => (
@@ -1250,12 +1360,12 @@ impl App {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
             ui.label(sb(&title, 18.0).color(Color32::WHITE));
-            // Cancel next to the title, where it's always in view.
+            // Stop next to the title, where it's always in view.
             if let Some(r) = &self.running
                 && !cancelled
             {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Stop installing").clicked() {
                         r.cancel.store(true, Ordering::Relaxed);
                     }
                 });
@@ -1322,7 +1432,7 @@ impl App {
                 let s = &report.summary;
                 let ok = s.problems.is_empty() && !s.cancelled;
                 let (title, color) = if s.cancelled {
-                    ("Cancelled".to_string(), WARN)
+                    ("Install stopped".to_string(), WARN)
                 } else if ok {
                     (self.adding.as_ref().map(|p| format!("Added {p}")).unwrap_or_else(|| "Installed".to_string()), OK)
                 } else {
@@ -1362,10 +1472,7 @@ impl App {
                     if ok && !report.shortcuts.is_empty() && self.shortcut_result.is_none() {
                         let label = if report.shortcuts.len() == 1 { "Create desktop shortcut" } else { "Create desktop shortcuts" };
                         if ui.button(label).clicked() {
-                            self.shortcut_result = Some(match ss::create_desktop_shortcuts(&report.shortcuts) {
-                                Ok(made) => Ok(format!("Created {} on the desktop", made.iter().filter_map(|p| p.file_stem()).map(|n| n.to_string_lossy()).collect::<Vec<_>>().join(", "))),
-                                Err(e) => Err(format!("{e:#}")),
-                            });
+                            self.shortcut_result = Some(make_shortcuts(&report.shortcuts));
                         }
                     }
                 });
