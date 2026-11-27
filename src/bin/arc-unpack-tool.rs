@@ -178,11 +178,13 @@ fn find_map(me: &Path) -> Option<PathBuf> {
     me.ancestors().skip(1).map(|d| d.join(tools::MAP_FILE)).find(|p| p.is_file())
 }
 
+/// Appends one line. In one write: the repack's runner starts dozens of stand-ins at once, and
+/// a line written in pieces (as writeln! may) gets mixed with another process's.
 fn log(map: &Path, suffix: &str, line: &str) {
     use std::io::Write;
     let path = map.with_extension(suffix);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{line}");
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }
 

@@ -1538,11 +1538,15 @@ impl ScriptRunner<'_> {
         }
         let verify = std::fs::read_to_string(map.with_extension("verify.log")).unwrap_or_default();
         let (mut same, mut different) = (0, 0);
-        for l in verify.lines() {
-            if l.contains(": same (") {
-                same += 1;
-            } else {
-                different += 1;
+        // One result per line normally; count every result on a line anyway (lines written by
+        // several processes at once could merge).
+        const VERDICTS: [&str; 5] = [": same (", ": DIFFERENT", ": ours FAILED", ": original wrote nothing", ": ours wrote nothing"];
+        for l in verify.lines().filter(|l| !l.trim().is_empty()) {
+            let results = VERDICTS.iter().map(|v| l.matches(v).count()).sum::<usize>().max(1);
+            let ok = l.matches(VERDICTS[0]).count();
+            same += ok;
+            if ok < results {
+                different += results - ok;
                 events::warn(self.sink, format!("tool check: {l}"));
                 self.summary.problems.push(format!("a stand-in's output differs from the original tool's: {l}"));
             }
