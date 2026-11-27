@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-86 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+87 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -13,6 +13,7 @@
 | SURI - The Seventh Note | 1.8 GB | 1 min 33 s | 25 s | **3.8×** | 0.1.0-beta.10 |
 | Chained Beasts | 0.5 GB | 30 s | 8 s | **3.7×** | 0.1.0-beta.9 |
 | Crusader Kings 3 | 6.0 GB | 6 min 16 s | 1 min 41 s | **3.7×** | 0.1.0-beta.7 |
+| Left 4 Dead 2 | 10.2 GB | 5 min 32 s | 1 min 36 s | **3.5×** | 1.0.2-dev |
 | Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 41 s | **3.5×** | 0.1.0-beta.6 |
 | The Witch's Bakery | 2.3 GB | 39 s | 11 s | **3.5×** | 0.1.0-beta.10 |
 | God of War III Remastered | 30.0 GB | 6 min 14 s | 1 min 49 s | **3.4×** | 0.1.0-beta.7 |
@@ -24,7 +25,6 @@
 | Slime Rancher 2 | 1.7 GB | 2 min 29 s | 50 s | **3.0×** | 0.1.0-beta.6 |
 | Cities - Skylines | 7.6 GB | 3 min 51 s | 1 min 21 s | **2.9×** | 0.1.0-beta.8 |
 | Enshrouded | 25.3 GB | 4 min 54 s | 1 min 41 s | **2.9×** | 0.1.0-beta.11 |
-| Left 4 Dead 2 | 10.2 GB | 5 min 32 s | 1 min 56 s | **2.9×** | 1.0.1 |
 | Probably Stolen | 0.6 GB | 29 s | 10 s | **2.9×** | 0.1.0-beta.7 |
 | Transport Fever 3 | 20.7 GB | 6 min 31 s | 2 min 16 s | **2.9×** | 0.1.0-beta.11 |
 | Flick | 2.1 GB | 54 s | 19 s | **2.8×** | 0.1.0-beta.6 |
@@ -60,6 +60,7 @@
 | Goat Simulator 3 | 5.5 GB | 3 min 18 s | 1 min 45 s | **1.9×** | 0.1.0-beta.8 |
 | Revenge of the Mage | 6.1 GB | 3 min 45 s | 2 min 00 s | **1.9×** | 0.1.0-beta.8 |
 | Serious Sam Fusion | 4.6 GB | 2 min 29 s | 1 min 20 s | **1.9×** | 0.1.0-beta.6 |
+| Sleeping Dogs Pack | 10.4 GB | 7 min 08 s | 3 min 42 s | **1.9×** | 1.0.2-dev |
 | The Killing Stone | 4.4 GB | 1 min 58 s | 1 min 04 s | **1.9×** | 0.1.0-beta.6 |
 | Witch Cabin Cleanup | 2.4 GB | 39 s | 21 s | **1.9×** | 0.1.0-beta.10 |
 | Frontier Paladin | 8.7 GB | 5 min 15 s | 2 min 54 s | **1.8×** | 0.1.0-beta.9 |
@@ -92,11 +93,11 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 86** | | **440 min 24 s** | **274 min 41 s** | **1.6×** | |
+| **All 87** | | **447 min 32 s** | **278 min 03 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** 85 of 86 installs were byte-identical to the original installer's.
+- **Same result:** all 87 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
