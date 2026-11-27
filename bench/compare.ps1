@@ -58,6 +58,42 @@ function Get-Tree([int]$rootPid) {
     @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
 }
 
+# Bytes read and written by the tree's processes since the last call (processes that started
+# since count in full). $seen: pid -> last count, kept by the caller.
+function Get-TreeIo([int]$rootPid, $seen) {
+    $ids = @{}; foreach ($p in Get-Tree $rootPid) { $ids[[int]$p.ProcessId] = $true }
+    $delta = 0
+    foreach ($p in Get-CimInstance Win32_Process -Property ProcessId, ReadTransferCount, WriteTransferCount) {
+        $id = [int]$p.ProcessId
+        if (-not $ids.ContainsKey($id)) { continue }
+        $n = [double]$p.ReadTransferCount + [double]$p.WriteTransferCount
+        $before = if ($seen.ContainsKey($id)) { $seen[$id] } else { 0 }
+        if ($n -gt $before) { $delta += $n - $before }
+        $seen[$id] = $n
+    }
+    $delta
+}
+
+# For a hung or timed-out install: what still ran (with command lines), their windows' text and
+# the end of the log, into <tag>-<kind>-hang.txt. Returns the file's name.
+function Save-HangReport($tag, $kind, [int]$rootPid, $logFile) {
+    $file = Join-Path $Out "$tag-$kind-hang.txt"
+    $tree = Get-Tree $rootPid
+    $lines = @("$kind install of $tag stopped as hung at $(Get-Date -Format s)", '', 'Processes still running:')
+    foreach ($p in $tree) {
+        $c = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ProcessId)" -ErrorAction SilentlyContinue
+        $cpu = [math]::Round(([double]$p.KernelModeTime + [double]$p.UserModeTime) / 1e7, 1)
+        $io = if ($c) { [math]::Round(([double]$c.ReadTransferCount + [double]$c.WriteTransferCount) / 1MB, 1) } else { '?' }
+        $lines += "  $($p.Name) pid $($p.ProcessId) parent $($p.ParentProcessId), cpu $cpu s, io $io MB, started $($c.CreationDate)"
+        if ($c -and $c.CommandLine) { $lines += "    $($c.CommandLine)" }
+    }
+    $w = [AbHelp]::WindowText([int[]]@($tree | ForEach-Object { [int]$_.ProcessId }))
+    if ($w) { $lines += '', 'Window text:', "  $w" }
+    if ($logFile -and (Test-Path -LiteralPath $logFile)) { $lines += '', "End of $(Split-Path $logFile -Leaf):"; $lines += @(Get-Content -LiteralPath $logFile -Tail 40 | ForEach-Object { "  $_" }) }
+    Set-Content -LiteralPath $file $lines -Encoding UTF8
+    Split-Path $file -Leaf
+}
+
 function Stop-Tree([int]$rootPid) {
     $tree = Get-Tree $rootPid
     [array]::Reverse($tree)
@@ -163,11 +199,12 @@ function Invoke-Original($tag, $repack, $target, $parts) {
                 if ($c -ne $treeCpu) { $treeCpu = $c; $treeSince = $t }
                 elseif (($t - $treeSince) -ge 600) {
                     $r.window_text = [AbHelp]::WindowText([int[]]@($tree | ForEach-Object { [int]$_.ProcessId }))
-                    $tInstall = $t; $r.note = 'stalled: no CPU use for 10 min'
+                    $r.hang_report = Save-HangReport $tag 'original' $setup.Id $log
+                    $tInstall = $t; $r.note = 'hung: no CPU use for 10 min'
                     Stop-Tree $setup.Id; break
                 }
             }
-            if ($t -gt 7200) { $tInstall = $t; $r.note = 'timed out after 2 h'; Stop-Tree $setup.Id; break }
+            if ($t -gt 7200) { $r.hang_report = Save-HangReport $tag 'original' $setup.Id $log; $tInstall = $t; $r.note = 'hung: timed out after 2 h'; Stop-Tree $setup.Id; break }
         } else {
             if ($q.Count -eq 0) { $tVerify = $t; $r.note = 'QuickSFV finished and closed itself'; break }
             $c = ($q | ForEach-Object { $_.TotalProcessorTime.TotalSeconds } | Measure-Object -Sum).Sum
@@ -232,13 +269,24 @@ function Invoke-Arc($tag, $repack, $target, $parts) {
     $psi.CreateNoWindow = $true
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $p = [Diagnostics.Process]::Start($psi)
-    $next = 0; $note = ''
+    $next = 0; $note = ''; $hang = $null
+    # Hung: the tree read and wrote under 4 MB in 15 min (arc-unpack's own check, 10 min by
+    # default, normally stops a stuck step first and says which). Or 2 h in all.
+    $seen = @{}; $nextIo = 30; $ioSince = 0; $ioSum = 0
     while (-not $p.WaitForExit(500)) {
         $t = $sw.Elapsed.TotalSeconds
         if ($t -ge $next) { Add-Content $samples (Get-Sample $t); $next = $t + 5 }
-        if ($t -gt 7200) { Stop-Tree $p.Id; $note = 'timed out after 2 h'; break }
+        if ($t -ge $nextIo) {
+            $nextIo = $t + 30
+            $ioSum += Get-TreeIo $p.Id $seen
+            if ($ioSum -ge 4MB) { $ioSum = 0; $ioSince = $t }
+            elseif (($t - $ioSince) -ge 900) { $hang = Save-HangReport $tag 'arc' $p.Id $e; Stop-Tree $p.Id; $note = 'hung: no disk activity for 15 min'; break }
+        }
+        if ($t -gt 7200) { $hang = Save-HangReport $tag 'arc' $p.Id $e; Stop-Tree $p.Id; $note = 'hung: timed out after 2 h'; break }
     }
-    $r = [ordered]@{ total_s = [math]::Round($sw.Elapsed.TotalSeconds, 1); exit = $p.ExitCode; note = $note }
+    # arc-unpack stopped a stuck step itself: count it as a hang too.
+    if (-not $note -and (Select-String -LiteralPath $e -Pattern 'made no progress for' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) { $note = 'hung: arc-unpack stopped a step that made no progress' }
+    $r = [ordered]@{ total_s = [math]::Round($sw.Elapsed.TotalSeconds, 1); exit = $p.ExitCode; note = $note; hang_report = $hang }
     $r.summary = @(Get-Content -LiteralPath $o -ErrorAction SilentlyContinue) -join ' | '
     if ($p.ExitCode -ne 0) { $r.error_tail = @(Get-Content -LiteralPath $e -Tail 8 -ErrorAction SilentlyContinue) -join ' | ' }
     $s = Get-SampleStats $samples

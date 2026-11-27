@@ -146,7 +146,7 @@ def records_from_result(res, ids):
                         avg_cpu_pct=o.get("avg_cpu_pct"), ram_rise_gb=o.get("ram_rise_gb"),
                         # (Setup's log says "succeeded" once its own files are in, also when its
                         # decoder hung afterwards and compare.ps1 had to stop it.)
-                        ok=bool(o.get("log_succeeded")) and not (o.get("note") or "").startswith(("stalled", "timed out")),
+                        ok=bool(o.get("log_succeeded")) and not (o.get("note") or "").startswith(("hung", "stalled", "timed out")),
                         note=scrub(o.get("note"), name)))
     a = res.get("arc_unpack")
     if a and a.get("total_s"):
@@ -154,7 +154,7 @@ def records_from_result(res, ids):
         out.append(dict(base, tool="arc-unpack", version=res["arc_unpack_version"], commit=res.get("arc_unpack_commit"), settings="default",
                         seconds=a["total_s"], files=a.get("files"), bytes=a.get("bytes"),
                         avg_cpu_pct=a.get("avg_cpu_pct"), ram_rise_gb=a.get("ram_rise_gb"),
-                        ok=a.get("exit") == 0, identical_to_original=identical,
+                        ok=a.get("exit") == 0 and not (a.get("note") or "").startswith("hung"), identical_to_original=identical,
                         md5_checked=re.search(r"(\d[\d,]*) files match the repack's own MD5 list", summary) is not None,
                         note=scrub(a.get("note") or ("" if a.get("exit") == 0 else f"exit {a.get('exit')}"), name)))
     return out
