@@ -884,6 +884,8 @@ fn run_scripted(
         changes: HashMap::new(),
         steps_total: plan.map(|p| p.steps.len()).unwrap_or(0),
         backup: parts.only_optional.then(|| target.join(BACKUP_DIR)),
+        deferred: Vec::new(),
+        background: Vec::new(),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
@@ -909,6 +911,7 @@ fn run_scripted(
     let messages = std::mem::take(&mut host.messages);
     let script_steps = host.steps.len();
     drop(host);
+    runner.finish_background(script_error.is_some());
     runner.discard_prefetches();
     let _ = std::fs::remove_dir_all(&staging);
     let mut summary = runner.summary;
@@ -1034,7 +1037,14 @@ struct ScriptRunner<'a> {
     steps_total: usize,
     /// Adding parts: game files an archive replaces are moved under here first.
     backup: Option<PathBuf>,
+    /// Programs the script started without waiting for them: not started yet, and running (by
+    /// name).
+    deferred: Vec<(PathBuf, String, PathBuf)>,
+    background: Vec<(String, std::process::Child)>,
 }
+
+/// How long programs the script started without waiting may run on after the script ended.
+const BACKGROUND_GRACE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// A repack archive the script will extract later, extracted early into a staging folder.
 struct Prefetch {
@@ -1294,6 +1304,39 @@ impl ScriptRunner<'_> {
         }
     }
 
+    /// Programs the script started without waiting: Setup leaves them running, but they work
+    /// on the game's files (the script usually waits for them itself), so the install waits
+    /// for them before the file check. Stopped at once when the script failed or the install
+    /// was cancelled, and after `BACKGROUND_GRACE` otherwise.
+    fn finish_background(&mut self, failed: bool) {
+        if !failed
+            && !self.opts.cancel.load(Ordering::Relaxed)
+            && let Err(e) = self.start_deferred()
+        {
+            self.summary.problems.push(format!("{e:#}"));
+        }
+        let started = std::time::Instant::now();
+        for (name, mut child) in std::mem::take(&mut self.background) {
+            loop {
+                if !matches!(child.try_wait(), Ok(None)) {
+                    break;
+                }
+                let cancelled = self.opts.cancel.load(Ordering::Relaxed);
+                if failed || cancelled || started.elapsed() > BACKGROUND_GRACE {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if !failed && !cancelled {
+                        let note = format!("{name} (started without waiting) still ran {} s after the script ended: stopped it", BACKGROUND_GRACE.as_secs());
+                        events::warn(self.sink, note.clone());
+                        self.summary.notes.push(note);
+                    }
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
     fn merge(&mut self, s: Summary) {
         let sm = &mut self.summary;
         sm.files_ok += s.files_ok;
@@ -1382,26 +1425,16 @@ impl ScriptRunner<'_> {
         Ok(true)
     }
 
-    fn exec(&mut self, program: &Path, args: &str, dir: &Path) -> Result<bool> {
-        let mut cmd;
-        let is_batch = program.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
-        if is_batch {
-            // As Inno's Exec does: batch files run through cmd.exe.
-            cmd = std::process::Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()));
-            raw_arg(&mut cmd, &format!("/C \"\"{}\"{args}\"", program.display()));
-        } else {
-            cmd = std::process::Command::new(program);
-            raw_arg(&mut cmd, args.trim_start());
+    fn exec(&mut self, program: &Path, args: &str, dir: &Path, wait: bool) -> Result<bool> {
+        if !wait {
+            // Started once the archives up to the next other step are fully unpacked: such a
+            // program waits for a file an archive unpacks and then works on the files before
+            // it (007 First Light's w01.bat: chunk0_t.fgpack, then chunk0_b.fgpack). FreeArc
+            // writes them in order; the parallel extraction here doesn't.
+            self.deferred.push((program.to_path_buf(), args.to_string(), dir.to_path_buf()));
+            return Ok(true);
         }
-        let names: HashSet<String> = self.prefetch.iter().map(|p| p.cfg_name.clone()).collect();
-        for n in names {
-            if exec_touches(program, args, &n) {
-                *self.changes.entry(n).or_default() += 1;
-            }
-        }
-        cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
-        let mut child = cmd.spawn().with_context(|| format!("start {}", program.display()))?;
+        let mut child = self.spawn(program, args, dir)?;
         let status = loop {
             if let Some(st) = child.try_wait()? {
                 break st;
@@ -1421,6 +1454,38 @@ impl ScriptRunner<'_> {
         // Like ISDone: a program that ran counts as done; the final MD5 check catches failures.
         Ok(true)
     }
+
+    /// Starts the programs the script started without waiting (see `exec`).
+    fn start_deferred(&mut self) -> Result<()> {
+        for (program, args, dir) in std::mem::take(&mut self.deferred) {
+            let child = self.spawn(&program, &args, &dir)?;
+            let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.background.push((name, child));
+        }
+        Ok(())
+    }
+
+    fn spawn(&mut self, program: &Path, args: &str, dir: &Path) -> Result<std::process::Child> {
+        let mut cmd;
+        let is_batch = program.extension().is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"));
+        if is_batch {
+            // As Inno's Exec does: batch files run through cmd.exe.
+            cmd = std::process::Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()));
+            raw_arg(&mut cmd, &format!("/C \"\"{}\"{args}\"", program.display()));
+        } else {
+            cmd = std::process::Command::new(program);
+            raw_arg(&mut cmd, args.trim_start());
+        }
+        let names: HashSet<String> = self.prefetch.iter().map(|p| p.cfg_name.clone()).collect();
+        for n in names {
+            if exec_touches(program, args, &n) {
+                *self.changes.entry(n).or_default() += 1;
+            }
+        }
+        cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
+        cmd.spawn().with_context(|| format!("start {}", program.display()))
+    }
 }
 
 impl crate::setup_script::Runner for ScriptRunner<'_> {
@@ -1431,10 +1496,13 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         self.n += 1;
         let total = self.steps_total.max(self.n);
         (self.sink)(Event::Step { index: self.n, total, label: step_label(step) });
+        if !matches!(step, Step::Extract { .. }) {
+            self.start_deferred()?;
+        }
         let started = std::time::Instant::now();
         let ok = match step {
             Step::Extract { archive, out, cfg, base } => self.extract(archive, out, cfg, base.as_deref())?,
-            Step::Exec { program, args, dir } => self.exec(program, args, dir)?,
+            Step::Exec { program, args, dir, wait } => self.exec(program, args, dir, *wait)?,
             Step::Rar { archive, out, unrar, password } => self.unrar(archive, out, unrar, password)?,
         };
         let secs = started.elapsed().as_secs_f64();

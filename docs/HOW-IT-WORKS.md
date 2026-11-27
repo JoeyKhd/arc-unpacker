@@ -7,7 +7,7 @@ A repack's `setup.exe` is an Inno Setup program. Its real work happens in a comp
 arc-unpack includes a small Pascal Script interpreter ([`src/pascal.rs`](../src/pascal.rs)) and runs that script itself, supplying the functions it calls ([`src/setup_script.rs`](../src/setup_script.rs)):
 
 - **Archive extraction** (ISDone's `ISArcExtract`) goes through arc-unpack's parallel engine.
-- **The repack's own tools** (`ISExec`, `Exec`) run exactly as the script says, in the same order, without windows.
+- **The repack's own tools** (`ISExec`, `Exec`) run exactly as the script says, in the same order, without windows. A tool the script starts without waiting (`Exec` with `ewNoWait`) runs alongside the steps after it; it starts once the archives just before it are fully unpacked, because such tools wait for a file those archives contain and then work on the files unpacked before it.
 - **RAR archives** some older repacks rebuild and then unpack (ISDone's `ISRarExtract`) go through the installer's own `Unrar.dll`, in a 32-bit helper like `unarc.dll`.
 - **Codec settings** the script hands to ISDone (`PrecompInit`'s temp folder and memory) are written into the installer's `CLS.ini`, as ISDone does.
 - **The installer's window**, progress bars and music are accepted and ignored.

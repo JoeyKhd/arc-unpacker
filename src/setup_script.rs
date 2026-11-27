@@ -21,8 +21,9 @@ pub enum Step {
     /// Extract `archive` into `out`, with the FreeArc config `cfg` (the script's `arc.ini`).
     /// With `base`, only that folder inside the archive, its prefix stripped (FreeArc `-ap`).
     Extract { archive: PathBuf, out: PathBuf, cfg: PathBuf, base: Option<String> },
-    /// Run `program` with the command-line tail `args` in `dir`.
-    Exec { program: PathBuf, args: String, dir: PathBuf },
+    /// Run `program` with the command-line tail `args` in `dir`; without `wait`, carry on while
+    /// it runs (Inno's `Exec` with `ewNoWait`).
+    Exec { program: PathBuf, args: String, dir: PathBuf, wait: bool },
     /// Extract the RAR archive `archive` into `out` with the installer's `unrar` (Unrar.dll), as
     /// ISDone's ISRarExtract does (older repacks rebuild a RAR file and unpack it).
     Rar { archive: PathBuf, out: PathBuf, unrar: PathBuf, password: String },
@@ -35,9 +36,10 @@ impl std::fmt::Display for Step {
                 let part = base.as_ref().map(|b| format!(" [{b}]")).unwrap_or_default();
                 write!(f, "extract {}{part} -> {}", archive.display(), out.display())
             }
-            Step::Exec { program, args, dir } => {
+            Step::Exec { program, args, dir, wait } => {
                 let name = program.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-                write!(f, "run {name}{args} (in {})", dir.display())
+                let background = if *wait { "" } else { ", without waiting" };
+                write!(f, "run {name}{args} (in {}{background})", dir.display())
             }
             Step::Rar { archive, out, .. } => write!(f, "unrar {} -> {}", archive.display(), out.display()),
         }
@@ -439,7 +441,7 @@ impl<'a> InnoHost<'a> {
         Ok(ok)
     }
 
-    fn exec(&mut self, program: &str, args: &str, dir: &str) -> Result<bool> {
+    fn exec(&mut self, program: &str, args: &str, dir: &str, wait: bool) -> Result<bool> {
         // FitGirl's installers flush the system file cache to free RAM first: it only costs time.
         if Path::new(program).file_name().is_some_and(|n| n.eq_ignore_ascii_case("FlushFileCache.exe")) {
             return Ok(true);
@@ -458,7 +460,7 @@ impl<'a> InnoHost<'a> {
             bail!("bad working folder '{dir}'");
         };
         let args = if args.is_empty() || args.starts_with(' ') { args.to_string() } else { format!(" {args}") };
-        self.step(Step::Exec { program, args, dir })
+        self.step(Step::Exec { program, args, dir, wait })
     }
 
     fn ini(&mut self, write: bool, section: &str, key: &str, value: &str, file: &str) -> Result<Value> {
@@ -679,7 +681,10 @@ impl Host for InnoHost<'_> {
                 None
             }
             "EXEC" => {
-                let ok = self.exec(&s(0), &s(1), &s(2))?;
+                // Exec(Filename, Params, WorkingDir, ShowCmd, Wait, ResultCode): Wait 0 is
+                // ewNoWait. 007 First Light starts w01.bat that way: it works through files the
+                // next archive unpacks, and waiting for it there never ends.
+                let ok = self.exec(&s(0), &s(1), &s(2), int(4) != 0)?;
                 out.push((5, Value::Int(if ok { 0 } else { 1 })));
                 yes(ok)
             }
@@ -700,11 +705,11 @@ impl Host for InnoHost<'_> {
                 {
                     let _ = std::fs::create_dir_all(&dir);
                 }
-                yes(self.exec(&s(3), &s(4), &s(5))?)
+                yes(self.exec(&s(3), &s(4), &s(5), true)?)
             }
             "dll:EXEC2" => {
                 let tmp = self.folders.tmp.to_string_lossy().into_owned();
-                yes(self.exec(&s(0), &s(1), &tmp)?)
+                yes(self.exec(&s(0), &s(1), &tmp, true)?)
             }
             "dll:ISRAREXTRACT" => {
                 // ISRarExtract(CurComponent, PctOfTotal, InName, OutPath, DeleteInFile, Password).
