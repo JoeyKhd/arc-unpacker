@@ -1125,6 +1125,83 @@ fn benign_exit(program: &Path, code: i32) -> bool {
     (fart && code >= 0) || (is_batch(program) && code == 1 && !program.exists())
 }
 
+/// Can the batch file `bat` (run in `dir`) change what an early extraction with codec config
+/// `cfg_name` depends on: the config itself, or anything else in the temp folder `tmp` (codec
+/// programs, CLS.ini)? Read with the run.exe lists it passes on. FitGirl's buildNN.bat files
+/// only use `{tmp}\work\` (their tools and lists) and the game folder. Anything unclear counts
+/// as yes: an unreadable file, another batch file, the config's name as a word, a path into
+/// `{tmp}` outside `work\`, or running in `{tmp}` itself.
+fn batch_touches(bat: &Path, dir: &Path, cfg_name: &str, tmp: &Path) -> bool {
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase().trim_end_matches('\\').to_string();
+    let tmp_l = format!("{}\\", lower(tmp));
+    let work = format!("{tmp_l}work\\");
+    let dir_l = format!("{}\\", lower(dir));
+    if dir_l.starts_with(&tmp_l) && !dir_l.starts_with(&work) {
+        return true;
+    }
+    let read = |p: &Path| std::fs::read(p).ok().map(|b| b.iter().map(|&c| (c as char).to_ascii_lowercase()).collect::<String>());
+    let Some(text) = read(bat) else { return true };
+    let mut texts = vec![text.clone()];
+    for line in text.lines().filter(|l| l.contains("run.exe")) {
+        // "<tmp>\work\run.exe" " " <url> "<tmp>\work\fitgirl01.txt" 0: the list is the third
+        // word after run.exe.
+        let words = cmd_words(line);
+        let Some(list) = words.iter().position(|w| w.ends_with("run.exe")).and_then(|i| words.get(i + 3)) else { return true };
+        let list = Path::new(list);
+        let list = if list.is_absolute() { list.to_path_buf() } else { dir.join(list) };
+        match read(&list) {
+            Some(t) => texts.push(t),
+            None => return true,
+        }
+    }
+    let own = bat.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    texts.iter().any(|t| {
+        has_word(t, cfg_name)
+            || t.match_indices(&tmp_l).any(|(i, _)| !t[i + tmp_l.len()..].starts_with("work\\"))
+            || t.split(|c: char| c.is_whitespace() || "\"&|<>()".contains(c)).any(|w| {
+                let name = w.rsplit(['\\', '/']).next().unwrap_or("");
+                (name.ends_with(".bat") || name.ends_with(".cmd")) && name != own
+            })
+    })
+}
+
+/// The words of a command line, quotes removed ("a b" c -> [a b, c]).
+fn cmd_words(line: &str) -> Vec<String> {
+    let (mut words, mut cur, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+    for c in line.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any || !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => {
+                cur.push(c);
+                any = true;
+            }
+        }
+    }
+    if any || !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// `word` in `text` as a whole word (a file name: not part of a longer name).
+fn has_word(text: &str, word: &str) -> bool {
+    let name_char = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+    text.match_indices(word).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + word.len()..].chars().next();
+        before.is_none_or(|c| "\\/\" \t\r\n".contains(c)) && after.is_none_or(|c| !name_char(c))
+    })
+}
+
 /// Does an Exec step (possibly) change `cfg_name`? Batch files are opaque, so they count.
 fn exec_touches(program: &Path, args: &str, cfg_name: &str) -> bool {
     is_batch(program) || args.to_lowercase().contains(cfg_name)
@@ -1474,6 +1551,12 @@ impl ScriptRunner<'_> {
             self.deferred.push((program.to_path_buf(), args.to_string(), dir.to_path_buf()));
             return Ok(true);
         }
+        // Archives that only waited for this step to settle their codec config start now, and
+        // unpack while it runs (FitGirl's buildNN.bat files never touch it). Before it starts,
+        // so they see only files earlier steps finished.
+        let (now, after) = self.config_changes(program, args, dir);
+        self.count_changes(now);
+        self.start_prefetches();
         let mut child = self.spawn(program, args, dir)?;
         // CPU time of the program and everything it starts (cmd.exe -> run.exe -> 32 tools):
         // shows whether a step is CPU-bound, single-threaded or waiting.
@@ -1515,6 +1598,7 @@ impl ScriptRunner<'_> {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
+        self.count_changes(after);
         let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(cpu) = cpu.as_ref().and_then(|j| j.cpu_seconds()) {
             let wall = started.elapsed().as_secs_f64();
@@ -1591,6 +1675,10 @@ impl ScriptRunner<'_> {
             self.substitute_tools();
         }
         for (program, args, dir) in std::mem::take(&mut self.deferred) {
+            // (A program that runs on its own while the script goes on counts at once.)
+            let (now, after) = self.config_changes(&program, &args, &dir);
+            self.count_changes(now);
+            self.count_changes(after);
             let child = self.spawn(&program, &args, &dir)?;
             let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             self.background.push((name, child));
@@ -1609,18 +1697,38 @@ impl ScriptRunner<'_> {
             cmd = std::process::Command::new(program);
             raw_arg(&mut cmd, args.trim_start());
         }
-        let names: HashSet<String> = self.prefetch.iter().map(|p| p.cfg_name.clone()).collect();
-        for n in names {
-            if exec_touches(program, args, &n) {
-                *self.changes.entry(n).or_default() += 1;
-            }
-        }
         cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if let Some((_, map, _)) = &self.standins {
             cmd.env(crate::tools::MAP_ENV, map);
         }
         crate::stage::apply_child_flags(&mut cmd, self.opts.tune);
         cmd.spawn().with_context(|| format!("start {}", program.display()))
+    }
+
+    /// The codec configs (of early extractions) a step may change, split into those it can't
+    /// really touch (counted as changed at once, so archives waiting for it can start while it
+    /// runs) and those it may (counted once it has finished). Batch files are read to decide
+    /// (`batch_touches`); any other program touches a config its command line names.
+    fn config_changes(&self, program: &Path, args: &str, dir: &Path) -> (Vec<String>, Vec<String>) {
+        let names: HashSet<String> = self.prefetch.iter().map(|p| p.cfg_name.clone()).collect();
+        let (mut now, mut after) = (Vec::new(), Vec::new());
+        for n in names {
+            if !exec_touches(program, args, &n) {
+                continue;
+            }
+            if is_batch(program) && !batch_touches(program, dir, &n, &self.tmp) {
+                now.push(n);
+            } else {
+                after.push(n);
+            }
+        }
+        (now, after)
+    }
+
+    fn count_changes(&mut self, names: Vec<String>) {
+        for n in names {
+            *self.changes.entry(n).or_default() += 1;
+        }
     }
 }
 
@@ -2259,5 +2367,57 @@ mod tests {
         std::fs::write(&kept, "@echo off").unwrap();
         assert!(!benign_exit(&kept, 1));
         assert!(!benign_exit(&dir.path().join("x5.exe"), 2));
+    }
+
+    #[test]
+    fn fitgirl_batch_files_dont_touch_the_codec_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("Run").join("tmp");
+        let work = tmp.join("work");
+        let app = dir.path().join("Game");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        let t = tmp.display().to_string();
+        // Shapes of the saved bats and lists, after FitGirl's fart.exe put the real {tmp} in.
+        let bat = work.join("build01.bat");
+        std::fs::write(
+            &bat,
+            format!("\"{t}\\work\\run.exe\" \" \" http://bit.ly/fitgirl-repacks-new-list \"{t}\\work\\fitgirl01.txt\" 0\r\ndel \"{t}\\work\\fitgirl01.txt\"\r\ndel \"{t}\\work\\build01.bat\""),
+        )
+        .unwrap();
+        let list = work.join("fitgirl01.txt");
+        // Cricket 19, and The Sims 3 (whose files are named like 160-1-ini.ini).
+        std::fs::write(
+            &list,
+            format!(
+                "cmd /c \"\"{t}\\work\\fgpack.exe\" e 22.fgpack 22.fgpack_ >nul 2>&1&&del 22.fgpack&&\"{t}\\work\\x5.exe\" 22.fgpack_ 22.fgpack.x5 22.fgpack\"\r\ncmd /c \"\"{t}\\work\\fgpack.exe\" c 160-1-ini.ini 160-1-ini.ini_ \"c1\" nul nul&&move 160-1-ini.ini_ 160-1-ini.ini\"\r\n"
+            ),
+        )
+        .unwrap();
+        assert!(!batch_touches(&bat, &app, "arc.ini", &tmp));
+        assert!(!batch_touches(&bat, &app, "ini.ini", &tmp), "names are whole words");
+        assert!(batch_touches(&bat, &app, "160-1-ini.ini", &tmp), "a name in the list");
+        // Run in {tmp} itself: its relative names could be anything there.
+        assert!(batch_touches(&bat, &tmp, "arc.ini", &tmp));
+        assert!(!batch_touches(&bat, &work, "arc.ini", &tmp));
+
+        let touching = |body: String| {
+            let b = work.join("build02.bat");
+            std::fs::write(&b, body).unwrap();
+            batch_touches(&b, &app, "arc.ini", &tmp)
+        };
+        assert!(touching(format!("copy x \"{t}\\arc.ini\"")), "the config itself");
+        assert!(touching("copy x arc.ini".into()), "the config by name");
+        assert!(!touching("copy x xarc.ini".into()), "another name that ends like it");
+        assert!(touching(format!("del \"{t}\\cls-srep.dll\"")), "a codec in {{tmp}}");
+        assert!(touching("call other.bat".into()), "another batch file");
+        assert!(touching(format!("\"{t}\\work\\run.exe\" \" \" url \"{t}\\work\\missing.txt\" 0")), "an unreadable list");
+        assert!(batch_touches(&work.join("none.bat"), &app, "arc.ini", &tmp), "an unreadable bat");
+    }
+
+    #[test]
+    fn command_words() {
+        assert_eq!(cmd_words(r#""C:\t\run.exe" " " http://x "C:\t\l.txt" 0"#), [r"C:\t\run.exe", " ", "http://x", r"C:\t\l.txt", "0"]);
+        assert!(has_word("del arc.ini\r\n", "arc.ini") && has_word(r"x\arc.ini", "arc.ini") && !has_word("xarc.ini", "arc.ini") && !has_word("arc.ini_", "arc.ini"));
     }
 }

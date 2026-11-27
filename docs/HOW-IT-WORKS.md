@@ -49,7 +49,7 @@ If a script needs a function arc-unpack doesn't provide, the install stops with 
 
 ## What makes it fast
 
-- **Early extraction.** arc-unpack plans the whole script first. While the script works through one step, the repack archives it needs later are already being extracted, into a staging folder next to the game folder. When the script reaches them, the files are moved into place (a rename on the same drive), so the order of effects is the script's own.
+- **Early extraction.** arc-unpack plans the whole script first. While the script works through one step, the repack archives it needs later are already being extracted, into a staging folder next to the game folder. When the script reaches them, the files are moved into place (a rename on the same drive), so the order of effects is the script's own. An archive waits only for steps that can change its codec settings: a FitGirl batch file is read first (with the lists it hands to her `run.exe`), and one that only uses its own `work` folder and the game folder lets the archives after it extract while it runs.
 - **Checking while writing.** Every file named in the repack's MD5 list is hashed as it's written. Files changed by a later step are re-checked from disk at the end. There's no second read of the whole game.
 - **Checking the downloads while installing.** The `.bin` files are hashed against the repack's list while they're being decoded, not in a pass before. A damaged archive stops the install with its name.
 - **A small plugin inside xtool.** xtool, the precompressor most repacks use, loads every plugin next to it. arc-unpack places a 10 KB one there ([`xtool-timer/`](../xtool-timer/src/lib.rs)) that registers no codecs and does two things inside xtool's own process:
