@@ -140,6 +140,89 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+/// The drop area shown until a repack is picked, in the logo's style (as docs/drop.svg): its three
+/// streams, white, green and white, trail a folder that the pointer carries in. While a folder is
+/// dragged over the window, the area turns green and the folder settles. (Run as administrator,
+/// the window only hears of the drop itself, not the drag before it, so then nothing lights up.)
+fn drop_zone(ui: &mut egui::Ui, active: bool) {
+    use egui::epaint::RectShape;
+    use egui::{CornerRadius, Rect, Shape, Stroke, pos2, vec2};
+    let ctx = ui.ctx().clone();
+    let t = ctx.animate_bool_with_time(egui::Id::unique("drop-zone-active"), active, 0.2);
+    // The art is drawn in the units of docs/drop.svg (x 180..640, y 120..350), at this scale;
+    // below it, two lines of text.
+    let s = 0.55;
+    let (pad, text_h) = (30.0, 16.0 + 29.0 + 20.0);
+    let (zone, _) = ui.allocate_exact_size(vec2(ui.available_width(), pad + 230.0 * s + text_h + pad), egui::Sense::hover());
+    let painter = ui.painter_at(zone);
+    painter.rect(
+        zone,
+        12u8,
+        Color32::TRANSPARENT.lerp_to_gamma(ACCENT.gamma_multiply(0.08), t),
+        Stroke::new(1.0 + t, BORDER_STRONG.lerp_to_gamma(ACCENT, t)),
+        egui::StrokeKind::Inside,
+    );
+
+    let origin = pos2(zone.center().x - (640.0 - 180.0) * s / 2.0, zone.top() + pad);
+    let at = |x: f32, y: f32| origin + vec2((x - 180.0) * s, (y - 120.0) * s);
+
+    // The streams: fading in from the left, as long as the logo's (green longest, then white,
+    // white), ending under the folder.
+    let ramp_id = egui::Id::unique("drop-zone-ramp");
+    let ramp = ctx.data(|d| d.get_temp::<egui::TextureHandle>(ramp_id)).unwrap_or_else(|| {
+        let pixels = (0..64).map(|i| Color32::from_white_alpha((i * 255 / 63) as u8)).collect();
+        let texture = ctx.load_texture("drop-zone-ramp", egui::ColorImage::new([64, 1], pixels), egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| d.insert_temp(ramp_id, texture.clone()));
+        texture
+    });
+    let up = vec2(2.0, -1.0).normalized();
+    let white = Color32::WHITE.gamma_multiply(0.3);
+    for (y, len, color) in [(180.0, 230.0, white), (215.0, 280.0, ACCENT.gamma_multiply(0.95)), (250.0, 170.0, white)] {
+        let center = at(470.0, y) - up * (len * s / 2.0);
+        let stream = RectShape::filled(Rect::from_center_size(center, vec2(len * s, 16.0 * s)), 0u8, color)
+            .with_texture(ramp.id(), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)))
+            .with_angle(up.angle());
+        painter.add(stream);
+    }
+
+    // The folder, tilted on its way in; it straightens and settles while a drop is coming.
+    let shift = vec2(4.0, 12.0) * (t * s);
+    let tilt = (-8.0f32).to_radians() * (1.0 - t);
+    let pivot = at(540.0, 200.0) + shift;
+    let r = |v: f32| (v * s).round() as u8;
+    let part = |x0: f32, y0: f32, x1: f32, y1: f32, corners: CornerRadius, fill: Color32| {
+        RectShape::filled(Rect::from_min_max(at(x0, y0) + shift, at(x1, y1) + shift), corners, fill).with_angle_and_pivot(tilt, pivot)
+    };
+    painter.add(part(460.0, 138.0, 530.0, 168.0, CornerRadius { nw: r(14.0), ne: r(8.0), sw: 0, se: 0 }, MUTED));
+    painter.add(part(460.0, 154.0, 620.0, 262.0, CornerRadius::same(r(14.0)), MUTED));
+    painter.add(part(460.0, 170.0, 620.0, 262.0, CornerRadius { nw: r(12.0), ne: r(12.0), sw: r(14.0), se: r(14.0) }, Color32::WHITE));
+
+    // The pointer carrying it: filled as triangles (its outline isn't convex), then outlined.
+    let tip = at(598.0, 224.0) + shift;
+    let outline: Vec<egui::Pos2> =
+        [(0.0, 0.0), (0.0, 40.0), (10.0, 31.0), (18.0, 48.0), (26.0, 44.0), (18.0, 28.0), (32.0, 28.0)].iter().map(|&(x, y)| tip + vec2(x, y) * s).collect();
+    let mut mesh = egui::Mesh::default();
+    for &p in &outline {
+        mesh.colored_vertex(p, Color32::WHITE);
+    }
+    for [a, b, c] in [[0, 1, 2], [0, 2, 5], [0, 5, 6], [2, 3, 4], [2, 4, 5]] {
+        mesh.add_triangle(a, b, c);
+    }
+    painter.add(Shape::mesh(mesh));
+    painter.add(Shape::closed_line(outline, Stroke::new(1.4, BG)));
+
+    let title = if active { "Drop to use this repack" } else { "Drop a repack folder here, or press Browse" };
+    let y = at(0.0, 350.0).y + 16.0;
+    painter.text(pos2(zone.center().x, y), egui::Align2::CENTER_TOP, title, egui::FontId::new(17.0, semibold()), TEXT.lerp_to_gamma(Color32::WHITE, t));
+    painter.text(
+        pos2(zone.center().x, y + 29.0),
+        egui::Align2::CENTER_TOP,
+        "The folder with setup.exe and the fg-*.bin files",
+        egui::TextStyle::Body.resolve(ui.style()),
+        MUTED,
+    );
+}
+
 fn main() -> eframe::Result {
     arc_unpack::guard::kill_descendants_on_exit();
     arc_unpack::perf::tune_self();
@@ -783,6 +866,8 @@ impl App {
             (Some("done"), true)
         } else if in_install && self.shots_taken == 0 && self.running.is_some() {
             (Some("installing"), false)
+        } else if self.repack.trim().is_empty() && self.running.is_none() {
+            (Some(""), true)
         } else if !self.auto_install && self.running.is_none() && self.outcome.is_none() && ready && self.analyzing.is_none() {
             (Some(""), true)
         } else {
@@ -897,8 +982,8 @@ impl eframe::App for App {
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 if dragging {
-                    ui.add_space(30.0);
-                    ui.vertical_centered(|ui| ui.label(sb("Drop to use this repack", 18.0)));
+                    ui.add_space(8.0);
+                    drop_zone(ui, true);
                     return;
                 }
                 self.before_install(ui, &ctx, busy);
@@ -927,13 +1012,7 @@ impl App {
     fn before_install(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
         if self.repack.trim().is_empty() {
             ui.add_space(8.0);
-            egui::Frame::new().stroke(egui::Stroke::new(1.0, BORDER_STRONG)).corner_radius(12).inner_margin(egui::Margin::symmetric(16, 44)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.vertical_centered(|ui| {
-                    ui.label(sb("Drop a repack folder here, or press Browse", 17.0));
-                    ui.label(RichText::new("The folder with setup.exe and the fg-*.bin files").color(MUTED));
-                });
-            });
+            drop_zone(ui, false);
             return;
         }
         if self.analyzing.is_some() || (self.analysis.is_none() && Path::new(self.repack.trim()).is_dir()) {
@@ -952,6 +1031,20 @@ impl App {
             }
             None => return,
         };
+
+        // While installing, and once that succeeded, the choices can't change any more: one line
+        // says what was chosen, and the progress (with its Cancel button) stays in view.
+        let installed = matches!(&self.outcome, Some(Outcome::Done { report, .. }) if report.summary.problems.is_empty() && !report.summary.cancelled);
+        if busy || installed {
+            let mut parts: Vec<String> = a.choices.iter().filter(|c| self.selected.contains(&c.name)).map(|c| c.label.clone()).collect();
+            if self.limit_ram {
+                parts.push(format!("RAM limited to {} GB", self.ram_limit_gb));
+            }
+            if !parts.is_empty() {
+                ui.label(RichText::new(parts.join(" · ")).color(MUTED));
+            }
+            return;
+        }
 
         // What to install.
         if !a.choices.is_empty() {
@@ -1091,7 +1184,6 @@ impl App {
         // The one primary action (gone once this install succeeded; picking another folder
         // brings it back).
         ui.add_space(10.0);
-        let installed = matches!(&self.outcome, Some(Outcome::Done { report, .. }) if report.summary.problems.is_empty() && !report.summary.cancelled);
         if !busy && !installed {
             let can = ready && !self.target.trim().is_empty();
             let adding = matches!(&self.check, Some(c) if c.parts.only_optional);
@@ -1158,6 +1250,16 @@ impl App {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
             ui.label(sb(&title, 18.0).color(Color32::WHITE));
+            // Cancel next to the title, where it's always in view.
+            if let Some(r) = &self.running
+                && !cancelled
+            {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        r.cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
         });
         if !sub.is_empty() {
             ui.label(RichText::new(&sub).color(MUTED));
@@ -1177,9 +1279,6 @@ impl App {
         }
         ui.horizontal(|ui| {
             if let Some(r) = &self.running {
-                if ui.button("Cancel").clicked() {
-                    r.cancel.store(true, Ordering::Relaxed);
-                }
                 if p.phase == "Verifying archives"
                     && !r.skip_verify.load(Ordering::Relaxed)
                     && ui.button("Skip archive check").on_hover_text("Stop checking the downloaded files and start installing now.").clicked()
