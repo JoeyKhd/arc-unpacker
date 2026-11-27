@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-78 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+79 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -74,6 +74,7 @@
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Palworld | 25.4 GB | 10 min 48 s | 8 min 18 s | **1.3×** | 0.1.0-beta.11 |
 | Resident Evil 2 | 18.5 GB | 7 min 02 s | 5 min 33 s | **1.3×** | 0.1.0-beta.11 |
+| The Sims 3 | 16.5 GB | 15 min 42 s | 11 min 58 s | **1.3×** | 1.0.0 |
 | Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
 | Dune - Awakening | 24.2 GB | 15 min 48 s | 12 min 44 s | **1.2×** | 0.1.0-beta.11 |
@@ -84,11 +85,11 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 78** | | **328 min 32 s** | **199 min 24 s** | **1.6×** | |
+| **All 79** | | **344 min 14 s** | **211 min 22 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 78 installs were byte-identical to the original installer's.
+- **Same result:** all 79 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
