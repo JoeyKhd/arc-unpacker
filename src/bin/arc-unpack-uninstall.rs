@@ -130,7 +130,7 @@ mod win {
         if !quiet {
             finished(&rec, dir, &removal);
         }
-        clean_up_later(dir, &rec, tmp);
+        clean_up_later(dir, &rec, &removal, tmp);
         if removal.failed.is_empty() { DONE } else { PROBLEMS }
     }
 
@@ -246,16 +246,23 @@ mod win {
     }
 
     /// Once this program has exited: removes `uninstall.exe` from the game folder, the folder
-    /// itself if the install made it and nothing is left in it, and the temporary copy.
-    fn clean_up_later(dir: &Path, rec: &Record, tmp: Option<&Path>) {
-        let mut line = format!("/C \"ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"", dir.join(uninstall::EXE).display());
-        if rec.made_folder {
-            line.push_str(&format!(" & rd \"{}\"", dir.display()));
+    /// itself if the install made it and nothing is left in it, and the temporary copy. Tried
+    /// every second for up to half a minute: Explorer can hold the folder for a moment after its
+    /// shortcuts are deleted.
+    fn clean_up_later(dir: &Path, rec: &Record, removal: &Removal, tmp: Option<&Path>) {
+        let exe = dir.join(uninstall::EXE);
+        let folder_goes = rec.made_folder && removal.kept.is_empty() && removal.failed.is_empty();
+        let mut step = format!("ping -n 2 127.0.0.1 >nul & del /f /q \"{}\" 2>nul", exe.display());
+        let mut done = format!("if not exist \"{}\"", exe.display());
+        if folder_goes {
+            step.push_str(&format!(" & rd \"{}\" 2>nul", dir.display()));
+            done.push_str(&format!(" if not exist \"{}\"", dir.display()));
         }
         if let Some(t) = tmp {
-            line.push_str(&format!(" & del /f /q \"{}\"", t.display()));
+            step.push_str(&format!(" & del /f /q \"{}\" 2>nul", t.display()));
+            done.push_str(&format!(" if not exist \"{}\"", t.display()));
         }
-        line.push('"');
+        let line = format!("/C \"for /l %i in (1,1,30) do @({step} & {done} exit)\"");
         let _ = std::process::Command::new("cmd.exe").raw_arg(line).current_dir(std::env::temp_dir()).creation_flags(CREATE_NO_WINDOW).spawn();
     }
 
