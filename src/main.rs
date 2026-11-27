@@ -235,9 +235,8 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Runtimes { repack, install } => {
-            // (Only setup.exe is needed: the .bin files may be gone after installing.)
-            let setup_exe = repack.join("setup.exe");
-            anyhow::ensure!(setup_exe.is_file(), "no setup.exe in {}", repack.display());
+            // (Only the installer is needed: the .bin files may be gone after installing.)
+            let setup_exe = arc_unpack::install::find_setup(&repack).with_context(|| format!("no installer (setup.exe) in {}", repack.display()))?;
             let setup = arc_unpack::inno::Setup::open(&setup_exe)?;
             let script = arc_unpack::pascal::Script::load(&setup.code).ok();
             let list = arc_unpack::runtimes::of_repack(&setup, script.as_ref(), &arc_unpack::setup_script::repack_files(&repack));
@@ -273,7 +272,11 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Script { repack, target, disasm } => {
-            let setup_exe = if repack.is_file() { repack.clone() } else { repack.join("setup.exe") };
+            let setup_exe = if repack.is_file() {
+                repack.clone()
+            } else {
+                arc_unpack::install::find_setup(&repack).with_context(|| format!("no installer (setup.exe) in {}", repack.display()))?
+            };
             let repack = if repack.is_file() { repack.parent().map(PathBuf::from).unwrap_or_default() } else { repack };
             if let Some(name) = disasm {
                 let setup = arc_unpack::inno::Setup::open(&setup_exe)?;
