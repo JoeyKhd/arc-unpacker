@@ -891,6 +891,8 @@ fn run_scripted(
             .then(|| crate::helpers::find(&[crate::tools::PROGRAM], &opts.host_dir).ok())
             .flatten()
             .map(|p| (p, run_dir.join(crate::tools::MAP_FILE), run_dir.join("tool-originals"))),
+        overlapped: Vec::new(),
+        safe_tools: HashMap::new(),
     };
     let folders = Folders { app: target.clone(), tmp: tmp.clone(), src: abs(&opts.repack_dir), setup_exe: abs(setup_exe) };
     let mut host = InnoHost::new(folders, inno, selected.clone(), &mut runner);
@@ -1052,6 +1054,22 @@ struct ScriptRunner<'a> {
     /// Stand-ins for repack tools we know exactly (src/tools.rs): the stand-in program, the
     /// list of stand-ins and where the originals go. None: disabled or not found.
     standins: Option<(PathBuf, PathBuf, PathBuf)>,
+    /// Tool steps running beside the next steps (see `overlap_paths`), and which programs
+    /// qualify, by path.
+    overlapped: Vec<Overlapped>,
+    safe_tools: HashMap<PathBuf, Option<usize>>,
+}
+
+/// A tool step running beside the next steps.
+struct Overlapped {
+    n: usize,
+    program: PathBuf,
+    args: String,
+    child: std::process::Child,
+    cpu: Option<crate::perf::CpuJob>,
+    started: std::time::Instant,
+    /// The files and folders its command line names (see `path_key`).
+    paths: Vec<String>,
 }
 
 /// How long programs the script started without waiting may run on after the script ended.
@@ -1163,6 +1181,59 @@ fn batch_touches(bat: &Path, dir: &Path, cfg_name: &str, tmp: &Path) -> bool {
                 (name.ends_with(".bat") || name.ends_with(".cmd")) && name != own
             })
     })
+}
+
+/// A cmd command line's `&&`-chained commands (quotes respected); None if it uses `&` alone.
+fn split_and_and(line: &str) -> Option<Vec<&str>> {
+    let (mut out, mut start, mut quoted) = (Vec::new(), 0, false);
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => quoted = !quoted,
+            b'&' if !quoted => {
+                if b.get(i + 1) != Some(&b'&') {
+                    return None;
+                }
+                out.push(line[start..i].trim());
+                i += 2;
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(line[start..].trim());
+    (!quoted && out.iter().all(|s| !s.is_empty())).then_some(out)
+}
+
+/// `word` as a path, relative to `dir` unless absolute.
+fn resolve_in(dir: &Path, word: &str) -> PathBuf {
+    let p = Path::new(word);
+    if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }
+}
+
+/// A path for comparing: absolute, `.`/`..` resolved, lowercase, no trailing separator.
+fn path_key(p: &Path) -> Option<String> {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    Some(out.to_string_lossy().to_lowercase().replace('/', "\\").trim_end_matches('\\').to_string())
+}
+
+/// Whether two steps' paths meet: the same file, or one inside the other's folder.
+fn paths_overlap(a: &[String], b: &[String]) -> bool {
+    a.iter().any(|x| b.iter().any(|y| x == y || x.starts_with(&format!("{y}\\")) || y.starts_with(&format!("{x}\\"))))
 }
 
 /// The words of a command line, quotes removed ("a b" c -> [a b, c]).
@@ -1407,6 +1478,12 @@ impl ScriptRunner<'_> {
     /// for them before the file check. Stopped at once when the script failed or the install
     /// was cancelled, and after `BACKGROUND_GRACE` otherwise.
     fn finish_background(&mut self, failed: bool) {
+        // Tool steps still running beside the script's last steps.
+        if failed || self.opts.cancel.load(Ordering::Relaxed) {
+            self.kill_overlapped();
+        } else if let Err(e) = self.join_overlapped() {
+            self.summary.problems.push(format!("{e:#}"));
+        }
         if !failed
             && !self.opts.cancel.load(Ordering::Relaxed)
             && let Err(e) = self.start_deferred()
@@ -1568,19 +1645,9 @@ impl ScriptRunner<'_> {
             if let Some(st) = child.try_wait()? {
                 break st;
             }
-            // As during extraction: the tools it starts (through cmd.exe or the repack's own
-            // runner) get the codecs' tuning (above-normal priority, no power throttling, which
-            // would put a single-threaded tool on the slow cores), and error dialogs are closed.
             if std::time::Instant::now() >= next_look {
                 next_look = std::time::Instant::now() + std::time::Duration::from_millis(300);
-                if self.opts.tune && std::env::var_os("ARC_UNPACK_NO_DESCENDANT_TUNE").is_none() {
-                    crate::guard::tune_descendants(&mut self.tuned);
-                }
-                for m in crate::guard::dismiss_codec_dialogs() {
-                    let note = format!("error dialog (closed automatically): {m}");
-                    events::warn(self.sink, note.clone());
-                    self.summary.notes.push(note);
-                }
+                self.look_after_children();
             }
             if self.opts.cancel.load(Ordering::Relaxed) {
                 let _ = child.kill();
@@ -1599,20 +1666,177 @@ impl ScriptRunner<'_> {
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         self.count_changes(after);
+        self.report_exit(program, args, status, cpu.as_ref(), started, None);
+        // Like ISDone: a program that ran counts as done; the final MD5 check catches failures.
+        Ok(true)
+    }
+
+    /// While programs run: the tools they start (through cmd.exe or the repack's own runner)
+    /// get the codecs' tuning (above-normal priority, no power throttling, which would put a
+    /// single-threaded tool on the slow cores), and error dialogs are closed. As during
+    /// extraction.
+    fn look_after_children(&mut self) {
+        if self.opts.tune && std::env::var_os("ARC_UNPACK_NO_DESCENDANT_TUNE").is_none() {
+            crate::guard::tune_descendants(&mut self.tuned);
+        }
+        for m in crate::guard::dismiss_codec_dialogs() {
+            let note = format!("error dialog (closed automatically): {m}");
+            events::warn(self.sink, note.clone());
+            self.summary.notes.push(note);
+        }
+    }
+
+    /// Logs how a step's program did: its CPU use, and an exit code that means trouble.
+    fn report_exit(
+        &mut self,
+        program: &Path,
+        args: &str,
+        status: std::process::ExitStatus,
+        cpu: Option<&crate::perf::CpuJob>,
+        started: std::time::Instant,
+        step: Option<usize>,
+    ) {
         let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if let Some(cpu) = cpu.as_ref().and_then(|j| j.cpu_seconds()) {
-            let wall = started.elapsed().as_secs_f64();
-            if wall >= 1.0 {
-                events::info(self.sink, format!("    {name}: {cpu:.0}s cpu / {wall:.0}s wall ({:.1} cores)", cpu / wall));
-            }
+        let wall = started.elapsed().as_secs_f64();
+        if let Some(n) = step {
+            // (The step's own line came when it started.)
+            events::info(self.sink, format!("step {n} finished ({wall:.1}s)"));
+        }
+        if let Some(cpu) = cpu.and_then(|j| j.cpu_seconds())
+            && wall >= 1.0
+        {
+            events::info(self.sink, format!("    {name}: {cpu:.0}s cpu / {wall:.0}s wall ({:.1} cores)", cpu / wall));
         }
         if !status.success() && !benign_exit(program, status.code().unwrap_or(-1)) {
             let note = format!("{name}{args}: exited with code {}", status.code().unwrap_or(-1));
             events::warn(self.sink, note.clone());
             self.summary.notes.push(note);
         }
-        // Like ISDone: a program that ran counts as done; the final MD5 check catches failures.
-        Ok(true)
+    }
+
+    /// The files and folders a waiting Exec step touches, if it may run beside the next steps:
+    /// `cmd /C` with a chain of `&&` commands, each one a tool that touches only the files its
+    /// command line names (`tools::named_files_tool`) or a plain del/move/copy/ren/rd/md,
+    /// with no wildcards, redirection, pipes or variables, and nothing that can change a codec
+    /// config. ISExec and Exec report success once a program has run, whatever its exit code
+    /// (arc-unpack's Exec gives ResultCode 0), so the script can't tell whether it waited:
+    /// running such steps side by side only changes when they finish. FS17 runs 217 raw2hif
+    /// steps in a row, one core each. Every other step runs alone, after those in flight.
+    fn overlap_paths(&mut self, program: &Path, args: &str, dir: &Path) -> Option<Vec<String>> {
+        if std::env::var_os("ARC_UNPACK_NO_OVERLAP").is_some() || !program.file_name().is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe")) {
+            return None;
+        }
+        let rest = args.trim_start();
+        let line = rest.strip_prefix("/C ").or_else(|| rest.strip_prefix("/c "))?.trim();
+        if line.is_empty() || line.contains(['|', '<', '>', '%', '^', '(', ')', '*', '?', '!']) {
+            return None;
+        }
+        let (now, after) = self.config_changes(program, args, dir);
+        if !now.is_empty() || !after.is_empty() {
+            return None;
+        }
+        let map = self.standins.as_ref().map(|s| s.1.clone());
+        let mut paths = Vec::new();
+        for seg in split_and_and(line)? {
+            let words = cmd_words(seg);
+            let (cmd, rest) = words.split_first()?;
+            const BUILTINS: [&str; 10] = ["del", "erase", "move", "copy", "ren", "rename", "rd", "rmdir", "md", "mkdir"];
+            let mut skip = 0;
+            if !BUILTINS.contains(&cmd.to_ascii_lowercase().as_str()) {
+                let tool = resolve_in(dir, cmd);
+                let known = match self.safe_tools.get(&tool) {
+                    Some(&k) => k,
+                    None => {
+                        let k = crate::tools::named_files_tool(&tool, map.as_deref());
+                        self.safe_tools.insert(tool.clone(), k);
+                        k
+                    }
+                };
+                skip = known?;
+                // (Another step deleting or replacing the tool meanwhile would meet it here.)
+                paths.push(path_key(&tool)?);
+            }
+            // Every other word that isn't a switch counts as a file or folder: a folder can be
+            // named "04" (Sleeping Dogs' `rd /q /s 04`).
+            for w in rest.iter().skip(skip) {
+                let switch = w.starts_with('-') || (w.starts_with('/') && w.len() <= 3);
+                if switch || w.eq_ignore_ascii_case("nul") {
+                    continue;
+                }
+                for part in w.split('+').filter(|p| !p.is_empty()) {
+                    paths.push(path_key(&resolve_in(dir, part))?);
+                }
+            }
+        }
+        Some(paths)
+    }
+
+    /// Starts a step that runs beside the next ones, once no step in flight shares a file or
+    /// folder with it and fewer than one per CPU are running.
+    fn start_overlapped(&mut self, program: &Path, args: &str, dir: &Path, paths: Vec<String>) -> Result<()> {
+        let limit = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        self.wait_overlapped(|r| r.overlapped.len() < limit && r.overlapped.iter().all(|o| !paths_overlap(&o.paths, &paths)))?;
+        let child = self.spawn(program, args, dir)?;
+        let cpu = crate::perf::CpuJob::track(&child);
+        self.overlapped.push(Overlapped {
+            n: self.n,
+            program: program.to_path_buf(),
+            args: args.to_string(),
+            child,
+            cpu,
+            started: std::time::Instant::now(),
+            paths,
+        });
+        Ok(())
+    }
+
+    /// Waits for every step in flight.
+    fn join_overlapped(&mut self) -> Result<()> {
+        self.wait_overlapped(|r| r.overlapped.is_empty())
+    }
+
+    /// Reaps (and reports) finished steps in flight until `done` holds, looking after the running
+    /// ones as `exec` does: tuning, error dialogs, cancel, and the stall check.
+    fn wait_overlapped(&mut self, done: impl Fn(&Self) -> bool) -> Result<()> {
+        let mut stall = crate::guard::StallCheck::new(self.opts.stall_timeout);
+        let mut next_look = std::time::Instant::now();
+        loop {
+            let mut i = 0;
+            while i < self.overlapped.len() {
+                match self.overlapped[i].child.try_wait()? {
+                    Some(status) => {
+                        let o = self.overlapped.remove(i);
+                        self.report_exit(&o.program, &o.args, status, o.cpu.as_ref(), o.started, Some(o.n));
+                    }
+                    None => i += 1,
+                }
+            }
+            if done(self) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= next_look {
+                next_look = std::time::Instant::now() + std::time::Duration::from_millis(300);
+                self.look_after_children();
+            }
+            if self.opts.cancel.load(Ordering::Relaxed) {
+                self.kill_overlapped();
+                bail!("cancelled");
+            }
+            if stall.stalled() {
+                let running = crate::guard::running_programs().join(", ");
+                let steps: Vec<String> = self.overlapped.iter().map(|o| format!("step {}", o.n)).collect();
+                self.kill_overlapped();
+                bail!("{} made no progress for {} s (nothing read or written; still running: {running}): stopped them", steps.join(", "), stall.limit_secs());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn kill_overlapped(&mut self) {
+        for mut o in std::mem::take(&mut self.overlapped) {
+            let _ = o.child.kill();
+            let _ = o.child.wait();
+        }
     }
 
     /// Puts stand-ins in place of the known tools in the temporary folder (see src/tools.rs):
@@ -1746,6 +1970,16 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         if matches!(step, Step::Exec { .. }) {
             self.substitute_tools();
         }
+        if let Step::Exec { program, args, dir, wait: true } = step
+            && let Some(paths) = self.overlap_paths(program, args, dir)
+        {
+            self.start_overlapped(program, args, dir, paths)?;
+            events::info(self.sink, format!("step {}: {step} (runs beside the next steps)", self.n));
+            self.start_prefetches();
+            return Ok(true);
+        }
+        // Everything else runs alone, after the tool steps still running.
+        self.join_overlapped()?;
         let started = std::time::Instant::now();
         let ok = match step {
             Step::Extract { archive, out, cfg, base } => self.extract(archive, out, cfg, base.as_deref())?,
@@ -1763,6 +1997,10 @@ impl crate::setup_script::Runner for ScriptRunner<'_> {
         if let Some(name) = path.file_name() {
             *self.changes.entry(name.to_string_lossy().to_lowercase()).or_default() += 1;
         }
+    }
+
+    fn barrier(&mut self) -> Result<()> {
+        self.join_overlapped()
     }
 }
 
@@ -2419,5 +2657,18 @@ mod tests {
     fn command_words() {
         assert_eq!(cmd_words(r#""C:\t\run.exe" " " http://x "C:\t\l.txt" 0"#), [r"C:\t\run.exe", " ", "http://x", r"C:\t\l.txt", "0"]);
         assert!(has_word("del arc.ini\r\n", "arc.ini") && has_word(r"x\arc.ini", "arc.ini") && !has_word("xarc.ini", "arc.ini") && !has_word("arc.ini_", "arc.ini"));
+    }
+
+    #[test]
+    fn and_chains_and_paths() {
+        assert_eq!(split_and_and(r#"C:\t\nz.exe d9 a.unp a.hif9 a.raw&&del a.unp"#), Some(vec![r"C:\t\nz.exe d9 a.unp a.hif9 a.raw", "del a.unp"]));
+        assert_eq!(split_and_and(r#""C:\a & b\x.exe" in out"#), Some(vec![r#""C:\a & b\x.exe" in out"#]), "& inside quotes");
+        assert_eq!(split_and_and("a & b"), None, "a lone & is not a chain");
+        assert_eq!(split_and_and("a&&"), None);
+        assert_eq!(path_key(Path::new(r"C:\Games\X\..\Y\File.TXT\")).as_deref(), Some(r"c:\games\y\file.txt"));
+        let a = vec![r"c:\g\inner_".to_string()];
+        assert!(paths_overlap(&a, &[r"c:\g\inner_\00000137.raw".to_string()]), "a file inside a folder another step removes");
+        assert!(paths_overlap(&a, &[r"c:\g\inner_".to_string()]));
+        assert!(!paths_overlap(&a, &[r"c:\g\inner_2".to_string(), r"c:\g\inner".to_string()]));
     }
 }

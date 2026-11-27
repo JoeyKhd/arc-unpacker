@@ -55,6 +55,11 @@ pub trait Runner {
     fn run(&mut self, step: &Step) -> Result<bool>;
     /// The script changed a file itself (e.g. an INI value in the codec config).
     fn file_written(&mut self, _path: &Path) {}
+    /// The script is about to look at or change files itself: programs still running from
+    /// earlier steps must be done first.
+    fn barrier(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The folders behind Inno's constants.
@@ -475,6 +480,10 @@ impl<'a> InnoHost<'a> {
             self.refuse(format!("running {program} (outside the game, temp and repack folders)"));
             return Ok(false);
         };
+        // A working folder that doesn't exist yet may come from a step still running.
+        if !Path::new(dir).is_dir() {
+            self.runner.barrier()?;
+        }
         let Some(dir) = self.writable(dir).or_else(|| normalize(Path::new(dir)).filter(|d| d.is_dir())) else {
             bail!("bad working folder '{dir}'");
         };
@@ -542,6 +551,19 @@ impl Host for InnoHost<'_> {
         let yes = |b: bool| Some(Value::Int(b as i64));
         if key.starts_with("CLASS:") {
             return Ok(None);
+        }
+        // Tool steps may run beside the next steps (install.rs, `overlap_paths`): anything that
+        // looks at or changes files first waits for them. Exec steps decide that themselves.
+        const PURE: &[&str] = &[
+            "EXPANDCONSTANT", "ISCOMPONENTSELECTED", "ISTASKSELECTED", "WIZARDSILENT", "ADDQUOTES", "REMOVEQUOTES",
+            "EXTRACTFILEPATH", "EXTRACTFILEDIR", "EXTRACTFILENAME", "EXTRACTFILEEXT", "ADDBACKSLASH", "REMOVEBACKSLASH",
+            "REMOVEBACKSLASHUNLESSROOT", "INTTOSTR", "STRTOINT", "STRTOINTDEF", "UPPERCASE", "LOWERCASE", "TRIM", "LENGTH",
+            "POS", "COPY", "MINIMIZEPATHNAME", "SETUPMESSAGE", "GETCMDTAIL", "SCALEX", "SCALEY", "WIZARDFORM", "MAINFORM",
+            "MSGBOX", "SUPPRESSIBLEMSGBOX", "EXEC", "dll:ISEXEC", "dll:EXEC2", "dll:WRAPCALLBACK", "dll:SUSPENDPROC",
+            "dll:RESUMEPROC", "dll:SETTASKBARPROGRESSVALUE", "dll:SETTASKBARPROGRESSSTATE", "dll:CHANGELANGUAGE",
+        ];
+        if !PURE.contains(&key) {
+            self.runner.barrier()?;
         }
         // Dry run, or inside a left-out part: pretend file changes in the game folder worked
         // (the temp folder is real: its codec settings still apply to later parts).
@@ -720,7 +742,12 @@ impl Host for InnoHost<'_> {
                 // without it every line of the bat finds nothing. Here it runs in an empty folder
                 // of the run's own, outside the game folder.
                 let mut dir = s(5);
-                if !self.dry && normalize(Path::new(&dir)).is_some_and(|d| !d.is_dir()) {
+                let missing = |d: &str| normalize(Path::new(d)).is_some_and(|p| !p.is_dir());
+                // (A step still running may be about to create it.)
+                if !self.dry && missing(&dir) {
+                    self.runner.barrier()?;
+                }
+                if !self.dry && missing(&dir) {
                     let elsewhere = self.folders.tmp.with_file_name("cwd-missing");
                     let _ = std::fs::create_dir_all(&elsewhere);
                     dir = elsewhere.to_string_lossy().into_owned();

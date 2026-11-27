@@ -52,6 +52,39 @@ const KNOWN: &[(u64, &str, Role)] = &[
     (7680, "62410f076016456299e3cb5b3311b8a8d66fecd299dde9e7b6815fd581036428", Role::X2n),
 ];
 
+/// Repack tools that touch only the files named on their command line: no fixed-name temp
+/// files, no other files read or written. Steps that run them can run beside each other when
+/// they share no file (see install.rs, `overlap_paths`). The stand-ins above qualify too.
+/// - raw2hif (FitGirl's reflate tool, also shipped as nz.exe): `raw2hif d9 X.unp X.hif9 X.raw`;
+///   no temp-file or GetTempPath imports.
+/// - hpatchz 2.5.3 (x5.exe; HDiffPatch, open source): `x5 old diff new`.
+/// - xdelta3 3.0.8 / 3.0.11 (x.exe; open source): `x -f -d -s src delta out`.
+/// - oggvorbis2fsb5 (fsb.exe; open source): `fsb in out`.
+const OVERLAP_SAFE: &[(u64, &str)] = &[
+    (74240, "c6ae9b328578ee6b43021b6ec90fbaf152c7cdba0085fda72ab51b9259a5b361"),
+    (159232, "342b579afeff5651e9c0c57a6d2e785f119655f170d106dd01dfb97162efe385"),
+    (145408, "0eb2633f7414b79a39cc93bd9f36fa286a17905492235fe72a882d916b3fa30d"),
+    (317952, "09763ca90c09a5f815a94527399b1f2a88685e9de462e2ff1bc5648d320e707a"),
+    (548804, "9bf8d067de9448e521afe1f8108caa0f85b4b7c7933641efd44bc43533920565"),
+    (331264, "d1f00ff506d77a3f219c497e444306f7949c0a9b9e029f15bb862aa521fd26f8"),
+    (1153277, "98d7c11a27dc7b0da976d5b01374e0359d92b2d3b5439c5d26bad70ec618d811"),
+];
+
+/// If `path` is a tool in `OVERLAP_SAFE` or a stand-in listed in `map`: how many leading
+/// arguments are not file names (raw2hif's mode word, `d9`). None for any other program.
+pub fn named_files_tool(path: &Path, map: Option<&Path>) -> Option<usize> {
+    if map.is_some_and(|m| lookup(m, path).is_some()) {
+        return Some(0);
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    if !OVERLAP_SAFE.iter().any(|k| k.0 == meta.len()) {
+        return None;
+    }
+    let d = crate::extract::hex(&sha256_file(path).ok()?);
+    let i = OVERLAP_SAFE.iter().position(|k| k.0 == meta.len() && k.1 == d)?;
+    Some(if i == 0 { 1 } else { 0 })
+}
+
 /// The stand-in program's file name (shipped next to arc-unpack or embedded in it).
 pub const PROGRAM: &str = "arc-unpack-tool.exe";
 /// The list of stand-ins, in arc-unpack's run folder (the parent of its temporary folder).
