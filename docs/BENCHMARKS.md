@@ -2,7 +2,7 @@
 
 # Benchmarks
 
-81 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
+84 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -47,6 +47,7 @@
 | Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
 | over the hill | 2.1 GB | 3 min 35 s | 1 min 44 s | **2.1×** | 0.1.0-beta.8 |
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
+| Sniper Elite 3 | 9.1 GB | 11 min 34 s | 5 min 36 s | **2.1×** | 1.0.1 |
 | Solo Leveling - ARISE OVERDRIVE | 17.9 GB | 12 min 26 s | 5 min 49 s | **2.1×** | 0.1.0-beta.11 |
 | Dispatch | 13.0 GB | 3 min 03 s | 1 min 32 s | **2.0×** | 0.1.0-beta.11 |
 | Fish and Hike | 0.9 GB | 57 s | 28 s | **2.0×** | 0.1.0-beta.9 |
@@ -79,19 +80,21 @@
 | The Sims 3 | 16.5 GB | 15 min 42 s | 11 min 58 s | **1.3×** | 1.0.0 |
 | Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
+| Cricket 19 | 12.3 GB | 27 min 13 s | 22 min 51 s | **1.2×** | 1.0.1 |
 | Dune - Awakening | 24.2 GB | 15 min 48 s | 12 min 44 s | **1.2×** | 0.1.0-beta.11 |
 | Euro Truck Simulator 2 | 18.2 GB | 11 min 20 s | 9 min 23 s | **1.2×** | 0.1.0-beta.11 |
 | GTA Trilogy - Definitive Edition | 24.5 GB | 9 min 48 s | 7 min 52 s | **1.2×** | 0.1.0-beta.10 |
 | Max Payne 3 - Complete Edition | 14.9 GB | 10 min 54 s | 9 min 08 s | **1.2×** | 0.1.0-beta.11 |
+| Batman - Arkham Asylum GotY | 5.1 GB | 13 min 08 s | 12 min 24 s | **1.1×** | 1.0.1 |
 | Beast of Reincarnation | 22.6 GB | 15 min 16 s | 14 min 21 s | **1.1×** | 0.1.0-beta.11 |
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| **All 81** | | **378 min 58 s** | **229 min 03 s** | **1.7×** | |
+| **All 84** | | **430 min 52 s** | **269 min 54 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
-- **Same result:** all 81 installs were byte-identical to the original installer's.
+- **Same result:** all 84 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
