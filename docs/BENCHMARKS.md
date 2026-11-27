@@ -2,144 +2,7 @@
 
 # Benchmarks
 
-106 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC.
-
-## The most popular repacks
-
-<!-- popular -->
-FitGirl's [top repacks of the year](https://fitgirl-repacks.site/popular-repacks-of-the-year/), in her order, measured as below. A dash means not measured yet: results are added as they come in. Left out: 9 adult games, 2 Switch emulator repacks and 17 repacks that need a hypervisor.
-
-| # | Game | Download | Original installer | arc-unpack | Faster | Same files |
-|---:|---|---:|---:|---:|---:|:---:|
-| 1 | Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | – |
-| 3 | Assassin's Creed: Black Flag Resynced | 34.6 GB | – | – | – | – |
-| 5 | 007 First Light | 36.1 GB | – | – | – | – |
-| 7 | Forza Horizon 6 | 81.6 GB | – | – | – | – |
-| 8 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | – |
-| 9 | Marvel's Spider-Man 2 | 64.5 GB | – | – | – | – |
-| 11 | Red Dead Redemption 2 | 68.8 GB | – | – | – | – |
-| 13 | God of War III Remastered | 9.8 GB | 6 min 14 s | 1 min 49 s | **3.4×** | ✓ |
-| 14 | The Last of Us: Part I | 38.8 GB | – | – | – | – |
-| 15 | ENTITY: THE BLACK DAY | 28.7 GB | – | – | – | – |
-| 16 | Shambles: Sons of Apocalypse | 1.1 GB | – | – | – | – |
-| 18 | Assassin's Creed Shadows | 77.3 GB | – | – | – | – |
-| 20 | Call of Duty: Modern Warfare II | 22.5 GB | – | – | – | – |
-| 21 | The Blood of Dawnwalker | 39.1 GB | – | – | – | – |
-| 22 | Beast of Reincarnation | 21.1 GB | 15 min 16 s | 14 min 21 s | **1.1×** | ✓ |
-| 23 | Bloodborne | 14.1 GB | 10 min 44 s | 8 min 10 s | **1.3×** | ✓ |
-| 24 | Cyberpunk 2077 | 49.5 GB | – | – | – | – |
-| 26 | Wicked Seed | 6.0 GB | – | – | – | – |
-| 27 | The Relic: First Guardian | 18.9 GB | – | – | – | – |
-| 29 | Grand Theft Auto V Enhanced | 39.5 GB | – | – | – | – |
-| 30 | EA SPORTS FC 27 | 56.3 GB | – | – | – | – |
-| 31 | Marvel's Spider-Man Remastered | 37.6 GB | – | – | – | – |
-| 32 | GTA 4 / Grand Theft Auto IV | 13.2 GB | – | – | – | – |
-| 33 | Mortal Shell II | 52.3 GB | – | – | – | – |
-| 34 | Ghost of Tsushima DIRECTOR'S CUT | 31.2 GB | – | – | – | – |
-| 36 | CONTROL Resonant | 59.8 GB | – | – | – | – |
-| 37 | One More Night | 8.9 GB | – | – | – | – |
-| 39 | The Witcher 3: Wild Hunt (Remastered) | 37.3 GB | – | – | – | – |
-| 40 | Call of Duty: Modern Warfare (2019) | 70.5 GB | – | – | – | – |
-| 41 | Solo Leveling: ARISE OVERDRIVE | 16.7 GB | 12 min 26 s | 5 min 49 s | **2.1×** | ✓ |
-| 42 | Call of Duty: Modern Warfare III | 38.7 GB | – | – | – | – |
-| 43 | God of War: Ragnarök | 65.1 GB | – | – | – | – |
-| 45 | UNCHARTED: Legacy of Thieves Collection | 19.6 GB | – | – | – | – |
-| 46 | God of War | 26.0 GB | – | – | – | – |
-| 47 | The First Berserker: Khazan | 17.9 GB | – | – | – | – |
-| 49 | The Sinking City 2 | 38.6 GB | – | – | – | – |
-| 50 | SILENT HILL: Townfall | 38.8 GB | – | – | – | – |
-| 51 | ELDEN RING: Shadow of the Erdtree | 47.4 GB | – | – | – | – |
-| 53 | Resident Evil 4 | 46.4 GB | – | – | – | – |
-| 54 | Palworld | 23.7 GB | 10 min 48 s | 8 min 18 s | **1.3×** | ✓ |
-| 55 | Call of Duty: Black Ops Cold War | 60.0 GB | – | – | – | – |
-| 56 | Resonance: A Plague Tale Legacy | 28.4 GB | – | – | – | – |
-| 58 | Dragon's Dogma 2 | 54.0 GB | – | – | – | – |
-| 59 | Halo: Campaign Evolved | 52.4 GB | – | – | – | – |
-| 60 | Atomic Heart | 48.0 GB | – | – | – | – |
-| 61 | HITMAN: World of Assassination | 58.7 GB | – | – | – | – |
-| 62 | Avatar: Frontiers of Pandora | 78.5 GB | – | – | – | – |
-| 63 | Need for Speed: Most Wanted | 2.6 GB | – | – | – | – |
-| 64 | Dune: Awakening | 22.5 GB | 15 min 48 s | 12 min 44 s | **1.2×** | ✓ |
-| 65 | Gears of War: E-Day | 78.3 GB | – | – | – | – |
-| 66 | NBA 2K27 | 71.5 GB | – | – | – | – |
-| 67 | The Sims 4 | 44.3 GB | – | – | – | – |
-| 69 | Marvel's Spider-Man: Miles Morales | 27.4 GB | – | – | – | – |
-| 70 | DOOM: The Dark Ages | 88.9 GB | – | – | – | – |
-| 71 | Forza Horizon 3 | 27.0 GB | – | – | – | – |
-| 72 | Forza Horizon 5 | 73.5 GB | – | – | – | – |
-| 74 | The Last of Us: Part II | 48.6 GB | – | – | – | – |
-| 75 | Grand Theft Auto: The Trilogy | 22.8 GB | 9 min 48 s | 7 min 52 s | **1.2×** | ✓ |
-| 77 | BLACKWOOD | 6.1 GB | – | – | – | – |
-| 78 | Forza Horizon 4 | 45.3 GB | – | – | – | – |
-| 80 | Mortal Kombat 1: Khaos Reigns Kollection | 93.7 GB | – | – | – | – |
-| 81 | Assassin's Creed IV: Black Flag (Jackdaw Edition) | 4.9 GB | – | – | – | – |
-| 82 | METAL GEAR SOLID 4: Guns of the Patriots | 17.2 GB | 8 min 00 s | 4 min 57 s | **1.6×** | ✓ |
-| 83 | Sekiro: Shadows Die Twice | 7.2 GB | 6 min 46 s | 3 min 15 s | **2.1×** | ✓ |
-| 84 | Euro Truck Simulator 2 | 17.0 GB | 11 min 20 s | 9 min 23 s | **1.2×** | ✓ |
-| 85 | BRAVELY DEFAULT FLYING FAIRY HD Remaster | 3.6 GB | – | – | – | – |
-| 86 | FIFA 22 | 39.0 GB | – | – | – | – |
-| 87 | The Lord of the Rings: War in the North | 7.4 GB | – | – | – | – |
-| 88 | Mixtape | 8.5 GB | – | – | – | – |
-| 90 | Call of Duty: Black Ops 2 | 8.4 GB | – | – | – | – |
-| 91 | Red Dead Redemption | 6.0 GB | 5 min 18 s | 3 min 48 s | **1.4×** | ✓ |
-| 93 | Minecraft | 0.6 GB | 2 min 22 s | 41 s | **3.5×** | ✓ |
-| 94 | Clive Barker's Hellraiser: Revival | 51.6 GB | – | – | – | – |
-| 96 | TEKKEN 8 | 42.9 GB | – | – | – | – |
-| 98 | Days Gone | 22.5 GB | – | – | – | – |
-| 99 | Call of Duty: WWII | 52.3 GB | – | – | – | – |
-| 100 | Gothic 1 Remake | 19.8 GB | – | – | – | – |
-| 101 | I Am Jesus Christ | 8.8 GB | – | – | – | – |
-| 102 | Call of Duty: Modern Warfare 3 (2011) | 10.8 GB | – | – | – | – |
-| 103 | EA SPORTS FIFA 23 | 39.1 GB | – | – | – | – |
-| 106 | The Witcher 3: Wild Hunt (Complete Edition) | 31.7 GB | – | – | – | – |
-| 107 | Resident Evil 7: Biohazard | 24.4 GB | – | – | – | – |
-| 108 | Call of Duty: Modern Warfare 2 | 37.4 GB | – | – | – | – |
-| 109 | Star Wars Outlaws | 40.2 GB | – | – | – | – |
-| 110 | RESIDENT EVIL 2 | 15.0 GB | 7 min 02 s | 5 min 33 s | **1.3×** | ✓ |
-| 111 | STAR WARS Zero Company | 33.3 GB | – | – | – | – |
-| 112 | Sleeping Dogs: Definitive | 5.7 GB | 7 min 08 s | 3 min 42 s | **1.9×** | ✓ |
-| 113 | Granblue Fantasy: Relink | 43.3 GB | – | – | – | – |
-| 114 | Resident Evil: Village | 19.5 GB | – | – | – | – |
-| 116 | Watch Dogs 2 | 16.9 GB | – | – | – | – |
-| 118 | Forza Motorsport 7 | 66.6 GB | – | – | – | – |
-| 119 | Batman: Arkham Knight | 25.9 GB | – | – | – | – |
-| 120 | Call of Duty: Black Ops 3 | 42.4 GB | – | – | – | – |
-| 121 | Spider-Man: Shattered Dimensions | 4.1 GB | 2 min 35 s | 55 s | **2.8×** | ✓ |
-| 123 | Call of Duty: Black Ops 6 | 39.3 GB | – | – | – | – |
-| 124 | Ready or Not | 25.3 GB | – | – | – | – |
-| 125 | Battlefield 6 | 35.8 GB | – | – | – | – |
-| 126 | DRIVECLUB | 9.0 GB | – | – | – | – |
-| 127 | Detroit: Become Human | 22.1 GB | – | – | – | – |
-| 128 | Rise of the Tomb Raider: 20 Year Celebration | 12.9 GB | – | – | – | – |
-| 129 | Need for Speed: Payback | 13.4 GB | 2 min 33 s | 1 min 14 s | **2.1×** | ✓ |
-| 130 | Grand Theft Auto: The Original Trilogy | 6.4 GB | 4 min 39 s | 2 min 05 s | **2.2×** | ✓ |
-| 131 | Castlevania: Belmont's Curse | 4.1 GB | 3 min 40 s | 1 min 09 s | **3.2×** | ✓ |
-| 132 | Gym Manager | 1.3 GB | – | – | – | – |
-| 133 | Call of Duty: Black Ops | 7.3 GB | 16 min 19 s | 5 min 03 s | **3.2×** | ✓ |
-| 134 | Far Cry 3 + Blood Dragon | 3.8 GB | 12 min 41 s | 10 min 10 s | **1.2×** | ✓ |
-| 135 | NARUTO X BORUTO: Ultimate Ninja STORM CONNECTIONS | 14.7 GB | – | – | – | – |
-| 136 | Watch Dogs | 12.3 GB | – | – | – | – |
-| 137 | Baldur's Gate 3 | 80.1 GB | – | – | – | – |
-| 138 | ELDEN RING NIGHTREIGN | 18.0 GB | – | – | – | – |
-| 139 | Violet | 6.5 GB | – | – | – | – |
-| 140 | Max Payne 3 | 13.9 GB | 10 min 54 s | 9 min 08 s | **1.2×** | ✓ |
-| 141 | Taboo Trial | 2.7 GB | – | – | – | – |
-| 142 | Far Cry 4 | 10.8 GB | – | – | – | – |
-| 143 | Call of Duty: Vanguard | 41.8 GB | – | – | – | – |
-| 144 | The Elder Scrolls V: Skyrim | 9.6 GB | – | – | – | – |
-| 145 | Assassin's Creed Mirage | 24.0 GB | – | – | – | – |
-| 146 | REANIMAL | 9.5 GB | 7 min 14 s | 6 min 27 s | **1.1×** | ✓ |
-| 147 | Tomb Raider | 6.0 GB | – | – | – | – |
-| 148 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | – |
-| 149 | TEKKEN 7 | 15.3 GB | – | – | – | – |
-| 150 | REPLACED | 1.7 GB | – | – | – | – |
-
-Measured: 22 of 122. 21 of the rest need more free disk space than the test PC has (their download and install together take over 160 GB): Grand Theft Auto V / GTA 5, Forza Horizon 6, Marvel's Spider-Man 2, Red Dead Redemption 2, Assassin's Creed Shadows, Call of Duty: Modern Warfare II, Cyberpunk 2077, Call of Duty: Modern Warfare (2019), Call of Duty: Modern Warfare III, God of War: Ragnarök, Call of Duty: Black Ops Cold War, Avatar: Frontiers of Pandora, Gears of War: E-Day, NBA 2K27, DOOM: The Dark Ages, Forza Horizon 5, Mortal Kombat 1: Khaos Reigns Kollection, Call of Duty: WWII, Forza Motorsport 7, Call of Duty: Black Ops 3, Baldur's Gate 3.
-<!-- /popular -->
-
-## Every tested repack
-
-**Version** is the arc-unpack version each game was last measured with.
+106 FitGirl repacks, each installed by its own installer and by arc-unpack, one at a time on the same PC. **Version** is the arc-unpack version each game was last measured with.
 
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
@@ -249,12 +112,113 @@ Measured: 22 of 122. 21 of the rest need more free disk space than the test PC h
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
 | Prototype | 5.4 GB | 3 min 13 s | 3 min 13 s | **1.0×** | 1.0.3-dev |
-| **All 106** | | **542 min 21 s** | **333 min 06 s** | **1.6×** | |
+| Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | |
+| Assassin's Creed: Black Flag Resynced | 34.6 GB | – | – | – | |
+| 007 First Light | 36.1 GB | – | – | – | |
+| Forza Horizon 6 | 81.6 GB | – | – | – | |
+| Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
+| Marvel's Spider-Man 2 | 64.5 GB | – | – | – | |
+| Red Dead Redemption 2 | 68.8 GB | – | – | – | |
+| The Last of Us: Part I | 38.8 GB | – | – | – | |
+| ENTITY: THE BLACK DAY | 28.7 GB | – | – | – | |
+| Shambles: Sons of Apocalypse | 1.1 GB | – | – | – | |
+| Assassin's Creed Shadows | 77.3 GB | – | – | – | |
+| Call of Duty: Modern Warfare II | 22.5 GB | – | – | – | |
+| The Blood of Dawnwalker | 39.1 GB | – | – | – | |
+| Cyberpunk 2077 | 49.5 GB | – | – | – | |
+| Wicked Seed | 6.0 GB | – | – | – | |
+| The Relic: First Guardian | 18.9 GB | – | – | – | |
+| Grand Theft Auto V Enhanced | 39.5 GB | – | – | – | |
+| EA SPORTS FC 27 | 56.3 GB | – | – | – | |
+| Marvel's Spider-Man Remastered | 37.6 GB | – | – | – | |
+| GTA 4 / Grand Theft Auto IV | 13.2 GB | – | – | – | |
+| Mortal Shell II | 52.3 GB | – | – | – | |
+| Ghost of Tsushima DIRECTOR'S CUT | 31.2 GB | – | – | – | |
+| CONTROL Resonant | 59.8 GB | – | – | – | |
+| One More Night | 8.9 GB | – | – | – | |
+| The Witcher 3: Wild Hunt (Remastered) | 37.3 GB | – | – | – | |
+| Call of Duty: Modern Warfare (2019) | 70.5 GB | – | – | – | |
+| Call of Duty: Modern Warfare III | 38.7 GB | – | – | – | |
+| God of War: Ragnarök | 65.1 GB | – | – | – | |
+| UNCHARTED: Legacy of Thieves Collection | 19.6 GB | – | – | – | |
+| God of War | 26.0 GB | – | – | – | |
+| The First Berserker: Khazan | 17.9 GB | – | – | – | |
+| The Sinking City 2 | 38.6 GB | – | – | – | |
+| SILENT HILL: Townfall | 38.8 GB | – | – | – | |
+| ELDEN RING: Shadow of the Erdtree | 47.4 GB | – | – | – | |
+| Resident Evil 4 | 46.4 GB | – | – | – | |
+| Call of Duty: Black Ops Cold War | 60.0 GB | – | – | – | |
+| Resonance: A Plague Tale Legacy | 28.4 GB | – | – | – | |
+| Dragon's Dogma 2 | 54.0 GB | – | – | – | |
+| Halo: Campaign Evolved | 52.4 GB | – | – | – | |
+| Atomic Heart | 48.0 GB | – | – | – | |
+| HITMAN: World of Assassination | 58.7 GB | – | – | – | |
+| Avatar: Frontiers of Pandora | 78.5 GB | – | – | – | |
+| Need for Speed: Most Wanted | 2.6 GB | – | – | – | |
+| Gears of War: E-Day | 78.3 GB | – | – | – | |
+| NBA 2K27 | 71.5 GB | – | – | – | |
+| The Sims 4 | 44.3 GB | – | – | – | |
+| Marvel's Spider-Man: Miles Morales | 27.4 GB | – | – | – | |
+| DOOM: The Dark Ages | 88.9 GB | – | – | – | |
+| Forza Horizon 3 | 27.0 GB | – | – | – | |
+| Forza Horizon 5 | 73.5 GB | – | – | – | |
+| The Last of Us: Part II | 48.6 GB | – | – | – | |
+| BLACKWOOD | 6.1 GB | – | – | – | |
+| Forza Horizon 4 | 45.3 GB | – | – | – | |
+| Mortal Kombat 1: Khaos Reigns Kollection | 93.7 GB | – | – | – | |
+| Assassin's Creed IV: Black Flag (Jackdaw Edition) | 4.9 GB | – | – | – | |
+| BRAVELY DEFAULT FLYING FAIRY HD Remaster | 3.6 GB | – | – | – | |
+| FIFA 22 | 39.0 GB | – | – | – | |
+| The Lord of the Rings: War in the North | 7.4 GB | – | – | – | |
+| Mixtape | 8.5 GB | – | – | – | |
+| Call of Duty: Black Ops 2 | 8.4 GB | – | – | – | |
+| Clive Barker's Hellraiser: Revival | 51.6 GB | – | – | – | |
+| TEKKEN 8 | 42.9 GB | – | – | – | |
+| Days Gone | 22.5 GB | – | – | – | |
+| Call of Duty: WWII | 52.3 GB | – | – | – | |
+| Gothic 1 Remake | 19.8 GB | – | – | – | |
+| I Am Jesus Christ | 8.8 GB | – | – | – | |
+| Call of Duty: Modern Warfare 3 (2011) | 10.8 GB | – | – | – | |
+| EA SPORTS FIFA 23 | 39.1 GB | – | – | – | |
+| The Witcher 3: Wild Hunt (Complete Edition) | 31.7 GB | – | – | – | |
+| Resident Evil 7: Biohazard | 24.4 GB | – | – | – | |
+| Call of Duty: Modern Warfare 2 | 37.4 GB | – | – | – | |
+| Star Wars Outlaws | 40.2 GB | – | – | – | |
+| STAR WARS Zero Company | 33.3 GB | – | – | – | |
+| Granblue Fantasy: Relink | 43.3 GB | – | – | – | |
+| Resident Evil: Village | 19.5 GB | – | – | – | |
+| Watch Dogs 2 | 16.9 GB | – | – | – | |
+| Forza Motorsport 7 | 66.6 GB | – | – | – | |
+| Batman: Arkham Knight | 25.9 GB | – | – | – | |
+| Call of Duty: Black Ops 3 | 42.4 GB | – | – | – | |
+| Call of Duty: Black Ops 6 | 39.3 GB | – | – | – | |
+| Ready or Not | 25.3 GB | – | – | – | |
+| Battlefield 6 | 35.8 GB | – | – | – | |
+| DRIVECLUB | 9.0 GB | – | – | – | |
+| Detroit: Become Human | 22.1 GB | – | – | – | |
+| Rise of the Tomb Raider: 20 Year Celebration | 12.9 GB | – | – | – | |
+| Gym Manager | 1.3 GB | – | – | – | |
+| NARUTO X BORUTO: Ultimate Ninja STORM CONNECTIONS | 14.7 GB | – | – | – | |
+| Watch Dogs | 12.3 GB | – | – | – | |
+| Baldur's Gate 3 | 80.1 GB | – | – | – | |
+| ELDEN RING NIGHTREIGN | 18.0 GB | – | – | – | |
+| Violet | 6.5 GB | – | – | – | |
+| Taboo Trial | 2.7 GB | – | – | – | |
+| Far Cry 4 | 10.8 GB | – | – | – | |
+| Call of Duty: Vanguard | 41.8 GB | – | – | – | |
+| The Elder Scrolls V: Skyrim | 9.6 GB | – | – | – | |
+| Assassin's Creed Mirage | 24.0 GB | – | – | – | |
+| Tomb Raider | 6.0 GB | – | – | – | |
+| Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
+| TEKKEN 7 | 15.3 GB | – | – | – | |
+| REPLACED | 1.7 GB | – | – | – | |
+| **All 106 measured** | | **542 min 21 s** | **333 min 06 s** | **1.6×** | |
 
 - **Original installer:** the repack's `setup.exe`, timed until its default file check (QuickSFV) finished.
 - **arc-unpack:** default settings, which check the downloaded archives and every installed file.
 - **Same result:** 102 of 106 installs were byte-identical to the original installer's.
 - **Same conditions:** the same parts in both, and the file cache flushed before every run.
+- **A dash:** one of FitGirl's [most popular repacks](https://fitgirl-repacks.site/popular-repacks-of-the-year/), still to be measured; the numbers are filled in as they come in. Adult games, Switch emulator repacks and repacks that need a hypervisor are left out.
 - **Not in the table:** A Way Out (2018). Its own installer hangs on the test PC: the repack's old lolz decoder waits forever when it may use more than about 13 GB, and FitGirl's script only limits it when "limit RAM" is ticked. arc-unpack caps it and installs the game in 1 min 34 s, with every file matching FitGirl's MD5 list.
 
 Test PC: Intel Core i9-13900K, 32 GB DDR5-5600, Samsung 990 PRO 2 TB NVMe SSD, Windows 11 Pro.

@@ -229,85 +229,61 @@ def doc_rows(rows, names):
     return out
 
 
-def doc_table(out):
-    """The table in docs/BENCHMARKS.md."""
-    lines = ["| Game | Download | Original installer | arc-unpack | Faster | Version |", "|---|---:|---:|---:|---:|---|"]
-    for speed, name, packed, o, a, v, _ in out:
-        lines.append(f"| {name} | {packed / 1e9:.1f} GB | {fmt_time(o)} | {fmt_time(a)} | **{speed:.1f}×** | {v} |")
-    so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
-    lines.append(f"| **All {len(out)}** | | **{fmt_time(so)}** | **{fmt_time(sa)}** | **{so / sa:.1f}×** | |")
-    return "\n".join(lines)
-
-
 POPULAR = HERE / "popular.json"
-# Download and install on disk together beyond this: more than the test PC has free.
-TOO_BIG_GB = 160
-POPULAR_START, POPULAR_END = "<!-- popular -->", "<!-- /popular -->"
 
 
-def popular_section(rows):
-    """FitGirl's top repacks of the year (bench/popular.json) in her order, with a dash for the
-    ones not measured yet. Adult, Switch-emulator and hypervisor repacks are left out."""
-    pop = json.loads(POPULAR.read_text(encoding="utf-8"))
+def pending_rows(rows, measured_names):
+    """Rows for FitGirl's most popular repacks (bench/popular.json, in her order; adult, Switch and
+    hypervisor ones left out) that aren't in the table yet: a dash until measured, "failed" if
+    arc-unpack couldn't install it."""
+    if not POPULAR.exists():
+        return []
     by_hash = {}
     for r in rows:
         by_hash.setdefault((r.get("infohash") or r["repack"]).lower(), []).append(r)
-    table = ["| # | Game | Download | Original installer | arc-unpack | Faster | Same files |", "|---:|---|---:|---:|---:|---:|:---:|"]
-    measured, waiting, big = 0, 0, []
-    for e in pop["repacks"]:
+    lines = []
+    for e in json.loads(POPULAR.read_text(encoding="utf-8"))["repacks"]:
         if e["status"] not in ("to do", "benchmarked"):
             continue
         mine = by_hash.get((e.get("info_hash") or "").lower(), [])
+        if any(r["tool"] == "arc-unpack" and r.get("ok") for r in mine) or e["name"].lower() in measured_names:
+            continue  # measured: it has its row
+        size = f"{e['download_gb']:.1f} GB" if e.get("download_gb") else "–"
         orig = [r["seconds"] for r in mine if r["tool"] == "original" and r.get("ok")]
         arc = [r for r in mine if r["tool"] == "arc-unpack"]
-        size = f"{e['download_gb']:.1f} GB" if e.get("download_gb") else "–"
-        if orig and arc:
-            measured += 1
+        if arc:
             v = max((r["version"] for r in arc), key=version_key)
-            ok = [r for r in arc if r["version"] == v and r.get("ok")]
-            o = statistics.median(orig)
-            if ok:
-                a = statistics.median([r["seconds"] for r in ok])
-                same = "✓" if all(r.get("identical_to_original") for r in ok) else "differs"
-                table.append(f"| {e['rank']} | {e['name']} | {size} | {fmt_time(o)} | {fmt_time(a)} | **{o / a:.1f}×** | {same} |")
-            else:
-                table.append(f"| {e['rank']} | {e['name']} | {size} | {fmt_time(o)} | failed | – | – |")
+            o = fmt_time(statistics.median(orig)) if orig else "–"
+            lines.append(f"| {e['name']} | {size} | {o} | failed | – | {v} |")
         else:
-            waiting += 1
-            table.append(f"| {e['rank']} | {e['name']} | {size} | – | – | – | – |")
-            if (e.get("download_gb") or 0) + (e.get("installed_gb") or 0) > TOO_BIG_GB:
-                big.append(e["name"])
-    left = {k: sum(1 for e in pop["repacks"] if e["status"] == k) for k in ("adult", "switch", "hypervisor")}
-    intro = (
-        f"FitGirl's [top repacks of the year]({pop['source']}), in her order, measured as below. A dash means not measured yet: "
-        f"results are added as they come in. Left out: {left['adult']} adult games, {left['switch']} Switch emulator repacks and "
-        f"{left['hypervisor']} repacks that need a hypervisor."
-    )
-    status = f"Measured: {measured} of {measured + waiting}."
-    if big:
-        status += (
-            f" {len(big)} of the rest need more free disk space than the test PC has (their download and install together "
-            f"take over {TOO_BIG_GB} GB): {', '.join(big)}."
-        )
-    return "\n".join([intro, "", *table, "", status])
+            lines.append(f"| {e['name']} | {size} | – | – | – | |")
+    return lines
+
+
+def doc_table(out, pending=()):
+    """The table in docs/BENCHMARKS.md: measured repacks, then the popular ones still to come."""
+    lines = ["| Game | Download | Original installer | arc-unpack | Faster | Version |", "|---|---:|---:|---:|---:|---|"]
+    for speed, name, packed, o, a, v, _ in out:
+        lines.append(f"| {name} | {packed / 1e9:.1f} GB | {fmt_time(o)} | {fmt_time(a)} | **{speed:.1f}×** | {v} |")
+    lines.extend(pending)
+    so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
+    lines.append(f"| **All {len(out)} measured** | | **{fmt_time(so)}** | **{fmt_time(sa)}** | **{so / sa:.1f}×** | |")
+    return "\n".join(lines)
 
 
 def cmd_docs(args):
-    """Brings docs/BENCHMARKS.md (tables, counts) and the README headline up to date with the ledger."""
-    out = doc_rows(doc_ledger(), load_names())
+    """Brings docs/BENCHMARKS.md (table, counts) and the README headline up to date with the ledger."""
+    rows = doc_ledger()
+    out = doc_rows(rows, load_names())
     n = len(out)
     so, sa = sum(x[3] for x in out), sum(x[4] for x in out)
     overall, best = f"{so / sa:.1f}", f"{max(x[0] for x in out):.1f}"
     repo = LEDGER.parent.parent
     doc = repo / "docs" / "BENCHMARKS.md"
     s = doc.read_text(encoding="utf-8")
-    if POPULAR_START in s and POPULAR.exists():
-        a, b = s.index(POPULAR_START) + len(POPULAR_START), s.index(POPULAR_END)
-        s = s[:a] + "\n" + popular_section(doc_ledger()) + "\n" + s[b:]
-    # The table of every tested repack comes after the popular one.
-    start = s.index("| Game |", s.index(POPULAR_END) if POPULAR_END in s else 0)
+    start = s.index("| Game |")
     end = s.index("\n\n", start)
-    s = s[:start] + doc_table(out) + s[end:]
+    s = s[:start] + doc_table(out, pending_rows(rows, {x[1].lower() for x in out})) + s[end:]
     s = re.sub(r"^\d+ FitGirl repacks, each installed", f"{n} FitGirl repacks, each installed", s, count=1, flags=re.M)
     # Never claim more than the ledger shows: "all N" only when every row is identical.
     same = sum(1 for x in out if x[6])
