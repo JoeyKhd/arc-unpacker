@@ -92,6 +92,7 @@
 | Dark Souls Remastered | 4.3 GB | 4 min 00 s | 2 min 51 s | **1.4×** | 1.0.1 |
 | Red Dead Redemption | 6.4 GB | 5 min 18 s | 3 min 42 s | **1.4×** | 1.0.5 |
 | Takeover 2 | 4.2 GB | 3 min 15 s | 2 min 15 s | **1.4×** | 0.1.0-beta.9 |
+| 007 First Light | 38.8 GB | 14 min 02 s | 10 min 38 s | **1.3×** | 1.0.5 |
 | Bloodborne | 15.1 GB | 10 min 44 s | 8 min 10 s | **1.3×** | 0.1.0-beta.11 |
 | ENTITY - THE BLACK DAY | 30.8 GB | 17 min 00 s | 13 min 10 s | **1.3×** | 1.0.5 |
 | Metal Gear Solid V - TPP | 11.6 GB | 8 min 13 s | 6 min 06 s | **1.3×** | 0.1.0-beta.11 |
@@ -209,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 111 measured** | | **597 min 14 s** | **342 min 23 s** | **1.7×** | |
+| **All 112 measured** | | **611 min 16 s** | **353 min 01 s** | **1.7×** | |
