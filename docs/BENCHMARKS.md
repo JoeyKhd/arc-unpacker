@@ -45,7 +45,6 @@
 | Persona 3 Reload | 12.3 GB | 3 min 38 s | 1 min 30 s | **2.4×** | 0.1.0-beta.11 |
 | Ticket to Ride | 0.7 GB | 45 s | 18 s | **2.4×** | 0.1.0-beta.9 |
 | Farming Simulator 17 | 3.5 GB | 5 min 33 s | 2 min 23 s | **2.3×** | 1.0.7 |
-| Moadra | 3.3 GB | 50 s | 22 s | **2.3×** | 0.1.0-beta.6 |
 | Prototype | 5.4 GB | 3 min 13 s | 1 min 24 s | **2.3×** | 1.0.6 |
 | Silver Pines | 2.1 GB | 2 min 28 s | 1 min 04 s | **2.3×** | 0.1.0-beta.8 |
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 1.0.7 |
@@ -79,6 +78,7 @@
 | Fran Bow | 0.9 GB | 1 min 59 s | 1 min 05 s | **1.8×** | 1.0.3-dev |
 | Frontier Paladin | 8.7 GB | 5 min 15 s | 2 min 54 s | **1.8×** | 0.1.0-beta.9 |
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
+| Moadra | 3.3 GB | 50 s | 28 s | **1.8×** | 1.0.7 |
 | Need for Speed - Most Wanted | 3.6 GB | 2 min 49 s | 1 min 32 s | **1.8×** | 1.0.6 |
 | Batman - Arkham City | 13.5 GB | 12 min 27 s | 7 min 30 s | **1.7×** | 1.0.3-dev |
 | Hades | 9.2 GB | 6 min 00 s | 3 min 36 s | **1.7×** | 1.0.7 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 15 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 20 s** | **1.8×** | |
