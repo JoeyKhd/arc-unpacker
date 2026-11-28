@@ -3,8 +3,8 @@
 | Game | Download | Original installer | arc-unpack | Faster | Version |
 |---|---:|---:|---:|---:|---|
 | Pro Evolution Soccer 2017 | 9.4 GB | 18 min 24 s | 3 min 17 s | **5.6×** | 1.0.5 |
+| Blitzkrieg 3 | 1.7 GB | 1 min 43 s | 19 s | **5.4×** | 1.0.7 |
 | Sid Meier's Civilization 6 | 9.6 GB | 6 min 31 s | 1 min 37 s | **4.0×** | 1.0.3-dev |
-| Blitzkrieg 3 | 1.7 GB | 1 min 43 s | 26 s | **3.9×** | 0.1.0-beta.6 |
 | Hearts of Iron IV | 4.6 GB | 5 min 40 s | 1 min 27 s | **3.9×** | 0.1.0-beta.8 |
 | Hollow Knight - Silksong | 1.8 GB | 1 min 56 s | 30 s | **3.9×** | 0.1.0-beta.6 |
 | Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 36 s | **3.9×** | 1.0.7 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 22 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 14 s** | **1.8×** | |
