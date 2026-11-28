@@ -104,7 +104,6 @@
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Palworld | 25.4 GB | 10 min 48 s | 8 min 18 s | **1.3×** | 0.1.0-beta.11 |
 | Resident Evil 2 | 18.5 GB | 7 min 02 s | 5 min 33 s | **1.3×** | 0.1.0-beta.11 |
-| Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | Batman - Arkham Asylum GotY | 5.1 GB | 13 min 08 s | 11 min 24 s | **1.2×** | 1.0.5 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
 | Dune - Awakening | 24.2 GB | 15 min 48 s | 12 min 44 s | **1.2×** | 0.1.0-beta.11 |
@@ -112,6 +111,7 @@
 | GTA Trilogy - Definitive Edition | 24.5 GB | 9 min 48 s | 7 min 52 s | **1.2×** | 0.1.0-beta.10 |
 | Max Payne 3 - Complete Edition | 14.9 GB | 10 min 54 s | 9 min 08 s | **1.2×** | 0.1.0-beta.11 |
 | Spintires - MudRunner | 0.9 GB | 2 min 27 s | 2 min 08 s | **1.2×** | 1.0.3-dev |
+| Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 52 s | **1.2×** | 1.0.7 |
 | Unravel Two | 3.6 GB | 3 min 21 s | 2 min 47 s | **1.2×** | 1.0.3-dev |
 | Beast of Reincarnation | 22.6 GB | 15 min 16 s | 14 min 21 s | **1.1×** | 0.1.0-beta.11 |
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 23 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 24 s** | **1.8×** | |
