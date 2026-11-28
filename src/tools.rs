@@ -34,6 +34,10 @@
 //!   default it reads every unchanged file in full only to checksum it before keeping it. The
 //!   original runs with `-C-new` added, which skips that read; the patched files are the same
 //!   (the bytes come from the diff). Source: HDiffPatch, dir_patch / new_dir_output.c.
+//! - delzo (Far Cry 3's Dunia recompressor): `delzo r -t16 X.fgu X.dat X.fat` recompresses
+//!   independent chunks in batches with a full wait after each. Here: the .fgu is cut into chunk
+//!   ranges, each restored by a copy of the original at once, the .dat pieces joined in order (see
+//!   `delzo_parallel`).
 
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -49,6 +53,7 @@ pub enum Role {
     FreeArcUnarc,
     RunExe,
     X5nDirPatch,
+    DelzoRestore,
 }
 
 impl Role {
@@ -61,6 +66,7 @@ impl Role {
             Role::FreeArcUnarc => "freearc-unarc-0.67",
             Role::RunExe => "fitgirl-run",
             Role::X5nDirPatch => "hpatchz-4.8.0",
+            Role::DelzoRestore => "delzo-0.0.4",
         }
     }
 
@@ -68,7 +74,12 @@ impl Role {
     /// may run beside each other (install.rs `overlap_paths`). Not FreeArc's unarc (it writes an
     /// archive's files), run.exe (it runs a whole list) or x5n (it patches a folder).
     pub fn touches_only_named_files(self) -> bool {
-        matches!(self, Role::Xor | Role::Lz4Cli194 | Role::X2n | Role::FgpackSegLzma)
+        matches!(self, Role::Xor | Role::Lz4Cli194 | Role::X2n | Role::FgpackSegLzma | Role::DelzoRestore)
+    }
+
+    /// Leading command-line words that are a mode, not a file (delzo's `r`).
+    pub fn mode_words(self) -> usize {
+        matches!(self, Role::DelzoRestore) as usize
     }
 
     /// The original must stay in its own folder (renamed): FreeArc's console unarc finds arc.ini
@@ -92,6 +103,7 @@ const KNOWN: &[(u64, &str, Role)] = &[
     (333312, "09ea4478b379a1839e21896a8b3fd82b4adf81c1b2b387795abefe5df3e57549", Role::FreeArcUnarc),
     (81920, "3243562d5d0685b57bc237b24f254d1d18d6abcb1f8ddac2698c2d9208c76247", Role::RunExe),
     (436736, "234168f765294a5db867163e639c9288f04f976976bdf80da29fbba9eae39917", Role::X5nDirPatch),
+    (98816, "aa511243239695e06dc959a6f8c5fe002d1101400b751125b98ba120c560f765", Role::DelzoRestore),
 ];
 
 /// Repack tools that touch only the files named on their command line: no fixed-name temp
@@ -119,7 +131,7 @@ const OVERLAP_SAFE: &[(u64, &str)] = &[
 /// arguments are not file names (raw2hif's mode word, `d9`). None for any other program.
 pub fn named_files_tool(path: &Path, map: Option<&Path>) -> Option<usize> {
     if let Some(e) = map.and_then(|m| lookup(m, path)) {
-        return e.role.touches_only_named_files().then_some(0);
+        return e.role.touches_only_named_files().then_some(e.role.mode_words());
     }
     let meta = std::fs::metadata(path).ok()?;
     if !OVERLAP_SAFE.iter().any(|k| k.0 == meta.len()) {
@@ -900,6 +912,156 @@ pub fn run_list_lines_independent(list: &str) -> bool {
         seen.extend(mine);
     }
     true
+}
+
+// ---------------------------------------------------------------------------------------------
+// delzo.exe ("DELZORec v0.0.4.0", Far Cry 3): `delzo r [-tN] X.fgu X.dat X.fat` rebuilds a Dunia
+// .dat/.fat from FitGirl's .fgu. Reverse-engineered: the .fgu is a 32-byte header ("DERE",
+// max chunk size, n, n*8, u64 .fat length, u64 original .dat length), n type bytes, n x {u32
+// packed, u32 unpacked}, the .fat verbatim, then the chunks' data. `r` writes the .fat as it is
+// and each chunk recompressed (type 0 stored, 1 LZO1X-999 level 9 for .fat version 9, 2 LZ4-HC
+// level 9), back to back. Each output chunk depends only on (type, .fat version, its bytes). It
+// runs N chunks on N new threads, waits for all, writes them, and goes on: a batch lasts as long
+// as its largest chunk, so Far Cry 3 got about 3 of 16 threads busy for 408 s.
+
+/// The parts of a delzo .fgu.
+struct Fgu {
+    max_chunk: u32,
+    types: Vec<u8>,
+    sizes: Vec<(u32, u32)>,
+    fat: Vec<u8>,
+    data_start: u64,
+    dat_len: u64,
+}
+
+fn read_fgu(path: &Path) -> Result<Fgu> {
+    let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut h = [0u8; 32];
+    f.read_exact(&mut h)?;
+    let w = |i: usize| u32::from_le_bytes(h[4 * i..4 * i + 4].try_into().unwrap());
+    ensure!(w(0) == 0x4552_4544, "not a delzo .fgu");
+    let n = w(2) as usize;
+    ensure!(w(3) as usize == n * 8 && w(5) == 0, "unexpected .fgu header");
+    let mut types = vec![0u8; n];
+    f.read_exact(&mut types)?;
+    let mut raw = vec![0u8; n * 8];
+    f.read_exact(&mut raw)?;
+    let sizes = raw.chunks_exact(8).map(|c| (u32::from_le_bytes(c[..4].try_into().unwrap()), u32::from_le_bytes(c[4..].try_into().unwrap()))).collect();
+    let mut fat = vec![0u8; w(4) as usize];
+    f.read_exact(&mut fat)?;
+    let data_start = 32 + n as u64 * 9 + fat.len() as u64;
+    Ok(Fgu { max_chunk: w(1), types, sizes, fat, data_start, dat_len: w(6) as u64 | (w(7) as u64) << 32 })
+}
+
+/// What delzo reads for chunk `i`, and what it writes for it.
+fn delzo_chunk(fgu: &Fgu, i: usize) -> (u64, u64) {
+    let (packed, unpacked) = fgu.sizes[i];
+    let read = if unpacked != 0 { unpacked } else { packed } as u64;
+    (read, if fgu.types[i] == 0 { read } else { packed as u64 })
+}
+
+/// `delzo r <fgu> <dat> <fat>` with the original tool, in pieces at once (CpuSlots). Only for
+/// .fat version 9 with chunk types 0-2 whose sizes add up to the original .dat length; anything
+/// else is an error, and the caller runs the original on the whole file.
+pub fn delzo_parallel(fgu_path: &Path, dat: &Path, fat_path: &Path, original: &Path, cpus: usize) -> Result<String> {
+    let fgu = read_fgu(fgu_path)?;
+    let n = fgu.types.len();
+    ensure!(fgu.fat.len() >= 8 && u32::from_le_bytes(fgu.fat[4..8].try_into().unwrap()) == 9, "not a version 9 .fat");
+    ensure!(fgu.types.iter().all(|&t| t <= 2), "a chunk type delzo doesn't know");
+    let chunks: Vec<(u64, u64)> = (0..n).map(|i| delzo_chunk(&fgu, i)).collect();
+    let (read, out): (u64, u64) = chunks.iter().fold((0, 0), |a, c| (a.0 + c.0, a.1 + c.1));
+    ensure!(out == fgu.dat_len, "chunk sizes add up to {out}, the .dat was {}", fgu.dat_len);
+    ensure!(std::fs::metadata(fgu_path)?.len() == fgu.data_start + read, "the .fgu's data doesn't match its tables");
+    ensure!(read >= 32 << 20 && n >= 64, "small: left to the original");
+    if let Some(free) = crate::guard::free_space(dat.parent().unwrap_or(Path::new("."))) {
+        ensure!(free > 2 * read + out + (1 << 30), "not enough free space for the pieces");
+    }
+    // Contiguous chunk ranges of about equal input size.
+    let k = cpus.clamp(1, 64).min(n);
+    let mut ranges = Vec::new();
+    let (mut start, mut acc) = (0usize, 0u64);
+    for (i, c) in chunks.iter().enumerate() {
+        acc += c.0;
+        if acc >= read * (ranges.len() as u64 + 1) / k as u64 && ranges.len() + 1 < k {
+            ranges.push(start..i + 1);
+            start = i + 1;
+        }
+    }
+    if start < n {
+        ranges.push(start..n);
+    }
+    let piece = |p: &Path, i: usize| p.with_file_name(format!("{}.arc-unpack-piece{i}", p.file_name().unwrap_or_default().to_string_lossy()));
+    let pieces: Vec<[PathBuf; 3]> = (0..ranges.len()).map(|i| [piece(fgu_path, i), piece(dat, i), piece(fat_path, i)]).collect();
+    let cleanup = || {
+        for p in pieces.iter().flatten() {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    let result = (|| -> Result<()> {
+        let mut src = std::fs::File::open(fgu_path)?;
+        use std::io::{Seek, SeekFrom};
+        src.seek(SeekFrom::Start(fgu.data_start))?;
+        for (r, [pin, _, _]) in ranges.iter().zip(&pieces) {
+            let (r_read, r_out) = chunks[r.clone()].iter().fold((0, 0), |a, c| (a.0 + c.0, a.1 + c.1));
+            let nr = r.len() as u32;
+            let mut w = std::io::BufWriter::with_capacity(4 << 20, std::fs::File::create(pin)?);
+            for v in [0x4552_4544, fgu.max_chunk, nr, nr * 8, fgu.fat.len() as u32, 0, r_out as u32, (r_out >> 32) as u32] {
+                w.write_all(&u32::to_le_bytes(v))?;
+            }
+            w.write_all(&fgu.types[r.clone()])?;
+            for &(p, u) in &fgu.sizes[r.clone()] {
+                w.write_all(&p.to_le_bytes())?;
+                w.write_all(&u.to_le_bytes())?;
+            }
+            w.write_all(&fgu.fat)?;
+            ensure!(std::io::copy(&mut (&mut src).take(r_read), &mut w)? == r_read, "short read of {}", fgu_path.display());
+            w.flush()?;
+        }
+        let slots = CpuSlots::open(cpus);
+        let failed: Vec<String> = std::thread::scope(|s| {
+            let jobs: Vec<_> = pieces
+                .iter()
+                .map(|[pin, pdat, pfat]| {
+                    let slots = &slots;
+                    s.spawn(move || -> std::result::Result<(), String> {
+                        let _slot = slots.take();
+                        let st = std::process::Command::new(original)
+                            .arg("r")
+                            .arg("-t1")
+                            .args([pin, pdat, pfat])
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .map_err(|e| e.to_string())?;
+                        if st.success() { Ok(()) } else { Err(format!("exit {:?}", st.code())) }
+                    })
+                })
+                .collect();
+            jobs.into_iter().filter_map(|j| j.join().unwrap_or_else(|_| Err("panicked".into())).err()).collect()
+        });
+        ensure!(failed.is_empty(), "a piece failed: {}", failed.join(", "));
+        // Every piece wrote the whole .fat and exactly its chunks.
+        for (r, [_, pdat, pfat]) in ranges.iter().zip(&pieces) {
+            let want = chunks[r.clone()].iter().map(|c| c.1).sum::<u64>();
+            ensure!(std::fs::metadata(pdat)?.len() == want, "a piece's .dat is not {want} bytes");
+            ensure!(std::fs::read(pfat)? == fgu.fat, "a piece's .fat differs");
+        }
+        let mut out = std::io::BufWriter::with_capacity(4 << 20, std::fs::File::create(dat)?);
+        for [_, pdat, _] in &pieces {
+            std::io::copy(&mut std::fs::File::open(pdat)?, &mut out)?;
+        }
+        out.flush()?;
+        std::fs::write(fat_path, &fgu.fat)?;
+        Ok(())
+    })();
+    cleanup();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(dat);
+        let _ = std::fs::remove_file(fat_path);
+        return Err(e);
+    }
+    Ok(format!("{n} chunks, {} MB, in {} pieces", read >> 20, ranges.len()))
 }
 
 #[cfg(test)]

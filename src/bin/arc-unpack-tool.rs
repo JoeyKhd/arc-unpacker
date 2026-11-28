@@ -120,6 +120,10 @@ impl Job {
             Role::FgpackSegLzma => tools::fgpack_parallel(&self.input, &self.output, &self.original, threads),
             Role::FreeArcUnarc => tools::freearc_extract(&self.input, &self.output, &self.original),
             Role::X5nDirPatch => anyhow::bail!("run by run() itself"),
+            Role::DelzoRestore => {
+                let fat = self.extra.as_deref().unwrap_or(Path::new(""));
+                tools::delzo_parallel(&self.input, &self.output, fat, &self.original, threads)
+            }
             Role::RunExe => {
                 // (Its exit code is always 0; once it has started, its lines have run: no fallback.)
                 std::process::Command::new(&self.original).args(&self.args).status()?;
@@ -133,6 +137,31 @@ impl Job {
 /// that exists and an output that doesn't (the tools' own handling of other cases is theirs).
 fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
     let s: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
+    if role == Role::DelzoRestore {
+        // delzo r [-tN ...] <in.fgu> <out.dat> <out.fat>: three files after the switches.
+        let (cmd, rest) = s.split_first()?;
+        if *cmd != "r" {
+            return None;
+        }
+        let switches = rest.iter().take_while(|a| a.starts_with('-')).count();
+        let [fgu, dat, fat] = <[&str; 3]>::try_from(&rest[switches..]).ok()?;
+        let parent_ok = |p: &str| Path::new(p).parent().is_none_or(|d| d.as_os_str().is_empty() || d.is_dir());
+        if !Path::new(fgu).is_file() || !parent_ok(dat) || !parent_ok(fat) || dat == fgu || fat == fgu || dat == fat {
+            return None;
+        }
+        return Some(Job {
+            role,
+            input: PathBuf::from(fgu),
+            output: PathBuf::from(dat),
+            key: Vec::new(),
+            // (The .dat is argument 1 + switches + 1; verify mode redirects it.)
+            output_arg: 1 + switches + 1,
+            in_place: false,
+            extra: Some(PathBuf::from(fat)),
+            original: PathBuf::new(),
+            args: Vec::new(),
+        });
+    }
     if role == Role::X5nDirPatch {
         // hpatchz [-s-<size> | -m] [-f] [-n-<n>] <old> <diff> <new>, patching a folder in place
         // (old and new the same folder) from a directory diff, without a -C option of its own.
