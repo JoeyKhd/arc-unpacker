@@ -557,7 +557,10 @@ impl Read for Tee {
 /// input, as `<dir>\<stage rank>-<label>-<id>.in` (rank 0 = the first decoder of the chain);
 /// `ARC_UNPACK_TEE_ONLY=<text>` limits that to codecs whose label contains the text.
 fn tee_if_requested(spec: &ExtSpec, input: Stream) -> Result<Stream> {
-    let is_xtool = Path::new(&spec.argv[0]).file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().starts_with("xtool"));
+    let is_xtool = Path::new(&spec.argv[0]).file_name().is_some_and(|n| {
+        let n = n.to_string_lossy().to_ascii_lowercase();
+        n.starts_with("xtool") || n.starts_with("rtool")
+    });
     // `ARC_UNPACK_TEE_ONLY=<text>`: only codecs whose label contains it.
     let wanted = std::env::var("ARC_UNPACK_TEE_ONLY").map_or(true, |only| spec.label.contains(only.as_str()));
     let path = match (std::env::var_os("ARC_UNPACK_TEE_DIR"), std::env::var_os("ARC_UNPACK_TEE_XTOOL")) {

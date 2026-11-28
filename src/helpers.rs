@@ -111,8 +111,8 @@ pub const XTOOL_TIMER: &str = "zz-arc-unpack-timer.dll";
 /// lasts ~15.6 ms at Windows' default timer resolution; a tiny plugin next to xtool.exe makes
 /// xtool ask for 1 ms, and keeps xtool's view of free memory steady, which avoids an xtool bug
 /// that restores large deduplicated files wrong when free memory rises during a decode (see
-/// `xtool-timer/src/lib.rs`). This puts the plugin next to every 64-bit
-/// `xtool*.exe` in `codec_dir` and its subfolders, or removes it when
+/// `xtool-timer/src/lib.rs`). This puts the plugin next to every 64-bit `xtool*.exe` and
+/// `rtool*.exe` in `codec_dir` and its subfolders, or removes it when
 /// `ARC_UNPACK_NO_XTOOL_TIMER` is set. Failures are ignored (as without the plugin).
 pub fn place_xtool_timer(codec_dir: &Path, host_dir: &Path) {
     let enabled = std::env::var_os("ARC_UNPACK_NO_XTOOL_TIMER").is_none();
@@ -122,7 +122,9 @@ pub fn place_xtool_timer(codec_dir: &Path, host_dir: &Path) {
     for dir in dirs {
         let has_xtool = std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| {
             let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-            name.starts_with("xtool") && name.ends_with(".exe") && crate::stage::pe_machine(&e.path()).is_ok_and(|m| m == 0x8664)
+            // rtool.exe (xtool 0.8.9 under another name; Palworld, Persona 3 Reload, ...) has the
+            // same deduplication code and loads every plugin in its own folder (reverse-engineered).
+            (name.starts_with("xtool") || name.starts_with("rtool")) && name.ends_with(".exe") && crate::stage::pe_machine(&e.path()).is_ok_and(|m| m == 0x8664)
         });
         let dest = dir.join(XTOOL_TIMER);
         if !enabled || !has_xtool {
