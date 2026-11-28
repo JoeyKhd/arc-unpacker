@@ -224,9 +224,31 @@ def doc_rows(rows, names):
         runs = [r for r in mine if r["tool"] == "arc-unpack" and r["version"] == v and r.get("ok")]
         o, a = statistics.median(orig), statistics.median([r["seconds"] for r in runs])
         same = all(r.get("identical_to_original") for r in runs)
-        out.append((o / a, names.get(rid) or rid[:12], mine[0]["packed_bytes"], o, a, v, same))
+        out.append((o / a, display(names.get(rid) or rid[:12]), mine[0]["packed_bytes"], o, a, v, same))
     out.sort(key=lambda x: (-round(x[0], 1), x[1].lower()))
     return out
+
+
+def unpaired_rows(rows, names, measured_ids):
+    """Rows for repacks arc-unpack installed but whose own installer has no usable timing (it
+    failed, or its run was set aside to be timed again): arc-unpack's time, a dash for the rest.
+    Without these such a repack would vanish from the table."""
+    lines = []
+    for rid in sorted({r["repack"] for r in rows} - measured_ids, key=lambda i: (names.get(i) or i).lower()):
+        mine = [r for r in rows if r["repack"] == rid]
+        vs = [r["version"] for r in mine if r["tool"] == "arc-unpack" and r.get("ok")]
+        if not vs or any(r["tool"] == "original" and r.get("ok") for r in mine):
+            continue
+        v = max(vs, key=version_key)
+        a = statistics.median([r["seconds"] for r in mine if r["tool"] == "arc-unpack" and r["version"] == v and r.get("ok")])
+        lines.append(f"| {display(names.get(rid) or rid[:12])} | {mine[0]['packed_bytes'] / 1e9:.1f} GB | – | {fmt_time(a)} | – | {v} |")
+    return lines
+
+
+def display(name):
+    """A repack's name without FitGirl's plain tag ("[FitGirl Repack]", "[FitGirl Monkey Repack]");
+    others ("[FitGirl HV Repack]") say something and stay."""
+    return re.sub(r"\s*\[FitGirl (Monkey )?Repack\]", "", name).strip() or name
 
 
 POPULAR = HERE / "popular.json"
@@ -285,7 +307,10 @@ def cmd_docs(args):
     end = s.find("\n\n", start)
     if end < 0:  # the table ends the page
         end = len(s.rstrip("\n"))
-    s = s[:start] + doc_table(out, pending_rows(rows, {x[1].lower() for x in out})) + s[end:]
+    tool_ok = lambda rid, tool: any(r["repack"] == rid and r["tool"] == tool and r.get("ok") for r in rows)
+    measured_ids = {rid for rid in {r["repack"] for r in rows} if tool_ok(rid, "original") and tool_ok(rid, "arc-unpack")}
+    others = unpaired_rows(rows, load_names(), measured_ids) + pending_rows(rows, {x[1].lower() for x in out})
+    s = s[:start] + doc_table(out, others) + s[end:]
     s = re.sub(r"^\d+ FitGirl repacks, each installed", f"{n} FitGirl repacks, each installed", s, count=1, flags=re.M)
     # Never claim more than the ledger shows: "all N" only when every row is identical.
     same = sum(1 for x in out if x[6])

@@ -55,7 +55,7 @@
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
-| Need for Speed - Payback | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
+| Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
 | over the hill | 2.1 GB | 3 min 35 s | 1 min 44 s | **2.1×** | 0.1.0-beta.8 |
 | Rocksmith 2014 Remastered | 11.7 GB | 5 min 19 s | 2 min 29 s | **2.1×** | 1.0.6 |
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
