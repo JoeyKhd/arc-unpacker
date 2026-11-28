@@ -53,7 +53,6 @@
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
 | Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.7 |
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
-| The Blood of Dawnwalker | 48.6 GB | 8 min 12 s | 3 min 39 s | **2.2×** | 1.0.6 |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
 | Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
@@ -68,6 +67,7 @@
 | Fish and Hike | 0.9 GB | 57 s | 28 s | **2.0×** | 0.1.0-beta.9 |
 | Frontier - Path of Shadows | 0.7 GB | 1 min 45 s | 52 s | **2.0×** | 0.1.0-beta.9 |
 | Hozy | 5.2 GB | 2 min 31 s | 1 min 16 s | **2.0×** | 0.1.0-beta.8 |
+| The Blood of Dawnwalker | 48.6 GB | 8 min 12 s | 4 min 11 s | **2.0×** | 1.0.7 |
 | 771 - Smile and Work | 0.7 GB | 24 s | 12 s | **1.9×** | 0.1.0-beta.6 |
 | Ancient Wars - Sparta HD | 5.1 GB | 1 min 07 s | 35 s | **1.9×** | 0.1.0-beta.10 |
 | Football Manager 27 | 4.7 GB | 6 min 48 s | 3 min 32 s | **1.9×** | 0.1.0-beta.8 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **357 min 44 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 16 s** | **1.8×** | |
