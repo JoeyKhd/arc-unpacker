@@ -220,9 +220,9 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     }
 
     let summary = Arc::new(Mutex::new(summary));
-    let pending: Vec<(usize, Job, bool, u8)> =
-        jobs.into_iter().map(|j| { let heavy = is_heavy(&j, cfg); (next_job_id(), j, heavy, 0) }).collect();
-    let queue = Mutex::new(Queue { pending, heavy_running: 0, told_waiting: false, since: Instant::now() });
+    let pending: Vec<(usize, Job, bool, Held)> =
+        jobs.into_iter().map(|j| { let heavy = is_heavy(&j, cfg); (next_job_id(), j, heavy, Held::default()) }).collect();
+    let queue = Mutex::new(Queue { pending, heavy_running: 0, told_waiting: false });
     let wake = std::sync::Condvar::new();
 
     let all_done = AtomicBool::new(false);
@@ -334,11 +334,17 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
 }
 
 struct Queue {
-    /// (id, job, heavy, why it was passed over: WAIT_*), biggest first.
-    pending: Vec<(usize, Job, bool, u8)>,
+    /// (id, job, heavy, whether it was held back), biggest first.
+    pending: Vec<(usize, Job, bool, Held)>,
     heavy_running: usize,
     told_waiting: bool,
-    since: Instant,
+}
+
+/// Why a pending job was passed over (WAIT_* bits), and since when.
+#[derive(Default)]
+struct Held {
+    why: u8,
+    since: Option<Instant>,
 }
 
 /// A heavy job was passed over because this run had its heavy jobs running already.
@@ -369,12 +375,16 @@ fn next_job(
         let running = q.heavy_running;
         let mut slot = None;
         let mut blocked_elsewhere = false;
-        let pick = q.pending.iter_mut().position(|(_, _, heavy, why)| {
+        let pick = q.pending.iter_mut().position(|(_, _, heavy, held)| {
             if !*heavy || limit == 0 {
                 return true;
             }
+            let mut hold = |why: u8| {
+                held.why |= why;
+                held.since.get_or_insert_with(Instant::now);
+            };
             if running >= limit {
-                *why |= WAIT_HEAVY_HERE;
+                hold(WAIT_HEAVY_HERE);
                 return false;
             }
             if slot.is_none() {
@@ -382,19 +392,19 @@ fn next_job(
                 blocked_elsewhere |= slot.is_none();
             }
             if slot.is_none() {
-                *why |= WAIT_HEAVY_ELSEWHERE;
+                hold(WAIT_HEAVY_ELSEWHERE);
             }
             slot.is_some()
         });
         if let Some(pos) = pick {
-            let (id, job, heavy, why) = q.pending.remove(pos);
+            let (id, job, heavy, Held { why, since }) = q.pending.remove(pos);
             if heavy {
                 q.heavy_running += 1;
             }
             // Why a job started late, when it was held back as memory-heavy (waiting for a free
             // worker is the normal case and not logged).
-            let waited = q.since.elapsed().as_secs_f64();
-            if why != 0 && waited >= 1.0 {
+            let waited = since.map_or(0.0, |t| t.elapsed().as_secs_f64());
+            if waited >= 1.0 {
                 let mut reasons = Vec::new();
                 if why & WAIT_HEAVY_HERE != 0 {
                     reasons.push(format!("{limit} memory-heavy job(s) of this archive set running"));
@@ -402,7 +412,7 @@ fn next_job(
                 if why & WAIT_HEAVY_ELSEWHERE != 0 {
                     reasons.push("the machine-wide memory-heavy slots taken (an early extraction or another arc-unpack)".to_string());
                 }
-                events::info(sink, format!("{}: started after waiting {waited:.1} s for {}", job.label(), reasons.join(" and ")));
+                events::info(sink, format!("{}: started after {waited:.1} s held back for {}", job.label(), reasons.join(" and ")));
             }
             return Some((id, job, heavy, slot));
         }
