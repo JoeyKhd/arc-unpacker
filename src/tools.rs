@@ -174,7 +174,7 @@ pub fn identify(path: &Path) -> Option<Role> {
     candidates.iter().find(|k| k.1 == digest).map(|k| k.2)
 }
 
-fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
+pub(crate) fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     let mut f = std::fs::File::open(path)?;

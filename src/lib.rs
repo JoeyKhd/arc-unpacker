@@ -13,6 +13,7 @@ pub mod lzma;
 pub mod memlimit;
 pub mod method;
 pub mod pascal;
+pub mod pcfsplit;
 pub mod perf;
 pub mod pipe;
 pub mod setup_script;

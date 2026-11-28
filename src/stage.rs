@@ -183,7 +183,11 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                     datafile: None,
                 };
                 rank += 1;
-                external(spec, stream, ctx)?
+                // precomp.inside: its stream restored in parts by several plain precomp.exe.
+                match crate::pcfsplit::known_precomp(dll) {
+                    Some(exe) if crate::pcfsplit::workers() > 1 => precomp_split(spec, exe, stream, ctx)?,
+                    _ => external(spec, stream, ctx)?,
+                }
             }
         };
     }
@@ -577,7 +581,12 @@ fn tee_if_requested(spec: &ExtSpec, input: Stream) -> Result<Stream> {
 }
 
 fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
-    let mut input = tee_if_requested(&spec, input)?;
+    let input = tee_if_requested(&spec, input)?;
+    external_untee(spec, input, ctx)
+}
+
+/// `external` on a stream already tee'd.
+fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream> {
     if !spec.header && !spec.input_file && !spec.output_file {
         // xtool restores one chunk at a time: give whole chunks to several xtool processes.
         let workers = crate::xtsplit::workers();
@@ -635,6 +644,43 @@ fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
         Ok(())
     });
     Ok(Box::new(r))
+}
+
+/// Restores a precomp.inside stream with several plain precomp.exe processes (see `pcfsplit`).
+fn precomp_split(spec: ExtSpec, exe: PathBuf, input: Stream, ctx: &Ctx) -> Result<Stream> {
+    if crate::guard::free_space(&ctx.temp_dir).is_some_and(|f| f < crate::pcfsplit::MIN_FREE) {
+        return external(spec, input, ctx);
+    }
+    let input = tee_if_requested(&spec, input)?;
+    let (header, rest) = match crate::pcfsplit::probe(input)? {
+        crate::pcfsplit::Plan::Split { header, rest } => (header, rest),
+        crate::pcfsplit::Plan::Single { reason, replay } => {
+            eprintln!("note: {}: not split ({reason}); precomp.inside restores it", spec.label);
+            return external_untee(spec, replay, ctx);
+        }
+    };
+    let (label, rank, tune, reg) = (format!("{} (split)", spec.label), spec.rank, ctx.tune, ctx.reg.clone());
+    let spawn: crate::pcfsplit::Spawn = Box::new(move |dir: &Path, pcf: &Path, out: &Path| {
+        // (Absolute paths: the exe's hooks take names starting with "null" or "out" as its pipe.)
+        let mut cmd = Command::new(&exe);
+        cmd.arg("-r").arg(format!("-o{}", out.display())).arg(pcf).current_dir(dir);
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        apply_child_flags(&mut cmd, tune);
+        let child = cmd.spawn().with_context(|| format!("{label}: failed to start {}", exe.display()))?;
+        let job = crate::perf::CpuJob::track(&child);
+        if tune {
+            crate::perf::tune_child(&child, false);
+            crate::perf::register_stage(child.id(), rank);
+        }
+        let child = Arc::new(Mutex::new(child));
+        reg.children.lock().unwrap().push(ChildInfo { label: label.clone(), child: child.clone(), started: Instant::now(), job });
+        Ok(child)
+    });
+    let (base, ctx2) = (spec.clone(), ctx.clone());
+    let single: crate::pcfsplit::Single = Box::new(move |s: Stream| external_untee(base.clone(), s, &ctx2));
+    let reg = ctx.reg.clone();
+    let workers = crate::pcfsplit::workers();
+    crate::pcfsplit::run(header, rest, workers, Default::default(), &ctx.temp_dir, spawn, single, move |label, f| reg.worker(label, f), &spec.label)
 }
 
 /// Decodes an xtool stream with up to `workers` xtool processes (see `xtsplit`).
