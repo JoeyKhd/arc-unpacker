@@ -58,12 +58,14 @@ fn eval_mb(expr: &str, physical: u64) -> Option<u64> {
     Some(total.max(0) as u64)
 }
 
-/// srep's decode memory in MB as the installer's CLS.ini in `dir` sets it (`[Srep] Memory`,
-/// e.g. "60%-2048m"), on a PC with `physical` bytes of RAM. None if it isn't set.
-pub(crate) fn srep_memory_mb(dir: &Path, physical: u64) -> Option<u64> {
-    let bytes = std::fs::read(dir.join("CLS.ini")).ok()?;
-    let text: String = bytes.iter().map(|&b| b as char).collect();
+/// The memory in MB cls-srep's helper keeps for decoding, as it works it out when it starts
+/// (reverse-engineered): CLS.ini's `[Srep] Memory` (default "70%") in terms of N bytes, Nk,
+/// Nm, Ng or N% / Np of the available RAM, joined by '-'; then at least 16 MB and at most what
+/// is available. `dir` holds the CLS.ini, `available` is the RAM it can count on.
+pub(crate) fn srep_memory_mb(dir: &Path, available: u64) -> u64 {
+    let text: String = std::fs::read(dir.join("CLS.ini")).unwrap_or_default().iter().map(|&b| b as char).collect();
     let mut section = String::new();
+    let mut value = None;
     for line in text.lines() {
         let t = line.trim();
         if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
@@ -72,10 +74,27 @@ pub(crate) fn srep_memory_mb(dir: &Path, physical: u64) -> Option<u64> {
             && let Some((k, v)) = t.split_once('=')
             && k.trim().eq_ignore_ascii_case("Memory")
         {
-            return eval_mb(v, physical);
+            value = Some(v.trim().to_string());
+            break;
         }
     }
-    None
+    let avail_mb = available >> 20;
+    let mut total: i64 = 0;
+    for (i, term) in value.as_deref().unwrap_or("70%").split('-').enumerate() {
+        let t = term.trim().to_ascii_lowercase();
+        let (num, unit) = t.split_at(t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len()));
+        let Ok(n) = num.parse::<i64>() else { continue };
+        let mb = match unit.trim() {
+            "%" | "p" => avail_mb as i64 * n.min(100) / 100,
+            "" => n >> 20,
+            "k" | "kb" => n >> 10,
+            "m" | "mb" => n,
+            "g" | "gb" => n << 10,
+            _ => continue,
+        };
+        total += if i == 0 { mb } else { -mb };
+    }
+    (total.max(0) as u64).max(16).min(avail_mb)
 }
 
 /// The lolz-family sections that take MaxMemoryUsage.
@@ -413,10 +432,17 @@ mod tests {
     #[test]
     fn srep_memory_from_cls_ini() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(srep_memory_mb(dir.path(), 16 * GB), None);
+        // No [Srep] Memory: the helper's default, 70% of what is available.
+        assert_eq!(srep_memory_mb(dir.path(), 8 * GB), 8192 * 70 / 100);
         std::fs::write(dir.path().join("CLS.ini"), "[magic2]\r\nMemory=1g\r\n[Srep]\r\nTempPath=C:\\t\\\r\nMemory=60%-2048m\r\n").unwrap();
-        // 60% of 16 GB less 2 GB: 7782 MB (the [magic2] Memory isn't srep's).
-        assert_eq!(srep_memory_mb(dir.path(), 16 * GB), Some(16384 * 60 / 100 - 2048));
+        // 60% of 16 GB available less 2 GB: 7782 MB (the [magic2] Memory isn't srep's).
+        assert_eq!(srep_memory_mb(dir.path(), 16 * GB), 16384 * 60 / 100 - 2048);
+        // With 4 GB available it's only 409 MB, and never below 16 MB.
+        assert_eq!(srep_memory_mb(dir.path(), 4 * GB), 4096 * 60 / 100 - 2048);
+        assert_eq!(srep_memory_mb(dir.path(), 2 * GB), 16);
+        // A bare number is bytes to the helper.
+        std::fs::write(dir.path().join("CLS.ini"), "[Srep]\r\nMemory=228\r\n").unwrap();
+        assert_eq!(srep_memory_mb(dir.path(), 16 * GB), 16);
     }
 
     #[test]

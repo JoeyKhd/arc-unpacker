@@ -663,8 +663,11 @@ fn srep_will_swap(method: &str, cfg: &Config) -> bool {
         .filter_map(|m| m.params.iter().find_map(|p| p.strip_prefix("mem").and_then(crate::method::parse_size)))
         .max();
     let Some(need) = declared else { return false };
-    let (_, physical) = crate::guard::memory();
-    crate::memlimit::srep_memory_mb(&cfg.codec_dir(), physical).is_some_and(|mb| need > mb << 20)
+    // The helper works its memory out from the RAM available when it starts. Half of what is
+    // free now: another helper starting at the same time takes from it too. (If the figure
+    // can't be read, every such block is taken to swap, which is safe.)
+    let (available, _) = crate::guard::memory();
+    need > crate::memlimit::srep_memory_mb(&cfg.codec_dir(), available / 2) << 20
 }
 
 struct ProxyUse {
