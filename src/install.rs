@@ -281,6 +281,14 @@ pub fn prepare_codecs(setup: &Path, cache_dir: &Path, sink: &Sink) -> Result<Pat
         if let Some(note) = crate::memlimit::make_safe(&codec_dir, physical) {
             events::info(sink, note);
         }
+        // (make_safe may have changed arc.ini's commands, which the toml holds.)
+        let ini = codec_dir.join("arc.ini");
+        if ini.is_file() {
+            let toml = crate::arcini::to_toml(&ini)?;
+            if std::fs::read_to_string(&config).ok().as_deref() != Some(toml.as_str()) {
+                std::fs::write(&config, toml)?;
+            }
+        }
         return Ok(config);
     }
     events::info(sink, format!("extracting codecs from {}", setup.display()));

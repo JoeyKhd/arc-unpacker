@@ -793,7 +793,8 @@ impl App {
     fn free_space(&mut self) -> Option<u64> {
         let stale = self.free.as_ref().is_none_or(|(t, _, at)| *t != self.target || at.elapsed() > Duration::from_secs(3));
         if stale {
-            let f = arc_unpack::guard::free_space(Path::new(&self.target));
+            let t = self.target.trim();
+            let f = if t.is_empty() { None } else { arc_unpack::guard::free_space(Path::new(t)) };
             self.free = Some((self.target.clone(), f, Instant::now()));
         }
         self.free.as_ref().and_then(|(_, f, _)| *f)

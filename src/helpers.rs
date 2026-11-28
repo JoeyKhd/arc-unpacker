@@ -134,7 +134,7 @@ pub fn place_xtool_timer(codec_dir: &Path, host_dir: &Path) {
             continue;
         }
         let Some(src) = plugin.get_or_insert_with(|| find(&[XTOOL_TIMER], host_dir).ok()).clone() else { return };
-        let same = |a: &Path, b: &Path| std::fs::metadata(a).ok().map(|m| m.len()) == std::fs::metadata(b).ok().map(|m| m.len());
+        let same = |a: &Path, b: &Path| matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y);
         if !dest.is_file() || !same(&src, &dest) {
             let _ = std::fs::copy(&src, &dest);
         }
