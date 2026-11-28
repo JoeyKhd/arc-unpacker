@@ -114,6 +114,10 @@ const KNOWN: &[(u64, &str, Role)] = &[
 /// - hpatchz 2.5.3 (x5.exe; HDiffPatch, open source): `x5 old diff new`.
 /// - xdelta3 3.0.8 / 3.0.11 (x.exe; open source): `x -f -d -s src delta out`.
 /// - oggvorbis2fsb5 (fsb.exe; open source): `fsb in out`.
+/// - Not RTPatch's x3.exe (Unravel Two): the files it patches are named only inside its patch
+///   file, and a target another step holds open becomes a reboot-pending rename (MoveFileEx
+///   DELAY_UNTIL_REBOOT) with the new file missing. (Its CPU pinning is only the MSVC CRT's FDIV
+///   test, which restores the mask, and its temp names carry the PID.)
 /// - Farming Simulator 22's .NET shapes tool (fgpack.exe, 24,576 B; reverse-engineered:
 ///   File.Open(in), File.Create(out), a keystream XOR): `fgpack in out`.
 /// - LZMA SDK 15.12 and 19.00 lzma.exe (LzmaAlone, open source; Kerbal Space Program's and
