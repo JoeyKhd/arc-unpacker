@@ -6,7 +6,7 @@
 | Blitzkrieg 3 | 1.7 GB | 1 min 43 s | 19 s | **5.4×** | 1.0.7 |
 | Sid Meier's Civilization 6 | 9.6 GB | 6 min 31 s | 1 min 37 s | **4.0×** | 1.0.3-dev |
 | Hearts of Iron IV | 4.6 GB | 5 min 40 s | 1 min 27 s | **3.9×** | 0.1.0-beta.8 |
-| Hollow Knight - Silksong | 1.8 GB | 1 min 56 s | 30 s | **3.9×** | 0.1.0-beta.6 |
+| Hollow Knight - Silksong | 1.8 GB | 1 min 56 s | 30 s | **3.9×** | 1.0.7 |
 | Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 36 s | **3.9×** | 1.0.7 |
 | Void Reaver | 2.1 GB | 1 min 18 s | 20 s | **3.9×** | 0.1.0-beta.8 |
 | SURI - The Seventh Note | 1.8 GB | 1 min 33 s | 25 s | **3.8×** | 0.1.0-beta.10 |
