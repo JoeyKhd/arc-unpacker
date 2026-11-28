@@ -916,8 +916,8 @@ fn run_unarc(archive: &Archive, cfg: &Config, opts: &Options, id: usize, sink: &
     let dll = cfg.unarc_dll().context("no unarc configured")?;
     let host = stage::helper_exe(&["unarc-host-x86.exe"], &opts.host_dir)?;
     let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    // A work folder per job: FreeArc's external codecs use fixed temp-file names in it, so two
-    // unarc jobs sharing one would overwrite each other's files.
+    // A work folder per job, for cleaning up after it (unarc.dll gives every external-codec call
+    // a fresh freearc<N>.tmp folder inside it, so calls never share temp files).
     let work = opts.temp_dir.join(format!("unarc-{}-{}", std::process::id(), stage::unique()));
     std::fs::create_dir_all(&work).with_context(|| format!("create {}", work.display()))?;
     let _work_cleanup = RemoveDirOnDrop(work.clone());
