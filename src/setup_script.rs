@@ -641,10 +641,13 @@ impl Host for InnoHost<'_> {
             "DIREXISTS" => yes(Path::new(&s(0)).is_dir()),
             "DELETEFILE" => match self.writable(&s(0)) {
                 Some(p) => yes(std::fs::remove_file(p).is_ok()),
-                None => {
-                    self.refuse(format!("deleting {}", s(0)));
-                    yes(false)
-                }
+                None => match check_file(&self.folders.src, &s(0), self.dry) {
+                    Some(p) => yes(self.dry || std::fs::remove_file(p).is_ok()),
+                    None => {
+                        self.refuse(format!("deleting {}", s(0)));
+                        yes(false)
+                    }
+                },
             },
             "DELTREE" => {
                 let (path, is_dir, files, subdirs) = (s(0), int(1) != 0, int(2) != 0, int(3) != 0);
@@ -980,6 +983,27 @@ fn normalize(p: &Path) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+/// FitGirl's "Checking folder name..." step: check.bat writes `{src}\fg-99.bin` ("FitGirl Test")
+/// and the script deletes it again once it has seen it. That one file may be deleted from the
+/// repack folder, or every install leaves it behind (Prototype, Max Payne 3): only right in the
+/// repack folder, only a small one that isn't a FreeArc archive, so a real 99th archive is never
+/// touched. A plan (`dry`) deletes nothing.
+fn check_file(src: &Path, path: &str, dry: bool) -> Option<PathBuf> {
+    let p = normalize(Path::new(path))?;
+    let src = normalize(src)?;
+    let lower = |p: &Path| p.to_string_lossy().to_lowercase().trim_end_matches('\\').to_string();
+    let in_src = p.parent().is_some_and(|d| lower(d) == lower(&src));
+    if !in_src || !p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("fg-99.bin")) {
+        return None;
+    }
+    if dry {
+        return Some(p);
+    }
+    let meta = std::fs::symlink_metadata(&p).ok()?;
+    let small = meta.is_file() && meta.len() <= 1024;
+    (small && !std::fs::read(&p).ok()?.starts_with(b"ArC\x01")).then_some(p)
 }
 
 fn starts_with_ci(p: &Path, root: &Path) -> bool {
@@ -1572,6 +1596,31 @@ mod tests {
         assert!(downloaded_part(&c("p720", "Videos and GUI support for 1280x720 Resolution"), &hades));
         assert!(!downloaded_part(&c("p1080", "Videos and GUI support for 1920x1080 Resolution"), &hades));
         assert!(!downloaded_part(&c("text", "Main game files"), &hades));
+    }
+
+    #[test]
+    fn the_folder_checks_file_is_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("Prototype [FitGirl Repack]");
+        std::fs::create_dir_all(src.join("MD5")).unwrap();
+        let f = src.join("fg-99.bin");
+        let path = f.to_string_lossy().into_owned();
+        std::fs::write(&f, b"FitGirl Test\r\n").unwrap();
+        assert_eq!(check_file(&src, &path, false), Some(f.clone()));
+        assert_eq!(check_file(&src, &path.to_uppercase(), false).map(|p| p.to_string_lossy().to_lowercase()), Some(path.to_lowercase()));
+        // A real archive by that name stays: a FreeArc one, or anything bigger than a check file.
+        std::fs::write(&f, b"ArC\x01 tiny archive").unwrap();
+        assert_eq!(check_file(&src, &path, false), None);
+        std::fs::write(&f, vec![b'x'; 4096]).unwrap();
+        assert_eq!(check_file(&src, &path, false), None);
+        // Only that name, only right in the repack folder; a plan deletes nothing.
+        std::fs::write(src.join("fg-01.bin"), b"FitGirl Test\r\n").unwrap();
+        assert_eq!(check_file(&src, &src.join("fg-01.bin").to_string_lossy(), false), None);
+        std::fs::write(src.join("MD5").join("fg-99.bin"), b"FitGirl Test\r\n").unwrap();
+        assert_eq!(check_file(&src, &src.join("MD5").join("fg-99.bin").to_string_lossy(), false), None);
+        assert_eq!(check_file(&src, &dir.path().join("fg-99.bin").to_string_lossy(), false), None);
+        assert_eq!(check_file(&src, &src.join("missing").join("..").join("fg-99.bin").to_string_lossy(), true), Some(f.clone()));
+        assert_eq!(check_file(&src, "fg-99.bin", false), None, "relative paths aren't taken");
     }
 
     fn component(name: &str, fixed: bool) -> crate::inno::Component {
