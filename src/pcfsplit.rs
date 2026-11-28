@@ -6,7 +6,8 @@
 //! another on one core (PES 2017: 745 s at 0.8 cores).
 //!
 //! The stream is "PCF" 0.4.3 without on-the-fly compression: a header (magic, version, a 0 byte,
-//! the input's name and a NUL), then records until the end. A depth-0 record's output depends
+//! the input's name and a NUL), then records until the end. (PES 2017's starts
+//! `PCF 00 04 03 00 $$arcdatafile$$.tmp`: the external `precomp` command line made it.) A depth-0 record's output depends
 //! only on its own bytes (precomp-cpp's decompress_file: zlib, bzip2 and the image libraries are
 //! set up per record, penalty bytes are relative to the record's own output, and a recursion
 //! record holds its whole nested stream; the layer FitGirl added to precomp.exe flushes its
