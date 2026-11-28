@@ -337,7 +337,15 @@ pub struct InnoHost<'a> {
     isdone_no_records: bool,
     /// ISDone's srep memory (SrepInit's VirtMem; 4096 until set).
     isdone_srep_mem: i64,
+    /// Running InitializeWizard on its own (`wizard_checks`): calls arc-unpack doesn't provide
+    /// (window and DLL functions) do nothing instead of stopping the script.
+    tolerant: bool,
+    /// What the script set `WizardForm.ComponentsList.Checked[i]` to, in order: (item, value).
+    wizard_checks: Vec<(i64, bool)>,
 }
+
+/// The object handle the script gets for WizardForm.ComponentsList.
+const COMPONENTS_LIST: u32 = 10;
 
 impl<'a> InnoHost<'a> {
     pub fn new(folders: Folders, setup: &'a Setup, selected: BTreeSet<String>, runner: &'a mut dyn Runner) -> InnoHost<'a> {
@@ -357,6 +365,8 @@ impl<'a> InnoHost<'a> {
             isdone_components: None,
             isdone_no_records: false,
             isdone_srep_mem: 4096,
+            tolerant: false,
+            wizard_checks: Vec::new(),
         }
     }
 
@@ -511,9 +521,17 @@ impl<'a> InnoHost<'a> {
 impl Host for InnoHost<'_> {
     fn signature(&self, key: &str) -> Option<(usize, bool)> {
         if let Some(member) = key.strip_prefix("CLASS:") {
+            // The components list's Checked[i] (set: list, index, value; read: list, index).
+            let mut parts = member.split('|');
+            let (class, m) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            if class == "TNEWCHECKLISTBOX" && (m == "CHECKED@" || m == "ITEMENABLED@") {
+                return Some((3, false));
+            }
+            if class == "TNEWCHECKLISTBOX" && m == "CHECKED" {
+                return Some((2, true));
+            }
             // Window/control members: accepted and ignored. Setters (`@`) and a few methods
             // return nothing; everything else is a getter/function returning a default.
-            let m = member.split('|').nth(1).unwrap_or("");
             const PROCEDURES: &[&str] =
                 &["HIDE", "SHOW", "BRINGTOFRONT", "SENDTOBACK", "FREE", "SETFOCUS", "REFRESH", "REPAINT", "UPDATE", "INVALIDATE", "CLEAR", "CLOSE", "SETBOUNDS"];
             return Some((0, !(m.ends_with('@') || PROCEDURES.contains(&m))));
@@ -540,6 +558,8 @@ impl Host for InnoHost<'_> {
             "dll:WRAPCALLBACK" => (2, true),
             "dll:SUSPENDPROC" | "dll:RESUMEPROC" => (0, false),
             "dll:SETTASKBARPROGRESSVALUE" | "dll:SETTASKBARPROGRESSSTATE" => (1, false),
+            // (Arguments are read, not popped, so "none, no result" is safe for any call.)
+            _ if self.tolerant => (0, false),
             _ => return None,
         })
     }
@@ -549,8 +569,21 @@ impl Host for InnoHost<'_> {
         let int = |i: usize| a.get(i).map(Value::as_int).unwrap_or(0);
         let float = |i: usize| a.get(i).map(Value::as_float).unwrap_or(0.0);
         let yes = |b: bool| Some(Value::Int(b as i64));
-        if key.starts_with("CLASS:") {
-            return Ok(None);
+        if let Some(member) = key.strip_prefix("CLASS:") {
+            let mut parts = member.split('|');
+            let (class, m) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            let list = matches!(a.first(), Some(Value::Obj(COMPONENTS_LIST)));
+            return Ok(match (class, m) {
+                ("TWIZARDFORM", "COMPONENTSLIST") => Some(Value::Obj(COMPONENTS_LIST)),
+                ("TNEWCHECKLISTBOX", "CHECKED@") if list => {
+                    self.wizard_checks.push((int(1), int(2) != 0));
+                    None
+                }
+                ("TNEWCHECKLISTBOX", "CHECKED") if list => {
+                    self.wizard_checks.iter().rev().find(|c| c.0 == int(1)).map(|c| Value::Int(c.1 as i64))
+                }
+                _ => None,
+            });
         }
         // Tool steps may run beside the next steps (install.rs, `overlap_paths`): anything that
         // looks at or changes files first waits for them. Exec steps decide that themselves.
@@ -891,6 +924,7 @@ impl Host for InnoHost<'_> {
             "dll:ISDONESTOP" | "dll:CHANGELANGUAGE" | "dll:FILESEARCHINIT" => yes(true),
             "dll:WRAPCALLBACK" => Some(Value::Int(0)),
             "dll:SUSPENDPROC" | "dll:RESUMEPROC" | "dll:SETTASKBARPROGRESSVALUE" | "dll:SETTASKBARPROGRESSSTATE" => None,
+            _ if self.tolerant => None,
             _ => bail!("{key} is declared but not implemented"),
         })
     }
@@ -1110,6 +1144,84 @@ pub struct Plan {
     pub parts: Parts,
     /// Steps left out with the archives the selection doesn't take.
     pub skipped: Vec<Step>,
+    /// The script's own InitializeWizard choices (`wizard_checks`).
+    pub wizard: Vec<(i64, bool)>,
+}
+
+/// What the install script's InitializeWizard does to the components list itself, by item
+/// index: 28 of 74 saved FitGirl setups tick a part there when its archive was downloaded
+/// (`if FileExists('{src}\fg-optional-useless-video.bin') then ComponentsList.Checked[1] :=
+/// True`, Mad Max), which wins over Setup's command line. Runs it on its own against a scratch
+/// temp folder, changing nothing; window and DLL calls arc-unpack doesn't provide do nothing.
+/// Empty when the script has no InitializeWizard or it fails.
+pub fn wizard_checks(setup: &Setup, script: &Script, setup_exe: &Path, repack: &Path) -> Vec<(i64, bool)> {
+    let run = || -> Result<Vec<(i64, bool)>> {
+        if script.find("INITIALIZEWIZARD").is_none() {
+            return Ok(Default::default());
+        }
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("arcunp-wizard-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        fill_plan_tmp(setup, &tmp)?;
+        let folders = Folders {
+            app: std::env::temp_dir().join(format!("arcunp-wizard-app-{}-{n}", std::process::id())),
+            tmp: tmp.clone(),
+            src: std::path::absolute(repack)?,
+            setup_exe: std::path::absolute(setup_exe)?,
+        };
+        let mut runner = PlanOnly;
+        let mut host = InnoHost::new(folders, setup, BTreeSet::new(), &mut runner);
+        host.dry = true;
+        host.tolerant = true;
+        let mut vm = Vm::new(script);
+        let r = vm.call("INITIALIZEWIZARD", &[], &mut host);
+        let checks = std::mem::take(&mut host.wizard_checks);
+        drop(host);
+        let _ = std::fs::remove_dir_all(&tmp);
+        r?;
+        Ok(checks)
+    };
+    run().unwrap_or_default()
+}
+
+/// `selected` with the script's own InitializeWizard choices (`wizard_checks`) applied in the
+/// script's order: item i of the components list is the i-th component shown for the language.
+/// Ticking one choice of a pick-one group unticks the others, as Inno's list does with its radio
+/// buttons (Resident Evil 2 ticks "Recoded" and then "Original" when both archives are there:
+/// Original is installed).
+pub fn apply_wizard_checks(setup: &Setup, selected: BTreeSet<String>, checks: &[(i64, bool)]) -> BTreeSet<String> {
+    if checks.is_empty() {
+        return selected;
+    }
+    with_exclusive_choices(setup, apply_checks_to(&setup.components, selected, checks))
+}
+
+fn apply_checks_to(components: &[crate::inno::Component], mut selected: BTreeSet<String>, checks: &[(i64, bool)]) -> BTreeSet<String> {
+    let shown: Vec<(String, bool, bool)> = components
+        .iter()
+        .filter(|c| crate::install::english_or_neutral(&c.languages))
+        .map(|c| (c.name.to_ascii_lowercase(), c.fixed, c.exclusive))
+        .collect();
+    let parent = |name: &str| name.rsplit_once('\\').map(|(p, _)| p.to_string());
+    for &(i, checked) in checks {
+        let Some((name, fixed, exclusive)) = usize::try_from(i).ok().and_then(|i| shown.get(i)) else { continue };
+        if checked {
+            if *exclusive {
+                let group = parent(name);
+                for (other, _, other_exclusive) in &shown {
+                    if *other_exclusive && other != name && parent(other) == group {
+                        selected.remove(other);
+                    }
+                }
+            }
+            selected.insert(name.clone());
+        } else if !fixed {
+            // (Inno doesn't let a fixed component be unticked.)
+            selected.remove(name);
+        }
+    }
+    selected
 }
 
 /// Runs the install script against a scratch temp folder with nothing extracted or run.
@@ -1137,9 +1249,10 @@ pub fn plan_with(
     let _ = std::fs::remove_dir_all(&tmp);
     fill_plan_tmp(setup, &tmp)?;
     let files = repack_files(repack);
+    let wizard = wizard_checks(setup, script, setup_exe, repack);
     let selected = match selected {
         Some(chosen) => with_exclusive_choices(setup, chosen),
-        None => default_components(setup, &files),
+        None => apply_wizard_checks(setup, default_components(setup, &files), &wizard),
     };
     let parts = parts_for(setup, &files, &selected);
     let components = setup
@@ -1176,6 +1289,7 @@ pub fn plan_with(
         tmp: tmp.clone(),
         parts,
         skipped: std::mem::take(&mut host.skipped),
+        wizard,
     };
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(plan)
@@ -1203,7 +1317,7 @@ pub struct Choice {
 /// which arc-unpack doesn't run, are left out.
 pub fn choices(setup: &Setup, plan: &Plan, repack: &Path) -> Vec<Choice> {
     let files = repack_files(repack);
-    let defaults = default_components(setup, &files);
+    let defaults = apply_wizard_checks(setup, default_components(setup, &files), &plan.wizard);
     let parent = |name: &str| name.rsplit_once('\\').map(|(p, _)| p.to_string());
     let components = || setup.components.iter().filter(|c| crate::install::english_or_neutral(&c.languages));
     // A pick-one group is offered whole once the script asks about one of it: the default
@@ -1479,6 +1593,23 @@ mod tests {
         // Ordinary (non-exclusive) children aren't ticked by their parent.
         let comps = [component("voice", false), component(r"voice\french", false)];
         assert_eq!(exclusive_choices_of(&comps, sel(&["voice"])), sel(&["voice"]));
+    }
+
+    #[test]
+    fn the_scripts_own_component_choices() {
+        let pick = |name: &str| crate::inno::Component { exclusive: true, ..component(name, false) };
+        // Resident Evil 2's list: text, bonus, unused, video, video\recoded, video\original.
+        let comps = [component("text", true), component("bonus", false), component("unused", false), component("video", false), pick(r"video\recoded"), pick(r"video\original")];
+        let sel = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
+        // Its InitializeWizard: untick 1-5, then with both video archives there tick recoded (4)
+        // and video (3), then original (5) and video (3), then unused (2): original wins.
+        let checks = [(1, false), (2, false), (3, false), (4, false), (5, false), (4, true), (3, true), (5, true), (3, true), (2, true)];
+        assert_eq!(apply_checks_to(&comps, sel(&["text", "bonus", "video", r"video\original"]), &checks), sel(&["text", "unused", "video", r"video\original"]));
+        // Mad Max: credits (item 1) unticked, then ticked because its archive is there; a fixed
+        // component is never unticked.
+        let comps = [component("text", true), component("credits", false)];
+        assert_eq!(apply_checks_to(&comps, sel(&["text"]), &[(1, false), (1, true)]), sel(&["text", "credits"]));
+        assert_eq!(apply_checks_to(&comps, sel(&["text"]), &[(0, false), (7, true)]), sel(&["text"]));
     }
 
     #[test]

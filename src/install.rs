@@ -689,7 +689,11 @@ fn install_scripted(
     let target = abs(&opts.target_dir);
     let selected: std::collections::BTreeSet<String> = match &opts.components {
         Some(list) => ss::with_exclusive_choices(inno, list.iter().map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect()),
-        None => ss::default_components(inno, &ss::repack_files(&opts.repack_dir)),
+        None => ss::apply_wizard_checks(
+            inno,
+            ss::default_components(inno, &ss::repack_files(&opts.repack_dir)),
+            &ss::wizard_checks(inno, script, setup_exe, &opts.repack_dir),
+        ),
     };
     events::info(sink, format!("running the installer's own install script; components: {}", selected.iter().cloned().collect::<Vec<_>>().join(", ")));
     // Optional parts the selection leaves out, and whether this only adds parts to a game that
