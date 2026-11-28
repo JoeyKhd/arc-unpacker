@@ -215,9 +215,9 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     }
 
     let summary = Arc::new(Mutex::new(summary));
-    let pending: Vec<(usize, Job, bool)> =
-        jobs.into_iter().map(|j| { let heavy = is_heavy(&j, cfg); (next_job_id(), j, heavy) }).collect();
-    let queue = Mutex::new(Queue { pending, heavy_running: 0, told_waiting: false });
+    let pending: Vec<(usize, Job, bool, u8)> =
+        jobs.into_iter().map(|j| { let heavy = is_heavy(&j, cfg); (next_job_id(), j, heavy, 0) }).collect();
+    let queue = Mutex::new(Queue { pending, heavy_running: 0, told_waiting: false, since: Instant::now() });
     let wake = std::sync::Condvar::new();
 
     let all_done = AtomicBool::new(false);
@@ -268,6 +268,9 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                         output: job.origsize(),
                     });
                     let proxies = ProxyUse::begin(proxy_codecs(&job, cfg), matches!(job.kind, JobKind::Unarc), &opts.cancel);
+                    if let Some((secs, names)) = &proxies.waited {
+                        events::info(sink, format!("{label}: waited {secs:.1} s for {}, which another job was using", names.join(", ")));
+                    }
                     let started = Instant::now();
                     let res = match job.kind {
                         JobKind::Block(i) => run_block(&job.archive, &job.archive.blocks[i], cfg, opts, id, sink),
@@ -326,11 +329,17 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
 }
 
 struct Queue {
-    /// (id, job, heavy), biggest first.
-    pending: Vec<(usize, Job, bool)>,
+    /// (id, job, heavy, why it was passed over: WAIT_*), biggest first.
+    pending: Vec<(usize, Job, bool, u8)>,
     heavy_running: usize,
     told_waiting: bool,
+    since: Instant,
 }
+
+/// A heavy job was passed over because this run had its heavy jobs running already.
+const WAIT_HEAVY_HERE: u8 = 1;
+/// ... because the machine-wide slots were taken (by an early extraction or another process).
+const WAIT_HEAVY_ELSEWHERE: u8 = 2;
 
 /// Next job this worker may start: the biggest pending one, except that heavy jobs wait while
 /// `heavy_jobs` of them are already running (light ones may overtake them). None = all done.
@@ -355,23 +364,40 @@ fn next_job(
         let running = q.heavy_running;
         let mut slot = None;
         let mut blocked_elsewhere = false;
-        let pick = q.pending.iter().position(|(_, _, heavy)| {
-            if !heavy || limit == 0 {
+        let pick = q.pending.iter_mut().position(|(_, _, heavy, why)| {
+            if !*heavy || limit == 0 {
                 return true;
             }
             if running >= limit {
+                *why |= WAIT_HEAVY_HERE;
                 return false;
             }
             if slot.is_none() {
                 slot = crate::guard::try_heavy_slot(limit);
                 blocked_elsewhere |= slot.is_none();
             }
+            if slot.is_none() {
+                *why |= WAIT_HEAVY_ELSEWHERE;
+            }
             slot.is_some()
         });
         if let Some(pos) = pick {
-            let (id, job, heavy) = q.pending.remove(pos);
+            let (id, job, heavy, why) = q.pending.remove(pos);
             if heavy {
                 q.heavy_running += 1;
+            }
+            // Why a job started late, when it was held back as memory-heavy (waiting for a free
+            // worker is the normal case and not logged).
+            let waited = q.since.elapsed().as_secs_f64();
+            if why != 0 && waited >= 1.0 {
+                let mut reasons = Vec::new();
+                if why & WAIT_HEAVY_HERE != 0 {
+                    reasons.push(format!("{limit} memory-heavy job(s) of this archive set running"));
+                }
+                if why & WAIT_HEAVY_ELSEWHERE != 0 {
+                    reasons.push("the machine-wide memory-heavy slots taken (an early extraction or another arc-unpack)".to_string());
+                }
+                events::info(sink, format!("{}: started after waiting {waited:.1} s for {}", job.label(), reasons.join(" and ")));
             }
             return Some((id, job, heavy, slot));
         }
@@ -519,6 +545,11 @@ fn method_is_heavy_with(chain: &str, block_size: u64, cfg: &Config, limit: Optio
         if name.starts_with("lolz") {
             return true;
         }
+        // mpzz (OGGRE, cls-mpzz.dll): x86, so it runs in the 32-bit host (at most 4 GB of address
+        // space), and single-threaded: like lolzi, light unless a RAM limit is set.
+        if name == "mpzz" {
+            return limit.is_some();
+        }
         if name == "srep" {
             // "mem228mb": how much the compressor says decompression needs. Without it, go by size.
             let declared = m.params.iter().find_map(|p| p.strip_prefix("mem").and_then(crate::method::parse_size));
@@ -604,6 +635,8 @@ const SPILLING_PROXIES: [&str; 3] = ["cls-magic2l", "cls-magicl", "cls-precomp"]
 struct ProxyUse {
     /// Codec names, and whether this job holds each one exclusively.
     names: Vec<(String, bool)>,
+    /// How long it waited (1 s or more) and for which of them.
+    waited: Option<(f64, Vec<String>)>,
 }
 
 impl ProxyUse {
@@ -613,19 +646,31 @@ impl ProxyUse {
         let names: Vec<(String, bool)> =
             names.into_iter().map(|n| { let excl = exclusive || SPILLING_PROXIES.contains(&n.as_str()); (n, excl) }).collect();
         if names.is_empty() {
-            return ProxyUse { names };
+            return ProxyUse { names, waited: None };
         }
+        let (since, mut blockers) = (Instant::now(), Vec::new());
         let mut using = PROXY_USE.lock().unwrap();
         loop {
-            let free = names.iter().all(|(n, want_excl)| match using.iter().find(|u| &u.0 == n) {
-                None => true,
-                Some((_, shared, excl)) => !*excl && (!*want_excl || *shared == 0),
-            });
-            if free || cancel.load(Ordering::Relaxed) {
+            let busy: Vec<&String> = names
+                .iter()
+                .filter(|(n, want_excl)| match using.iter().find(|u| &u.0 == n) {
+                    None => false,
+                    Some((_, shared, excl)) => *excl || (*want_excl && *shared > 0),
+                })
+                .map(|(n, _)| n)
+                .collect();
+            if busy.is_empty() || cancel.load(Ordering::Relaxed) {
                 break;
+            }
+            for n in busy {
+                if !blockers.contains(n) {
+                    blockers.push(n.clone());
+                }
             }
             using = PROXY_FREED.wait_timeout(using, Duration::from_millis(250)).unwrap().0;
         }
+        let secs = since.elapsed().as_secs_f64();
+        let waited = (secs >= 1.0).then_some((secs, blockers));
         for (n, excl) in &names {
             if !using.iter().any(|u| &u.0 == n) {
                 using.push((n.clone(), 0, false));
@@ -637,7 +682,7 @@ impl ProxyUse {
                 u.1 += 1;
             }
         }
-        ProxyUse { names }
+        ProxyUse { names, waited }
     }
 }
 
@@ -1321,6 +1366,9 @@ mod tests {
         assert!(!method_is_heavy_with("lolz:d512:al1:mc1023:tt2:cm1:pa4", gb, &cfg, None));
         assert!(method_is_heavy_with("lolzi:d1024:al1", gb, &cfg, None));
         assert!(method_is_heavy_with("lolzi:d512:al1:mc1023:tt8", gb, &cfg, Some(8 * gb)));
+        // OGGRE likewise (Hades fg-02: 1.26 GB).
+        assert!(!method_is_heavy_with("mpzz+srep:m3f:mem228mb", 1260 << 20, &cfg, None));
+        assert!(method_is_heavy_with("mpzz+srep:m3f:mem228mb", 1260 << 20, &cfg, Some(8 * gb)));
         // With a RAM limit, srep blocks that would spill to its one temp file are heavy.
         assert!(method_is_heavy_with("srep:m3f:mem900mb+lzma", gb / 2, &cfg, Some(2 * gb)));
         assert!(!method_is_heavy_with("srep:m3f:mem228mb+lzma", gb / 2, &cfg, Some(2 * gb)));

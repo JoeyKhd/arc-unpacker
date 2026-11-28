@@ -1096,6 +1096,8 @@ struct Prefetch {
     used: bool,
     /// The programs its codecs run (worked out once its config is final).
     programs: Option<Vec<PathBuf>>,
+    /// The first of them still missing when it was last tried (unpacked by a later step).
+    missing: Option<PathBuf>,
 }
 
 /// The codec programs an archive's blocks run, given by a path (`xt\xtool.exe`, or absolute).
@@ -1326,6 +1328,7 @@ fn plan_prefetches(plan: &crate::setup_script::Plan, src: &Path, app: &Path, sta
             handle: None,
             used: false,
             programs: None,
+            missing: None,
         });
     }
     out
@@ -1400,7 +1403,9 @@ impl ScriptRunner<'_> {
             };
             // Its codec programs may still be unpacked by an earlier step: then try again later.
             let programs = self.prefetch[i].programs.get_or_insert_with(|| codec_programs(&cfg, &archive));
-            if !programs.iter().all(|p| p.is_file()) {
+            let missing = programs.iter().find(|p| !p.is_file()).cloned();
+            if missing.is_some() {
+                self.prefetch[i].missing = missing;
                 continue;
             }
             let mut eopts = self.options(stage.clone(), whole.then_some(out.as_path()), self.prefetch[i].cancel.clone());
@@ -1431,7 +1436,21 @@ impl ScriptRunner<'_> {
             return Ok(None);
         };
         self.prefetch[i].used = true;
-        let Some(handle) = self.prefetch[i].handle.take() else { return Ok(None) };
+        let Some(handle) = self.prefetch[i].handle.take() else {
+            // Say why, so a step that waits for a whole archive can be told apart in the log.
+            let p = &self.prefetch[i];
+            let made = self.changes.get(&p.cfg_name).copied().unwrap_or(0);
+            let why = if made < p.changes_before {
+                format!("{} had {made} of the {} changes made before this step", p.cfg_name, p.changes_before)
+            } else if let Some(m) = &p.missing {
+                format!("{} was unpacked only later", m.file_name().unwrap_or_default().to_string_lossy())
+            } else {
+                format!("{} got its last change just before this step", p.cfg_name)
+            };
+            let name = archive.file_name().unwrap_or_default().to_string_lossy();
+            events::info(self.sink, format!("{name}: not extracted early: {why}"));
+            return Ok(None);
+        };
         let stage = self.prefetch[i].stage.clone();
         while !handle.is_finished() {
             if self.opts.cancel.load(Ordering::Relaxed) {
