@@ -38,10 +38,10 @@
 | Far Cry 3 - Duology | 6.3 GB | 12 min 41 s | 4 min 53 s | **2.6×** | 1.0.6 |
 | Flick | 2.1 GB | 54 s | 21 s | **2.6×** | 1.0.7 |
 | Outer Wilds | 2.5 GB | 2 min 01 s | 47 s | **2.6×** | 1.0.3-dev |
-| Stardew Valley | 0.4 GB | 36 s | 14 s | **2.6×** | 0.1.0-beta.7 |
 | Cuphead | 4.3 GB | 2 min 34 s | 1 min 03 s | **2.5×** | 0.1.0-beta.8 |
 | Dice Hoarder | 1.5 GB | 2 min 04 s | 49 s | **2.5×** | 0.1.0-beta.8 |
 | Hollow Knight | 1.1 GB | 1 min 24 s | 33 s | **2.5×** | 0.1.0-beta.7 |
+| Stardew Valley | 0.4 GB | 36 s | 15 s | **2.5×** | 1.0.7 |
 | Persona 3 Reload | 12.3 GB | 3 min 38 s | 1 min 30 s | **2.4×** | 0.1.0-beta.11 |
 | Ticket to Ride | 0.7 GB | 45 s | 18 s | **2.4×** | 0.1.0-beta.9 |
 | Farming Simulator 17 | 3.5 GB | 5 min 33 s | 2 min 23 s | **2.3×** | 1.0.7 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 24 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 25 s** | **1.8×** | |
