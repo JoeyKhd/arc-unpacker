@@ -397,13 +397,42 @@ fn edit_files(dir: &Path, edit: impl Fn(&str, &str) -> Option<String>) -> bool {
 pub fn make_safe(dir: &Path, _physical: u64) -> Option<String> {
     let cpus = logical_cpus();
     let helpers = old_lolz_helpers(dir);
-    let changed = edit_files(dir, |name, text| (name == "cls.ini").then(|| cls_ini_safe(text, cpus, &helpers)));
-    changed.then(|| {
-        format!(
-            "old lolz decoders ({}): at most {OLD_LOLZ_THREADS} threads (they hang with 17 or more)",
-            OLD_LOLZ.join(", ")
-        )
-    })
+    let mut notes = Vec::new();
+    if edit_files(dir, |name, text| (name == "cls.ini").then(|| cls_ini_safe(text, cpus, &helpers))) {
+        notes.push(format!("old lolz decoders ({}): at most {OLD_LOLZ_THREADS} threads (they hang with 17 or more)", OLD_LOLZ.join(", ")));
+    }
+    if edit_files(dir, |name, text| (name == "arc.ini").then(|| ucrn_ini(text))) {
+        notes.push("ucrn: -m1g, so its batch check passes on PCs with more than 32 threads".to_string());
+    }
+    (!notes.is_empty()).then(|| notes.join("; "))
+}
+
+/// arc.ini with `-m1g` after ucrn.exe where its line sets no -m. ucrn (FitGirl's Unity crunch
+/// texture recompressor; reverse-engineered) runs with 512 MiB by default and stops with exit 1
+/// on a batch that doesn't fit 512 MiB less 2 MiB per worker (one per CPU, up to 64): 446 MiB at
+/// 32 threads, 382 MiB at 64. -m only moves that check and the worker cap; the memory used is the
+/// batch's own, and the output doesn't depend on it.
+fn ucrn_ini(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let ending = &line[body.len()..];
+        if !body.trim_start().to_ascii_lowercase().starts_with("unpackcmd") {
+            out.push_str(line);
+            continue;
+        }
+        let mut words: Vec<String> = body.split(' ').map(str::to_string).collect();
+        let is_ucrn = |w: &str| w.trim_matches('"').rsplit(['\\', '/']).next().is_some_and(|n| n.eq_ignore_ascii_case("ucrn.exe"));
+        match words.iter().position(|w| is_ucrn(w)) {
+            Some(prog) if !words[prog + 1..].iter().any(|w| w.starts_with("-m")) => {
+                words.insert(prog + 1, "-m1g".to_string());
+                out.push_str(&words.join(" "));
+                out.push_str(ending);
+            }
+            _ => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// Applies the limit to the installer's CLS.ini and arc.ini in `tmp`. Returns what it set, for
@@ -443,6 +472,14 @@ mod tests {
         // A bare number is bytes to the helper.
         std::fs::write(dir.path().join("CLS.ini"), "[Srep]\r\nMemory=228\r\n").unwrap();
         assert_eq!(srep_memory_mb(dir.path(), 16 * GB), 16);
+    }
+
+    #[test]
+    fn ucrn_batch_room() {
+        let ini = "[External compressor:ucrn]\r\nheader = 0\r\nunpackcmd = ucrn.exe <stdin> <stdout>\r\n[External compressor:x]\r\nunpackcmd = xucrn.exe <stdin> <stdout>\r\nunpackcmd = ucrn.exe -m512m <stdin> <stdout>\r\n";
+        let once = ucrn_ini(ini);
+        assert_eq!(once, ini.replacen("ucrn.exe <stdin>", "ucrn.exe -m1g <stdin>", 1));
+        assert_eq!(ucrn_ini(&once), once);
     }
 
     #[test]
