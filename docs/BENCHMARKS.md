@@ -51,7 +51,7 @@
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
-| Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.5 |
+| Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.7 |
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | The Blood of Dawnwalker | 48.6 GB | 8 min 12 s | 3 min 39 s | **2.2×** | 1.0.6 |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
