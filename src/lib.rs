@@ -1,5 +1,6 @@
 //! arc-unpack: parallel FreeArc archive unpacker.
 pub mod arcini;
+pub mod bikzsplit;
 pub mod config;
 pub mod events;
 pub mod extract;

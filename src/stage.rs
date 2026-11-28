@@ -189,6 +189,8 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
                 // precomp.inside: its stream restored in parts by several plain precomp.exe.
                 match crate::pcfsplit::known_precomp(dll) {
                     Some(exe) if crate::pcfsplit::workers() > 1 => precomp_split(spec, exe, stream, ctx)?,
+                    // cls-zstd: its videos decoded by several copies at once.
+                    _ if crate::bikzsplit::known(dll) && crate::bikzsplit::workers() > 1 => bink_split(spec, stream, ctx)?,
                     _ => external(spec, stream, ctx)?,
                 }
             }
@@ -801,6 +803,43 @@ fn precomp_split(spec: ExtSpec, exe: PathBuf, input: Stream, ctx: &Ctx) -> Resul
     let workers = crate::pcfsplit::workers();
     let aborted = ctx.reg.aborted.clone();
     crate::pcfsplit::run(header, rest, workers, Default::default(), &ctx.temp_dir, spawn, single, aborted, move |label, f| reg.worker(label, f), &spec.label)
+}
+
+/// Decodes a cls-zstd.dll stream with several codec hosts, one group of whole videos each (see
+/// `bikzsplit`).
+fn bink_split(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
+    let input = tee_if_requested(&spec, input)?;
+    let rest = match crate::bikzsplit::probe(input)? {
+        crate::bikzsplit::Plan::Split { rest } => rest,
+        crate::bikzsplit::Plan::Single { reason, replay } => {
+            eprintln!("note: {}: not split ({reason}); one cls-zstd decodes it", spec.label);
+            return external_untee(spec, replay, ctx);
+        }
+    };
+    let mut base = spec.clone();
+    base.label = format!("{} (split)", spec.label);
+    let ctx2 = ctx.clone();
+    // (The DLL folder as working folder, as for one copy: it writes no files.)
+    let spawn = move |_item: u64| -> Result<crate::bikzsplit::Worker> {
+        let mut cmd = command(&base, Path::new(""), Path::new(""), workdir_of(&base, &None), ctx2.tune);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let sp = spawn_child(&base, cmd, &ctx2)?;
+        let (label, tail, child) = (base.label.clone(), sp.stderr_tail.clone(), sp.child);
+        let mut stdin = sp.stdin.unwrap();
+        Ok(crate::bikzsplit::Worker {
+            input: Box::new(move |d| stdin.write_all(d)),
+            output: Box::new(sp.stdout.unwrap()),
+            wait: Box::new(move || {
+                let status = child.lock().unwrap().wait()?;
+                if status.success() { Ok(()) } else { Err(exit_error(&label, status, &tail)) }
+            }),
+        })
+    };
+    let (one, ctx3) = (spec.clone(), ctx.clone());
+    let single: crate::bikzsplit::Single = Box::new(move |s: Stream| external_untee(one.clone(), s, &ctx3));
+    let (reg, reg2) = (ctx.reg.clone(), ctx.reg.clone());
+    let workers = crate::bikzsplit::workers();
+    crate::bikzsplit::run(rest, workers, spawn, single, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
 }
 
 /// Decodes an xtool stream with up to `workers` xtool processes (see `xtsplit`).
