@@ -55,7 +55,7 @@
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
-| Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
+| Need for Speed - Payback | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
 | over the hill | 2.1 GB | 3 min 35 s | 1 min 44 s | **2.1×** | 0.1.0-beta.8 |
 | Rocksmith 2014 Remastered | 11.7 GB | 5 min 19 s | 2 min 29 s | **2.1×** | 1.0.6 |
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
@@ -86,6 +86,7 @@
 | AI LIMIT | 14.8 GB | 4 min 43 s | 3 min 00 s | **1.6×** | 0.1.0-beta.12 |
 | Football Manager 2023 | 2.3 GB | 2 min 40 s | 1 min 40 s | **1.6×** | 0.1.0-beta.8 |
 | MGS 4 - Master Collection Version | 18.5 GB | 8 min 00 s | 4 min 57 s | **1.6×** | 0.1.0-beta.12 |
+| Wicked Seed | 6.5 GB | 5 min 30 s | 3 min 27 s | **1.6×** | 1.0.6 |
 | Cricket 19 | 12.3 GB | 27 min 13 s | 18 min 34 s | **1.5×** | 1.0.5 |
 | Kerbal Space Program | 1.5 GB | 3 min 23 s | 2 min 18 s | **1.5×** | 1.0.5 |
 | Mad Max | 4.0 GB | 7 min 11 s | 4 min 55 s | **1.5×** | 1.0.3-dev |
@@ -115,6 +116,7 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
+| The Blood of Dawnwalker | 48.6 GB | – | 3 min 29 s | – | 1.0.6 |
 | Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | |
 | Forza Horizon 6 | 81.6 GB | – | – | – | |
 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
@@ -124,7 +126,6 @@
 | Assassin's Creed Shadows | 77.3 GB | – | – | – | |
 | Call of Duty: Modern Warfare II | 22.5 GB | – | – | – | |
 | Cyberpunk 2077 | 49.5 GB | – | – | – | |
-| Wicked Seed | 6.0 GB | – | – | – | |
 | The Relic: First Guardian | 18.9 GB | – | – | – | |
 | Grand Theft Auto V Enhanced | 39.5 GB | – | – | – | |
 | EA SPORTS FC 27 | 56.3 GB | – | – | – | |
@@ -209,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 113 measured** | | **614 min 05 s** | **351 min 32 s** | **1.7×** | |
+| **All 114 measured** | | **619 min 35 s** | **354 min 59 s** | **1.7×** | |
