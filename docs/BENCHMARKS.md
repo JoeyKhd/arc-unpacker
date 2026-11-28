@@ -43,6 +43,7 @@
 | Dice Hoarder | 1.5 GB | 2 min 04 s | 49 s | **2.5×** | 0.1.0-beta.8 |
 | Hollow Knight | 1.1 GB | 1 min 24 s | 33 s | **2.5×** | 0.1.0-beta.7 |
 | Persona 3 Reload | 12.3 GB | 3 min 38 s | 1 min 30 s | **2.4×** | 0.1.0-beta.11 |
+| The Blood of Dawnwalker [FitGirl Monkey Repack] | 48.6 GB | 8 min 15 s | 3 min 29 s | **2.4×** | 1.0.6 |
 | Ticket to Ride | 0.7 GB | 45 s | 18 s | **2.4×** | 0.1.0-beta.9 |
 | Farming Simulator 17 | 3.5 GB | 5 min 33 s | 2 min 24 s | **2.3×** | 1.0.5 |
 | Moadra | 3.3 GB | 50 s | 22 s | **2.3×** | 0.1.0-beta.6 |
@@ -123,7 +124,6 @@
 | The Last of Us: Part I | 38.8 GB | – | failed | – | 1.0.6 |
 | Assassin's Creed Shadows | 77.3 GB | – | – | – | |
 | Call of Duty: Modern Warfare II | 22.5 GB | – | – | – | |
-| The Blood of Dawnwalker | 39.1 GB | – | – | – | |
 | Cyberpunk 2077 | 49.5 GB | – | – | – | |
 | Wicked Seed | 6.0 GB | – | – | – | |
 | The Relic: First Guardian | 18.9 GB | – | – | – | |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 113 measured** | | **614 min 05 s** | **351 min 32 s** | **1.7×** | |
+| **All 114 measured** | | **622 min 20 s** | **355 min 01 s** | **1.8×** | |
