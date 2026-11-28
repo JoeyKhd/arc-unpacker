@@ -44,22 +44,39 @@ pub fn known(argv: &[String]) -> Option<PathBuf> {
 
 type Compress = unsafe extern "C" fn(*mut u8, usize, *const u8, usize, i32) -> usize;
 type IsError = unsafe extern "C" fn(usize) -> u32;
+type Bound = unsafe extern "C" fn(usize) -> usize;
 
 #[derive(Clone, Copy)]
 struct Zstd {
     compress: Compress,
     is_error: Option<IsError>,
+    bound: Option<Bound>,
 }
 
-/// Loads `dll` once (it stays loaded).
+/// Loads the library once per content (it stays loaded). The copy that is loaded lives outside
+/// the run's temp folder: a loaded DLL can't be deleted or overwritten, and the next install
+/// clears and refills that folder.
 fn load(dll: &Path) -> Result<Zstd> {
-    static LOADED: Mutex<Vec<(PathBuf, Zstd)>> = Mutex::new(Vec::new());
+    static LOADED: Mutex<Vec<(String, Zstd)>> = Mutex::new(Vec::new());
+    let hash = crate::extract::hex(&crate::tools::sha256_file(dll).with_context(|| format!("read {}", dll.display()))?);
     let mut loaded = LOADED.lock().unwrap();
-    if let Some((_, z)) = loaded.iter().find(|(p, _)| p == dll) {
+    if let Some((_, z)) = loaded.iter().find(|(h, _)| *h == hash) {
         return Ok(*z);
     }
-    let z = load_new(dll)?;
-    loaded.push((dll.to_path_buf(), z));
+    let dir = std::env::temp_dir().join("arc-unpack-libzstd").join(&hash[..16]);
+    let copy = dir.join("libzstd.dll");
+    if !crate::tools::sha256_file(&copy).is_ok_and(|h| crate::extract::hex(&h) == hash) {
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let part = dir.join(format!("libzstd.{}.part", std::process::id()));
+        std::fs::copy(dll, &part).with_context(|| format!("copy {}", dll.display()))?;
+        // (Another arc-unpack may have put it there first, and may have it loaded.)
+        if std::fs::rename(&part, &copy).is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+        ensure!(crate::tools::sha256_file(&copy).is_ok_and(|h| crate::extract::hex(&h) == hash), "{} is not a copy of {}", copy.display(), dll.display());
+    }
+    let z = load_new(&copy)?;
+    loaded.push((hash, z));
     Ok(z)
 }
 
@@ -74,9 +91,11 @@ fn load_new(dll: &Path) -> Result<Zstd> {
         ensure!(!m.is_null(), "can't load {}", dll.display());
         let compress = GetProcAddress(m, c"ZSTD_compress".as_ptr().cast()).ok_or_else(|| anyhow!("{} has no ZSTD_compress", dll.display()))?;
         let is_error = GetProcAddress(m, c"ZSTD_isError".as_ptr().cast());
+        let bound = GetProcAddress(m, c"ZSTD_compressBound".as_ptr().cast());
         Ok(Zstd {
             compress: std::mem::transmute::<unsafe extern "system" fn() -> isize, Compress>(compress),
             is_error: is_error.map(|f| std::mem::transmute::<unsafe extern "system" fn() -> isize, IsError>(f)),
+            bound: bound.map(|f| std::mem::transmute::<unsafe extern "system" fn() -> isize, Bound>(f)),
         })
     }
 }
@@ -87,19 +106,26 @@ fn load_new(dll: &Path) -> Result<Zstd> {
 }
 
 impl Zstd {
-    /// One record, as zstdrec compresses it: into a buffer the record's own size (the encoder
-    /// keeps only frames smaller than their data, so it always fits).
+    /// One record, as zstdrec compresses it. The buffer has zstd's worst-case room: with only
+    /// the record's size, a frame a few bytes smaller than its data fails (zstd's bit writer
+    /// keeps a margin), where zstdrec.exe's buffer, the largest record that worker has seen,
+    /// nearly always has room. When the call succeeds, the room doesn't change the bytes.
     fn record(&self, data: &[u8], level: i32) -> Result<Vec<u8>> {
-        let mut out = vec![0u8; data.len()];
+        let len = data.len();
+        // SAFETY: a pure function of its argument.
+        let bound = self.bound.map(|f| unsafe { f(len) }).filter(|&b| b >= len && b < len.saturating_mul(2).max(1 << 20));
+        let mut out = vec![0u8; bound.unwrap_or(len + len / 128 + 1024).max(len + 1024)];
         // SAFETY: both buffers are valid for the lengths given; ZSTD_compress is thread-safe.
-        let n = unsafe { (self.compress)(out.as_mut_ptr(), out.len(), data.as_ptr(), data.len(), level) };
+        let n = unsafe { (self.compress)(out.as_mut_ptr(), out.len(), data.as_ptr(), len, level) };
         let error = match self.is_error {
             // SAFETY: as above.
             Some(f) => unsafe { f(n) != 0 },
-            None => n > data.len(),
+            None => n > out.len(),
         };
-        ensure!(!error && n < data.len().max(1), "libzstd failed on a {}-byte record at level {level}", data.len());
+        // (The encoder keeps only frames smaller than their data.)
+        ensure!(!error && n < len.max(1), "libzstd failed on a {len}-byte record at level {level}");
         out.truncate(n);
+        out.shrink_to_fit();
         Ok(out)
     }
 }
@@ -129,6 +155,19 @@ struct Coord {
 }
 
 impl Coord {
+    /// Waits until `n` more bytes fit in the budget (or nothing else is held), and takes them.
+    fn reserve(&self, n: u64) -> Result<()> {
+        let mut s = self.s.lock().unwrap();
+        while s.pending > 0 && s.pending + n > BUDGET && s.failed.is_none() {
+            s = self.cv.wait(s).unwrap();
+        }
+        if let Some(f) = &s.failed {
+            bail!("{f}");
+        }
+        s.pending += n;
+        Ok(())
+    }
+
     fn fail(&self, msg: String) {
         let mut s = self.s.lock().unwrap();
         if s.failed.is_none() {
@@ -207,9 +246,17 @@ fn read_groups(mut input: Stream, coord: &Coord) -> Result<()> {
         if count == 0 {
             let n = i32_at(&mut input)?;
             ensure!(n >= 0, "a negative raw length in the zstdrec stream");
-            let data = read_n(&mut input, n as usize)?;
-            coord.s.lock().unwrap().items.push_back(Item::Bytes(data));
-            coord.cv.notify_all();
+            // In pieces, each within the budget: everything before it is already passed on or
+            // ready to be, so the wait always ends.
+            let mut left = n as usize;
+            while left > 0 {
+                let k = left.min(8 << 20);
+                coord.reserve(k as u64)?;
+                let data = read_n(&mut input, k)?;
+                coord.s.lock().unwrap().items.push_back(Item::Bytes(data));
+                coord.cv.notify_all();
+                left -= k;
+            }
             continue;
         }
         ensure!(count <= 1 << 20, "implausible zstdrec record count {count}");
@@ -224,16 +271,7 @@ fn read_groups(mut input: Stream, coord: &Coord) -> Result<()> {
         let sum: u64 = recs.iter().map(|r| r.1).sum();
         ensure!(total >= 0 && total as u64 == sum, "zstdrec group of {sum} bytes says {total}");
         // A new group only within the budget (or when nothing else is in flight).
-        {
-            let mut s = coord.s.lock().unwrap();
-            while s.pending > 0 && s.pending + sum > BUDGET && s.failed.is_none() {
-                s = coord.cv.wait(s).unwrap();
-            }
-            if let Some(f) = &s.failed {
-                bail!("{f}");
-            }
-            s.pending += sum;
-        }
+        coord.reserve(sum)?;
         let first = id;
         for &(level, size) in &recs {
             let data = read_n(&mut input, size as usize)?;
@@ -241,17 +279,22 @@ fn read_groups(mut input: Stream, coord: &Coord) -> Result<()> {
             coord.cv.notify_all();
             id += 1;
         }
-        let mut items = Vec::with_capacity(2 * recs.len() + 1);
+        // (A group's gaps join the budget without waiting: its records can't be passed on
+        // before them. They cover one 32 MB window of the original data.)
+        let (mut items, mut gaps) = (Vec::with_capacity(2 * recs.len() + 1), 0u64);
         for (i, &(_, size)) in recs.iter().enumerate() {
             let n = i32_at(&mut input)?;
             ensure!(n >= 0, "a negative gap length in the zstdrec stream");
             items.push(Item::Bytes(read_n(&mut input, n as usize)?));
             items.push(Item::Record(first + i as u64, size));
+            gaps += n as u64;
         }
         let n = i32_at(&mut input)?;
         ensure!(n >= 0, "a negative gap length in the zstdrec stream");
         items.push(Item::Bytes(read_n(&mut input, n as usize)?));
+        gaps += n as u64;
         let mut s = coord.s.lock().unwrap();
+        s.pending += gaps;
         s.items.extend(items);
         coord.cv.notify_all();
     }
@@ -317,6 +360,7 @@ impl Read for Output {
                 match s.items.front() {
                     Some(Item::Bytes(_)) => {
                         let Some(Item::Bytes(b)) = s.items.pop_front() else { unreachable!() };
+                        self.release = b.len() as u64;
                         self.cur = b;
                         break;
                     }
