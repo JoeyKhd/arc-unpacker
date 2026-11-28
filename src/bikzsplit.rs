@@ -246,8 +246,9 @@ fn read_coded(input: &mut Stream, blk: &mut Vec<u8>) -> io::Result<std::result::
     let mut rc = Rc::new(&side);
     let mut probs = [[0x8000u16; MODEL]; NMODELS];
     let mut ctx = [0u8; NMODELS];
+    // (The 44-byte Bink header is range-coded in it, so it can be shorter: Far Cry 3 has 41.)
     let h = value(&mut rc, &mut probs[21], &mut ctx[21]);
-    if !(44..1 << 26).contains(&h) {
+    if !(1..1 << 26).contains(&h) {
         return Ok(Err(format!("a coded block's header size is {h}")));
     }
     let at = blk.len();
@@ -819,7 +820,8 @@ mod tests {
         head[..4].copy_from_slice(if kb2 { b"KB2g" } else { b"BIKi" });
         head[8..12].copy_from_slice(&frames.to_le_bytes());
         for (i, b) in head.iter_mut().enumerate().skip(12) {
-            *b = (i as u8).wrapping_mul(37) ^ fill;
+            // (fill 0: a header that codes to fewer than its 44 bytes, as real ones can.)
+            *b = if fill == 0 { 0 } else { (i as u8).wrapping_mul(37) ^ fill };
         }
         let mut e = Enc::new();
         let mut p = [0x8000u16; 0x44];
@@ -836,8 +838,8 @@ mod tests {
                 ctx = (2 * ctx + bit as usize) & 3;
             }
         }
-        let mut blob = e.finish();
-        blob.resize(blob.len().max(60), 0xAA);
+        let blob = e.finish();
+        assert!(fill != 0 || blob.len() < 44, "a short header blob");
         assert_eq!(bink_header(&blob).unwrap(), head);
         let mut e = Enc::new();
         let mut probs = [[0x8000u16; MODEL]; NMODELS];
@@ -982,15 +984,17 @@ mod tests {
             (false, 1, vec![vec![5, 0, 7, 1, 1, 9], vec![6, 0, 7, 2, -1]]),
             (true, 0, vec![vec![4, 4]]),
         ] {
-            let blk = coded(kb2, frames, &chunks, 0x5A);
-            let mut input: Stream = Box::new(io::Cursor::new([blk.clone(), vec![3, 9, 9]].concat()));
-            let mut got = Vec::new();
-            read_exact_into(&mut input, &mut got, 5).unwrap();
-            read_coded(&mut input, &mut got).unwrap().unwrap();
-            assert_eq!(got, blk);
-            let mut after = Vec::new();
-            input.read_to_end(&mut after).unwrap();
-            assert_eq!(after, [3, 9, 9]);
+            for fill in [0x5A, 0] {
+                let blk = coded(kb2, frames, &chunks, fill);
+                let mut input: Stream = Box::new(io::Cursor::new([blk.clone(), vec![3, 9, 9]].concat()));
+                let mut got = Vec::new();
+                read_exact_into(&mut input, &mut got, 5).unwrap();
+                read_coded(&mut input, &mut got).unwrap().unwrap();
+                assert_eq!(got, blk);
+                let mut after = Vec::new();
+                input.read_to_end(&mut after).unwrap();
+                assert_eq!(after, [3, 9, 9]);
+            }
         }
     }
 
