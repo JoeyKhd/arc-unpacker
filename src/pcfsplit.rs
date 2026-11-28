@@ -155,6 +155,10 @@ struct Head {
     out: u64,
     /// A raw record (`data` bytes copied to the output as they are).
     raw: bool,
+    /// precomp's own work files while it restores the record: a recursion record copies its
+    /// nested stream to a temp file and restores that into another (precomp-cpp's
+    /// recursion_decompress), next to the part's own files.
+    work: u64,
 }
 
 enum Stop {
@@ -224,7 +228,7 @@ fn parse(f: &mut Fields) -> std::result::Result<Head, Stop> {
             // precomp stops reading here.
             return Err(Stop::Refuse("an end marker".into()));
         }
-        return Ok(Head { data: n, out: n, raw: true });
+        return Ok(Head { data: n, out: n, raw: true, work: 0 });
     }
     let t = f.u(1)? as u8;
     let penalty = h1 & 2 != 0;
@@ -239,7 +243,14 @@ fn parse(f: &mut Fields) -> std::result::Result<Head, Stop> {
     // (original length, stored length)
     let lens = |f: &mut Fields| -> std::result::Result<(u64, u64), Stop> { Ok((f.len32()?, f.len32()?)) };
     let nested = |f: &mut Fields, stored: u64| -> std::result::Result<u64, Stop> { if recursion { f.u(8) } else { Ok(stored) } };
-    let head = |data: u64, out: u64| -> std::result::Result<Head, Stop> { Ok(Head { data, out, raw: false }) };
+    let head = |data: u64, out: u64| -> std::result::Result<Head, Stop> { Ok(Head { data, out, raw: false, work: 0 }) };
+    // A recursion record: its nested stream (`data`) and that restored (`size`) in temp files.
+    let deep = |h: std::result::Result<Head, Stop>, size: u64| h.map(|mut h| {
+        if recursion {
+            h.work = h.data + size;
+        }
+        h
+    });
     match t {
         // PDF (FlateDecode), possibly an image restored with a BMP header.
         0 => {
@@ -272,7 +283,7 @@ fn parse(f: &mut Fields) -> std::result::Result<Head, Stop> {
             pen(f)?;
             let (rec, dec) = lens(f)?;
             let data = nested(f, dec)?;
-            head(data, if t == 1 { 4 } else { 2 } + hl + rec)
+            deep(head(data, if t == 1 { 4 } else { 2 } + hl + rec), dec)
         }
         // PNG
         3 => {
@@ -329,7 +340,7 @@ fn parse(f: &mut Fields) -> std::result::Result<Head, Stop> {
             pen(f)?;
             let (rec, dec) = lens(f)?;
             let data = nested(f, dec)?;
-            head(data, 10 + rec)
+            deep(head(data, 10 + rec), dec)
         }
         // Base64 (no penalty bytes): the first length is what is stored, the second the encoding.
         8 => {
@@ -343,7 +354,7 @@ fn parse(f: &mut Fields) -> std::result::Result<Head, Stop> {
             })?;
             let (stored, encoded) = lens(f)?;
             let data = nested(f, stored)?;
-            head(data, hl + encoded)
+            deep(head(data, hl + encoded), stored)
         }
         // bZip2, brute force zLib, raw zLib
         9 | 254 | 255 => {
@@ -351,7 +362,7 @@ fn parse(f: &mut Fields) -> std::result::Result<Head, Stop> {
             pen(f)?;
             let (rec, dec) = lens(f)?;
             let data = nested(f, dec)?;
-            head(data, if t == 255 { 2 } else { 0 } + rec)
+            deep(head(data, if t == 255 { 2 } else { 0 } + rec), dec)
         }
         _ => Err(Stop::Refuse(format!("record type {t}"))),
     }
@@ -457,15 +468,16 @@ impl Coord {
         s.failed.is_none()
     }
 
-    /// A new part folder, unless the block has stopped (then nothing is created any more).
-    fn new_dir(&self, root: &Path, k: u64) -> Result<PathBuf> {
+    /// A new part folder, or None once the block has stopped (then nothing is created any more,
+    /// and the reader just ends).
+    fn new_dir(&self, root: &Path, k: u64) -> Result<Option<PathBuf>> {
         let s = self.s.lock().unwrap();
-        if let Some(f) = &s.failed {
-            return Err(anyhow!("{f}"));
+        if s.failed.is_some() {
+            return Ok(None);
         }
         let dir = root.join(k.to_string());
         std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
-        Ok(dir)
+        Ok(Some(dir))
     }
 }
 
@@ -547,13 +559,14 @@ pub fn run(
 
 fn read_parts(header: Vec<u8>, mut input: Stream, sizes: Sizes, root: &Path, coord: &Coord, limits: (usize, u64), label: &str) -> Result<()> {
     let mut k = 0u64;
-    // The part being written: (folder, file, PCF bytes, output bytes).
-    let mut cur: Option<(PathBuf, BufWriter<std::fs::File>, u64, u64)> = None;
-    let finish = |cur: &mut Option<(PathBuf, BufWriter<std::fs::File>, u64, u64)>, k: &mut u64| -> Result<()> {
-        if let Some((dir, mut w, len, out)) = cur.take() {
+    // The part being written: (folder, file, PCF bytes, output bytes, precomp's work files).
+    type Cur = Option<(PathBuf, BufWriter<std::fs::File>, u64, u64, u64)>;
+    let mut cur: Cur = None;
+    let finish = |cur: &mut Cur, k: &mut u64| -> Result<()> {
+        if let Some((dir, mut w, len, out, work)) = cur.take() {
             w.flush()?;
             drop(w);
-            coord.add(*k, Part { dir, kind: Kind::Pcf, out, disk: len + out, state: State::Waiting });
+            coord.add(*k, Part { dir, kind: Kind::Pcf, out, disk: len + out + work, state: State::Waiting });
             *k += 1;
         }
         Ok(())
@@ -573,7 +586,7 @@ fn read_parts(header: Vec<u8>, mut input: Stream, sizes: Sizes, root: &Path, coo
                         return Ok(());
                     }
                     let n = left.min(sizes.part.max(1));
-                    let dir = coord.new_dir(root, k)?;
+                    let Some(dir) = coord.new_dir(root, k)? else { return Ok(()) };
                     let mut w = BufWriter::with_capacity(1 << 20, std::fs::File::create(dir.join("raw.bin"))?);
                     copy_n(&mut input, &mut w, n)?;
                     w.flush()?;
@@ -586,16 +599,18 @@ fn read_parts(header: Vec<u8>, mut input: Stream, sizes: Sizes, root: &Path, coo
             Ok(h) => {
                 let bytes = std::mem::take(&mut f.bytes);
                 if cur.is_none() {
-                    let dir = coord.new_dir(root, k)?;
+                    let Some(dir) = coord.new_dir(root, k)? else { return Ok(()) };
                     let mut w = BufWriter::with_capacity(1 << 20, std::fs::File::create(dir.join("part.pcf"))?);
                     w.write_all(&header)?;
-                    cur = Some((dir, w, header.len() as u64, 0));
+                    cur = Some((dir, w, header.len() as u64, 0, 0));
                 }
-                let (_, w, len, out) = cur.as_mut().unwrap();
+                let (_, w, len, out, work) = cur.as_mut().unwrap();
                 w.write_all(&bytes)?;
                 copy_n(&mut input, w, h.data)?;
                 *len += bytes.len() as u64 + h.data;
                 *out += h.out;
+                // (One record's work files at a time: each goes before the next.)
+                *work = (*work).max(h.work);
                 if *len >= sizes.part {
                     finish(&mut cur, &mut k)?;
                 }

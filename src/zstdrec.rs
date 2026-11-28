@@ -153,13 +153,29 @@ struct Shared {
 struct Coord {
     s: Mutex<Shared>,
     cv: Condvar,
+    /// How far ahead the reader may get (`budget`).
+    budget: u64,
+}
+
+/// The read-ahead budget: 1 GiB, at most a quarter of the free RAM and an eighth of a RAM
+/// limit, never below one group (256 MB; a group still starts alone when nothing is held).
+fn budget() -> u64 {
+    let (free, _) = crate::guard::memory();
+    let mut b = BUDGET;
+    if free > 0 {
+        b = b.min(free / 4);
+    }
+    if let Some(limit) = crate::memlimit::get() {
+        b = b.min(limit / 8);
+    }
+    b.max(256 << 20)
 }
 
 impl Coord {
     /// Waits until `n` more bytes fit in the budget (or nothing else is held), and takes them.
     fn reserve(&self, n: u64) -> Result<()> {
         let mut s = self.s.lock().unwrap();
-        while s.pending > 0 && s.pending + n > BUDGET && s.failed.is_none() {
+        while s.pending > 0 && s.pending + n > self.budget && s.failed.is_none() {
             s = self.cv.wait(s).unwrap();
         }
         if let Some(f) = &s.failed {
@@ -206,7 +222,7 @@ pub fn run(
     report: impl Fn(f64, f64) + Send + Sync + 'static,
 ) -> Stream {
     let z = lib.0;
-    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new() });
+    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new(), budget: budget() });
     {
         let coord = coord.clone();
         run_thread(
