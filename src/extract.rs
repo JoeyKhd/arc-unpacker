@@ -272,7 +272,16 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                         compressed: job.compsize(),
                         output: job.origsize(),
                     });
-                    let proxies = ProxyUse::begin(proxy_use(&job, cfg), &opts.cancel);
+                    let mut proxies = ProxyUse::begin(proxy_use(&job, cfg), &opts.cancel);
+                    // Free RAM may have dropped while it waited: srep may swap after all.
+                    while !opts.cancel.load(Ordering::Relaxed) {
+                        let want = proxy_use(&job, cfg);
+                        if want.iter().all(|w| proxies.names.contains(w)) {
+                            break;
+                        }
+                        drop(proxies);
+                        proxies = ProxyUse::begin(want, &opts.cancel);
+                    }
                     if let Some((secs, names)) = &proxies.waited {
                         events::info(sink, format!("{label}: waited {secs:.1} s for {}, which another job was using", names.join(", ")));
                     }

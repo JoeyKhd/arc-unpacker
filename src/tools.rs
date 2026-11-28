@@ -709,12 +709,20 @@ pub fn balanced_cuts(ends: &[u64], len: u64, k: usize) -> Vec<u64> {
 pub fn fgpack_parallel(input: &Path, output: &Path, original: &Path, cpus: usize) -> Result<String> {
     let (ends, len) = fgpack_segment_ends(input)?;
     // The tool keeps 32-bit file offsets: past 2 GB it is the original's business.
-    ensure!(len < (2u64 << 30) - (64 << 20), "input of {len} bytes: near the tool's 2 GB limit");
-    ensure!(ends.len() >= 2, "{} segment(s): nothing to split", ends.len());
+    if len >= (2u64 << 30) - (64 << 20) {
+        return Err(LeftToOriginal(format!("input of {len} bytes: near the tool's 2 GB limit")).into());
+    }
+    if ends.len() < 2 {
+        return Err(LeftToOriginal(format!("{} segment(s): nothing to split", ends.len())).into());
+    }
     let cuts = balanced_cuts(&ends, len, ends.len().min(cpus.max(1)));
-    ensure!(cuts.len() >= 2, "one piece only");
-    if let Some(free) = crate::guard::free_space(input.parent().unwrap_or(Path::new("."))) {
-        ensure!(free > 2 * len + (1 << 30), "not enough free space for the pieces");
+    if cuts.len() < 2 {
+        return Err(LeftToOriginal("one piece only".into()).into());
+    }
+    if let Some(free) = crate::guard::free_space(input.parent().unwrap_or(Path::new(".")))
+        && free <= 2 * len + (1 << 30)
+    {
+        return Err(LeftToOriginal("not enough free space for the pieces".into()).into());
     }
     let piece = |p: &Path, i: usize| p.with_file_name(format!("{}.arc-unpack-piece{i}", p.file_name().unwrap_or_default().to_string_lossy()));
     let pieces: Vec<(PathBuf, PathBuf)> = (0..cuts.len()).map(|i| (piece(input, i), piece(output, i))).collect();
@@ -965,6 +973,7 @@ pub fn run_list_programs(list: &str) -> Vec<String> {
         for t in list_tokens(line, false).unwrap_or_default() {
             if let Tok::Word(w) = t
                 && w.to_ascii_lowercase().ends_with(".exe")
+                && !w.eq_ignore_ascii_case("cmd.exe")
                 && !out.iter().any(|o| o.eq_ignore_ascii_case(&w))
             {
                 out.push(w);
@@ -995,15 +1004,25 @@ fn run_line_files(line: &str, modes: ModeWords) -> Option<Vec<String>> {
     if line.contains(['%', '*', '?']) {
         return None;
     }
-    let (mut out, mut mode_words, mut at_command, mut echo) = (Vec::new(), 0usize, true, false);
+    let (mut out, mut mode_words, mut at_command, mut echo, mut target) = (Vec::new(), 0usize, true, false, false);
     for t in list_tokens(line, true)? {
         let w = match t {
             Tok::And => {
-                (at_command, mode_words, echo) = (true, 0, false);
+                (at_command, mode_words, echo, target) = (true, 0, false, false);
                 continue;
             }
             Tok::Word(w) => w,
         };
+        // The word after an operator standing alone (`> log.txt`, `2> err.txt`) is its file.
+        if target && !at_command {
+            target = false;
+            if !w.contains(['>', '<']) {
+                if !w.eq_ignore_ascii_case("nul") {
+                    out.push(w);
+                }
+                continue;
+            }
+        }
         let lw = w.to_ascii_lowercase();
         if at_command {
             // (`cmd /c`: the command comes after it.)
@@ -1022,6 +1041,7 @@ fn run_line_files(line: &str, modes: ModeWords) -> Option<Vec<String>> {
             return None;
         }
         if lw.contains(['>', '<']) {
+            target = lw.ends_with(['>', '<']);
             let parts: Vec<&str> = w.split(['>', '<']).collect();
             for part in parts {
                 let part = part.trim_start_matches('&');
@@ -1057,14 +1077,26 @@ fn run_line_files(line: &str, modes: ModeWords) -> Option<Vec<String>> {
 /// the programs themselves must touch only those files: see `run_list_programs`). Two lines
 /// share a file when they name the same file name, or the same path, or one names a folder the
 /// other names something in.
-pub fn run_list_lines_independent(list: &str, modes: ModeWords) -> bool {
+pub fn run_list_lines_independent(list: &str, cwd: &Path, modes: ModeWords) -> bool {
     use std::collections::HashSet;
     let (mut names, mut paths, mut folders) = (HashSet::new(), HashSet::new(), HashSet::new());
+    // Every path as run.exe's lines see it (relative to `cwd`, `.` and `..` resolved).
     let norm = |w: &str| {
-        let p = w.to_ascii_lowercase().replace('/', "\\");
-        let p = p.trim_end_matches('\\');
-        p.strip_prefix(".\\").unwrap_or(p).to_string()
+        let p = std::path::absolute(cwd.join(w.replace('/', "\\"))).unwrap_or_else(|_| cwd.join(w));
+        p.to_string_lossy().to_ascii_lowercase().trim_end_matches('\\').to_string()
     };
+    // The programs count as files of every line: a line that deletes or replaces one (or its
+    // folder) collides with the lines running it.
+    for prog in run_list_programs(list) {
+        let p = norm(&prog);
+        let mut up = p.as_str();
+        while let Some((parent, _)) = up.rsplit_once('\\') {
+            folders.insert(parent.to_string());
+            up = parent;
+        }
+        names.insert(p.rsplit('\\').next().unwrap_or("").to_string());
+        paths.insert(p);
+    }
     for line in run_list_lines(list) {
         let Some(files) = run_line_files(line, modes) else { return false };
         let mine: Vec<String> = files.iter().map(|w| norm(w)).collect();
@@ -1329,39 +1361,48 @@ mod tests {
 
     #[test]
     fn run_lists_with_independent_lines() {
+        let here = Path::new(r"C:\run\cwd");
         // Farming Simulator 22's fitgirl01.txt (after fart): each line has its own NNNN.* files.
         let t = r"C:\run\tmp";
         let line = |n: &str| format!("cmd /c \"\"{t}\\work\\fgpack.exe\" {n}.fgu {n}.fgr_&&del {n}.fgu&&\"{t}\\work\\x.exe\" -f -d -s {n}.fgr_ {n}.shapes.x {n}.shapes&&del {n}.fgr_ {n}.shapes.x\"\r\n");
         let fs22: String = ["0001", "0002", "0003"].iter().map(|n| line(n)).collect();
         let none = |_: &str| 0;
-        assert!(run_list_lines_independent(&fs22, &none));
+        assert!(run_list_lines_independent(&fs22, here, &none));
         assert_eq!(run_list_programs(&fs22), vec![format!("{t}\\work\\fgpack.exe"), format!("{t}\\work\\x.exe")]);
         // A line that works on another line's output must keep the list's own order and count.
         let chained = format!("{}cmd /c copy /b 0001.shapes+0002.shapes all.shapes\r\n", fs22);
-        assert!(!run_list_lines_independent(&chained, &none));
+        assert!(!run_list_lines_independent(&chained, here, &none));
         // Redirection targets are files (Batman: Arkham Asylum's `echo 123>N.test`); nul isn't.
-        assert!(run_list_lines_independent("cmd /c \"echo 123>1.test\"\r\ncmd /c \"echo 123>2.test\"\r\n", &none));
-        assert!(!run_list_lines_independent("cmd /c \"echo 1>a.log\"\r\ncmd /c \"echo 2>>a.log\"\r\n", &none));
+        assert!(run_list_lines_independent("cmd /c \"echo 123>1.test\"\r\ncmd /c \"echo 123>2.test\"\r\n", here, &none));
+        assert!(!run_list_lines_independent("cmd /c \"echo 1>a.log\"\r\ncmd /c \"echo 2>>a.log\"\r\n", here, &none));
         let cricket = "cmd /c \"\"w\\fgpack.exe\" e 04.fgpack 04.fgpack_ >nul 2>&1&&del 04.fgpack\"\r\ncmd /c \"\"w\\fgpack.exe\" e 21.fgpack 21.fgpack_ >nul 2>&1&&del 21.fgpack\"\r\n";
         // ("e" is fgpack's mode word: as a file name, every line would share it.)
         let fgpack = |w: &str| usize::from(w.to_ascii_lowercase().ends_with("fgpack.exe"));
-        assert!(run_list_lines_independent(cricket, &fgpack));
-        assert!(!run_list_lines_independent(cricket, &none));
+        assert!(run_list_lines_independent(cricket, here, &fgpack));
+        assert!(!run_list_lines_independent(cricket, here, &none));
         // run.exe expands variables: what such a line touches isn't known here.
-        assert!(!run_list_lines_independent("tool.exe %TEMP%\\a b\r\n", &none));
+        assert!(!run_list_lines_independent("tool.exe %TEMP%\\a b\r\n", here, &none));
         // Nor folder commands, wildcards, a single & or a glued program.
         let x = |rest: &str| format!("cmd /c \"\"w\\x.exe\" -f -d -s {rest}\"\r\n");
-        assert!(!run_list_lines_independent(&format!("cmd /c \"md out\"\r\n{}", x("1.bin 1.x out\\1.bin")), &none));
-        assert!(!run_list_lines_independent(&x("*.bin 1.x 1.out"), &none));
-        assert!(!run_list_lines_independent(&format!("{}cmd /c \"del a.bin&del b.bin\"\r\n", x("1.bin 1.x 1.out")), &none));
-        assert!(!run_list_lines_independent("cmd /c \"w\\tool.exe>nul a b\"\r\n", &none));
+        assert!(!run_list_lines_independent(&format!("cmd /c \"md out\"\r\n{}", x("1.bin 1.x out\\1.bin")), here, &none));
+        assert!(!run_list_lines_independent(&x("*.bin 1.x 1.out"), here, &none));
+        assert!(!run_list_lines_independent(&format!("{}cmd /c \"del a.bin&del b.bin\"\r\n", x("1.bin 1.x 1.out")), here, &none));
+        assert!(!run_list_lines_independent("cmd /c \"w\\tool.exe>nul a b\"\r\n", here, &none));
         // A folder one line names and a file in it another line names.
-        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x out\\1.bin"), x("2.bin 2.x out")), &none));
-        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x base.dat>nul"), x("base.dat 2.x 2.out")), &none));
+        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x out\\1.bin"), x("2.bin 2.x out")), here, &none));
+        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x base.dat>nul"), x("base.dat 2.x 2.out")), here, &none));
         // A quoted path with a blank is one word (a user name with a space).
         let spaced = "cmd /c \"\"C:\\Users\\John Smith\\tmp\\work\\x.exe\" -f -d -s 1.fgr 1.x 1.out&&del 1.fgr\"\r\ncmd /c \"\"C:\\Users\\John Smith\\tmp\\work\\x.exe\" -f -d -s 2.fgr 2.x 2.out&&del 2.fgr\"\r\n";
-        assert!(run_list_lines_independent(spaced, &none));
+        assert!(run_list_lines_independent(spaced, here, &none));
         assert_eq!(run_list_programs(spaced), vec!["C:\\Users\\John Smith\\tmp\\work\\x.exe".to_string()]);
+        // A redirection target after a blank, a folder written another way, a program a line
+        // deletes, and cmd.exe written out.
+        assert!(!run_list_lines_independent(&format!("{}cmd /c \"echo 1 >> C:\\run\\cwd\\1.out\"\r\n", x("1.bin 1.x 1.out")), here, &none));
+        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x C:\\run\\cwd\\out"), x("2.bin 2.x out\\2.bin")), here, &none));
+        assert!(!run_list_lines_independent(&format!("{}cmd /c \"del w\\x.exe\"\r\n", x("1.bin 1.x 1.out")), here, &none));
+        let cmd_exe = "CMD.EXE /c \"\"w\\x.exe\" -f 1.a 1.b\"\r\ncmd.exe /C \"\"w\\x.exe\" -f 2.a 2.b\"\r\n";
+        assert_eq!(run_list_programs(cmd_exe), vec!["w\\x.exe".to_string()]);
+        assert!(run_list_lines_independent(cmd_exe, here, &none));
     }
 
     #[test]
@@ -1373,7 +1414,7 @@ mod tests {
         let line = |n: &str| format!("cmd /c \"\"w\\fgpack2.exe\" e -d19 {n}.fgu {n}.fgr&&del {n}.fgu\"");
         let list = format!("{}\r\n# note\r\n{}\r\n{}", line("001"), line("002"), line("003"));
         let lzma = |_: &str| 1;
-        assert!(run_list_lines_independent(&list, &lzma));
+        assert!(run_list_lines_independent(&list, dir.path(), &lzma));
         let sorted = run_list_largest_first(list.as_bytes(), dir.path(), &lzma).unwrap();
         assert_eq!(String::from_utf8(sorted).unwrap(), format!("{}\r\n{}\r\n{}\r\n# note\r\n", line("002"), line("003"), line("001")));
         // Already in order: nothing to do.

@@ -247,7 +247,7 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
             mode_words.insert(p.to_ascii_lowercase(), tools::named_files_tool(&path, Some(map))?);
         }
         let modes = |w: &str| mode_words.get(&w.to_ascii_lowercase()).copied().unwrap_or(0);
-        if programs.is_empty() || !tools::run_list_lines_independent(&text, &modes) {
+        if programs.is_empty() || !tools::run_list_lines_independent(&text, &cwd, &modes) {
             return None;
         }
         let widen = n > 1 && (n as usize) < cpus;
