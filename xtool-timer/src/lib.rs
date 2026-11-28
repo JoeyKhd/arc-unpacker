@@ -181,14 +181,15 @@ fn dedup_percent(line: &[u16]) -> Option<u64> {
 }
 
 /// The free memory to report: unchanged, unless xtool's budget from these figures,
-/// C = min(pct% x total - used, free - 1 GiB), would land between 0 and 2 GiB; then at most
-/// 1 GiB, which makes it 0.
+/// C = min(pct% x total - used, free - 1 GiB), would land below 2 GiB; then at most 1 GiB,
+/// which makes it 0.
 fn avoid_small_budget(total: u64, avail: u64, pct: u64) -> u64 {
     const GIB: u64 = 1 << 30;
     let share = (total / 100).saturating_mul(pct.min(100));
     let used = total.saturating_sub(avail);
     let budget = share.saturating_sub(used).min(avail.saturating_sub(GIB));
-    if budget > 0 && budget < 2 * GIB { avail.min(GIB) } else { avail }
+    // (Also at 0: xtool rounds its share differently, so a plugin 0 can be a few bytes for it.)
+    if budget < 2 * GIB { avail.min(GIB) } else { avail }
 }
 
 #[cfg(test)]
@@ -214,8 +215,9 @@ mod tests {
         assert_eq!(avoid_small_budget(32 * GIB, 30 * GIB, 75), 30 * GIB);
         // 23 GB used: a 1 GB budget, which can fill and grow: report 1 GiB free (budget 0).
         assert_eq!(avoid_small_budget(32 * GIB, 9 * GIB, 75), GIB);
-        // More used than the share: the budget is 0 already.
-        assert_eq!(avoid_small_budget(32 * GIB, 6 * GIB, 75), 6 * GIB);
+        // More used than the share: the budget is 0, which xtool may round to a few bytes:
+        // reporting 1 GiB free keeps its store at 0.
+        assert_eq!(avoid_small_budget(32 * GIB, 6 * GIB, 75), GIB);
         // 16 GB PC, -dm50p, 7 GB used: an 8 GB share leaves a 1 GB budget: small too.
         assert_eq!(avoid_small_budget(16 * GIB, 9 * GIB, 50), GIB);
     }
