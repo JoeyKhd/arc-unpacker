@@ -41,8 +41,9 @@ const END: u8 = 3;
 /// Probabilities per size model, and models: 21 decoder-thread slots and the header size.
 const MODEL: usize = 69;
 const NMODELS: usize = 22;
-/// A coded block bigger than this isn't held in memory: the rest goes to one cls-zstd.
-const BLOCK_MAX: u64 = 256 << 20;
+/// A coded block bigger than this isn't held in memory (nor one bigger than the memory budget,
+/// `budget()`): the rest goes to one cls-zstd. Dark Souls Remastered's first video is 295 MB.
+const BLOCK_MAX: u64 = 1 << 30;
 /// Input bytes of whole coded blocks given to one process. The first groups are smaller, so a
 /// short stream starts at once.
 const GROUP: usize = 32 << 20;
@@ -226,9 +227,9 @@ fn cut_short() -> io::Error {
 }
 
 /// Reads the rest of a coded block whose first 5 bytes (type byte, `A R J 01`) are in `blk`,
-/// appending it to `blk`. Err(reason) for anything that doesn't add up (`blk` then holds every
-/// byte read).
-fn read_coded(input: &mut Stream, blk: &mut Vec<u8>) -> io::Result<std::result::Result<(), String>> {
+/// appending it to `blk`. Err(reason) for anything that doesn't add up, or a block of more than
+/// `max` bytes (`blk` then holds every byte read).
+fn read_coded(input: &mut Stream, blk: &mut Vec<u8>, max: u64) -> io::Result<std::result::Result<(), String>> {
     let cut = || Err(cut_short());
     if !read_exact_into(input, blk, 1)? {
         return cut();
@@ -281,7 +282,7 @@ fn read_coded(input: &mut Stream, blk: &mut Vec<u8>) -> io::Result<std::result::
             return Ok(Err("a coded block's sizes run past its side information".into()));
         }
     }
-    if blk.len() as u64 + total > BLOCK_MAX {
+    if blk.len() as u64 + total > max {
         return Ok(Err(format!("a coded block of {} MB is more than this holds", (blk.len() as u64 + total) >> 20)));
     }
     blk.reserve(total as usize);
@@ -402,7 +403,7 @@ pub fn run(
     let budget = budget();
     let dispatcher = move || -> Result<()> {
         let r = match probe(input) {
-            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, &spawn, &coord2, &abort2, &label2),
+            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, budget.min(BLOCK_MAX), &spawn, &coord2, &abort2, &label2),
             Ok(Plan::Single { reason, replay }) => {
                 eprintln!("note: {label2}: not split ({reason}); one cls-zstd decodes it");
                 let mut s = coord2.s.lock().unwrap();
@@ -423,10 +424,12 @@ pub fn run(
     Ok(Box::new(Output { coord, single, cur: None }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     mut input: Stream,
     max_workers: usize,
     budget: u64,
+    block_max: u64,
     spawn: &dyn Fn(u64) -> Result<Worker>,
     coord: &Arc<Coord>,
     abort: &Arc<dyn Fn() + Send + Sync>,
@@ -560,7 +563,7 @@ fn dispatch(
             END => break None,
             2 => {
                 let mut blk = std::mem::take(&mut head);
-                if let Err(e) = read_coded(&mut input, &mut blk)? {
+                if let Err(e) = read_coded(&mut input, &mut blk, block_max)? {
                     break Some((e, blk));
                 }
                 match next_head(&mut input, &mut head)? {
@@ -702,7 +705,7 @@ pub fn walk(mut input: Stream) -> Result<(u64, u64)> {
             END => return Ok((coded, stored)),
             2 => {
                 let mut blk = std::mem::take(&mut head);
-                read_coded(&mut input, &mut blk)?.map_err(|e| anyhow!("video {coded}: {e}"))?;
+                read_coded(&mut input, &mut blk, BLOCK_MAX)?.map_err(|e| anyhow!("video {coded}: {e}"))?;
                 coded += 1;
             }
             t => {
@@ -899,7 +902,7 @@ mod tests {
                 END => return out,
                 2 => {
                     let mut blk = std::mem::take(&mut head);
-                    match read_coded(&mut input, &mut blk).unwrap() {
+                    match read_coded(&mut input, &mut blk, BLOCK_MAX).unwrap() {
                         Ok(()) => out.extend(blk.iter().rev()),
                         Err(_) => {
                             out.push(b'?');
@@ -989,7 +992,7 @@ mod tests {
                 let mut input: Stream = Box::new(io::Cursor::new([blk.clone(), vec![3, 9, 9]].concat()));
                 let mut got = Vec::new();
                 read_exact_into(&mut input, &mut got, 5).unwrap();
-                read_coded(&mut input, &mut got).unwrap().unwrap();
+                read_coded(&mut input, &mut got, BLOCK_MAX).unwrap().unwrap();
                 assert_eq!(got, blk);
                 let mut after = Vec::new();
                 input.read_to_end(&mut after).unwrap();
