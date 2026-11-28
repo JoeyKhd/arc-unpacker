@@ -1410,11 +1410,28 @@ impl ScriptRunner<'_> {
                 self.prefetch[i].missing = missing;
                 continue;
             }
+            let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // unarc.dll can't write a path of 260 characters or more (as with the repack's own
+            // installer), and the staging folder is longer than the game folder: an archive that
+            // would pass that there is extracted when the script gets to it.
+            if let Ok(a) = Archive::open(&archive)
+                && extract::goes_to_unarc(&a, &cfg)
+            {
+                let base = std::path::absolute(&stage).unwrap_or_else(|_| stage.clone()).to_string_lossy().chars().count() + 1;
+                let longest = a.entries.iter().map(|e| e.path.chars().count()).max().unwrap_or(0);
+                if base + longest > 259 {
+                    events::info(
+                        self.sink,
+                        format!("{name}: not extracted early: its longest path would be {} characters in the staging folder, and unarc.dll stops at 259", base + longest),
+                    );
+                    self.prefetch[i].used = true;
+                    continue;
+                }
+            }
             let mut eopts = self.options(stage.clone(), whole.then_some(out.as_path()), self.prefetch[i].cancel.clone());
             let started = Arc::new(AtomicBool::new(false));
             eopts.first_job_started = Some(started.clone());
             let sink = self.sink.clone();
-            let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             events::info(self.sink, format!("{name}: extracting early (the script needs it later)"));
             let handle = std::thread::spawn(move || {
                 std::fs::create_dir_all(&stage)?;

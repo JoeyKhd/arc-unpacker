@@ -137,6 +137,13 @@ impl Job {
     }
 }
 
+/// Whether `run` hands this archive to unarc.dll whole: a block uses a method arc-unpack doesn't
+/// decode itself, and the installer has unarc.dll.
+pub fn goes_to_unarc(a: &Archive, cfg: &Config) -> bool {
+    let real = |b: &&DataBlock| !(b.origsize == 0 && b.compsize == 0);
+    a.blocks.iter().filter(real).any(|b| !cfg.missing(&b.method).is_empty()) && cfg.unarc_dll().is_some_and(|p| p.is_file())
+}
+
 pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) -> Result<Summary> {
     let archives: Vec<Arc<Archive>> = archives.into_iter().map(Arc::new).collect();
     if opts.tune {
@@ -146,11 +153,9 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
     // Validate everything up front: a missing codec should fail in one second, not one hour.
     let mut missing = Vec::new();
     let mut jobs = Vec::new();
-    let unarc = cfg.unarc_dll().filter(|p| p.is_file());
     for a in &archives {
         let real = |b: &&DataBlock| !(b.origsize == 0 && b.compsize == 0); // skip directory-only blocks
-        let any_missing = a.blocks.iter().filter(real).any(|b| !cfg.missing(&b.method).is_empty());
-        if any_missing && unarc.is_some() {
+        if goes_to_unarc(a, cfg) {
             jobs.push(Job { archive: a.clone(), kind: JobKind::Unarc });
             continue;
         }
