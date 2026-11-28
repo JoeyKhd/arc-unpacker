@@ -20,6 +20,7 @@
 | Castlevania - Belmont's Curse | 5.1 GB | 3 min 40 s | 1 min 08 s | **3.2×** | 1.0.7 |
 | Factorio | 4.9 GB | 9 min 57 s | 3 min 04 s | **3.2×** | 0.1.0-beta.8 |
 | Octopath Traveler | 1.8 GB | 3 min 04 s | 57 s | **3.2×** | 1.0.3 |
+| Probably Stolen | 0.6 GB | 29 s | 9 s | **3.2×** | 1.0.7 |
 | BALL x PIT | 0.4 GB | 50 s | 16 s | **3.1×** | 1.0.5 |
 | Mr. Prepper | 2.2 GB | 1 min 39 s | 32 s | **3.1×** | 0.1.0-beta.10 |
 | Neighbours Back From Hell | 0.7 GB | 33 s | 11 s | **3.1×** | 1.0.3-dev |
@@ -28,7 +29,6 @@
 | Crysis 3 Remastered | 12.5 GB | 5 min 37 s | 1 min 53 s | **3.0×** | 1.0.3-dev |
 | Cities - Skylines | 7.6 GB | 3 min 51 s | 1 min 21 s | **2.9×** | 0.1.0-beta.8 |
 | Enshrouded | 25.3 GB | 4 min 54 s | 1 min 41 s | **2.9×** | 0.1.0-beta.11 |
-| Probably Stolen | 0.6 GB | 29 s | 10 s | **2.9×** | 0.1.0-beta.7 |
 | Transport Fever 3 | 20.7 GB | 6 min 31 s | 2 min 16 s | **2.9×** | 0.1.0-beta.11 |
 | Hazard Levels | 6.3 GB | 2 min 13 s | 47 s | **2.8×** | 0.1.0-beta.10 |
 | Spider-Man - Shattered Dimensions | 4.4 GB | 2 min 35 s | 55 s | **2.8×** | 1.0.3-dev |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 25 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 24 s** | **1.8×** | |
