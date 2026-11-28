@@ -146,7 +146,7 @@ def records_from_result(res, ids):
                         avg_cpu_pct=o.get("avg_cpu_pct"), ram_rise_gb=o.get("ram_rise_gb"),
                         # (Setup's log says "succeeded" once its own files are in, also when its
                         # decoder hung afterwards and compare.ps1 had to stop it.)
-                        ok=bool(o.get("log_succeeded")) and not (o.get("note") or "").startswith(("hung", "stalled", "timed out")),
+                        ok=bool(o.get("log_succeeded")) and not (o.get("note") or "").startswith(("hung", "stalled", "timed out", "failed")),
                         note=scrub(o.get("note"), name)))
     a = res.get("arc_unpack")
     if a and a.get("total_s"):

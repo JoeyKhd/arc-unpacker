@@ -196,6 +196,18 @@ function Invoke-Original($tag, $repack, $target, $parts) {
                 $workers = @($tree | Where-Object { $_.Name -notmatch '^setup(\.tmp|\.exe)?$' -and $_.Name -notmatch '\.tmp$' })
                 $counted = if ($workers.Count -gt 0) { $workers } else { $tree }
                 $c = ($counted | ForEach-Object { [double]$_.KernelModeTime + [double]$_.UserModeTime } | Measure-Object -Sum).Sum
+                # An unpacker's error box ("An error occurred while decompressing: Archive header is
+                # corrupt! Unarc.dll returned an error code: -14"): the install has failed, the box waits
+                # for a click /SUPPRESSMSGBOXES doesn't give, and Setup's own CPU keeps the idle test
+                # below from firing (The Last of Us Part I, 2026-11-28: 1 h 50 min on the box).
+                $wt = [AbHelp]::WindowText([int[]]@($tree | ForEach-Object { [int]$_.ProcessId }))
+                if ($wt -match 'error occurred while decompressing|returned an error code|archive is corrupt|CRC check failed|not enough (free )?(disk )?space') {
+                    $one = ($wt -replace '\s+', ' ').Trim()
+                    $r.window_text = $wt
+                    $r.hang_report = Save-HangReport $tag 'original' $setup.Id $log
+                    $tInstall = $t; $r.note = 'failed: the installer showed an error: ' + $one.Substring(0, [Math]::Min(200, $one.Length))
+                    Stop-Tree $setup.Id; break
+                }
                 if ($c -ne $treeCpu) { $treeCpu = $c; $treeSince = $t }
                 elseif (($t - $treeSince) -ge 600) {
                     $r.window_text = [AbHelp]::WindowText([int[]]@($tree | ForEach-Object { [int]$_.ProcessId }))
