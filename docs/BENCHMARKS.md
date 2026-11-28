@@ -48,7 +48,7 @@
 | Moadra | 3.3 GB | 50 s | 22 s | **2.3×** | 0.1.0-beta.6 |
 | Prototype | 5.4 GB | 3 min 13 s | 1 min 24 s | **2.3×** | 1.0.6 |
 | Silver Pines | 2.1 GB | 2 min 28 s | 1 min 04 s | **2.3×** | 0.1.0-beta.8 |
-| Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
+| Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 1.0.7 |
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
 | Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.7 |
