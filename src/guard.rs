@@ -505,6 +505,85 @@ mod imp {
     // The lock is created and released on different threads by design.
     unsafe impl Send for InitLock {}
 
+    std::thread_local! {
+        /// The start-up lock this thread took at a CLS proxy's first channel probe.
+        static CLAIM: std::cell::RefCell<Option<InitLock>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Whether a C string starts with "IOEvent_": the event a CLS proxy DLL probes for
+    /// (`OpenEventA`, numbers 00-99) and then creates (`CreateEventA`) to claim its channel.
+    fn is_channel_event(name: *const u8) -> bool {
+        if name.is_null() {
+            return false;
+        }
+        b"IOEvent_".iter().enumerate().all(|(i, &c)| unsafe { *name.add(i) } == c)
+    }
+
+    unsafe extern "system" fn claim_open_event_a(access: u32, inherit: BOOL, name: *const u8) -> HANDLE {
+        if is_channel_event(name) {
+            CLAIM.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.is_none() {
+                    *c = acquire_within(60_000);
+                }
+            });
+        }
+        unsafe { windows_sys::Win32::System::Threading::OpenEventA(access, inherit, name) }
+    }
+
+    unsafe extern "system" fn claim_create_event_a(
+        sa: *const windows_sys::Win32::Security::SECURITY_ATTRIBUTES,
+        manual: BOOL,
+        initial: BOOL,
+        name: *const u8,
+    ) -> HANDLE {
+        let h = unsafe { windows_sys::Win32::System::Threading::CreateEventA(sa, manual, initial, name) };
+        if is_channel_event(name) {
+            CLAIM.with(|c| drop(c.borrow_mut().take()));
+        }
+        h
+    }
+
+    /// Hooks a loaded CLS proxy DLL's channel claim, so it takes `InitLock` only from its first
+    /// `OpenEventA("IOEvent_...")` probe to the `CreateEventA` that claims the number: its
+    /// import table entries for kernel32's OpenEventA and CreateEventA are pointed at hooks that
+    /// do that around the real calls. For hosts where the DLL is loaded by someone else's code
+    /// (unarc.dll), which can't hold the lock around the codec's start. True when both were found.
+    ///
+    /// # Safety
+    /// `module` must be the base of a PE image loaded in this process.
+    pub unsafe fn hook_channel_claims(module: *mut std::ffi::c_void) -> bool {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        use windows_sys::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
+        let k32 = unsafe { GetModuleHandleW(wide(std::ffi::OsStr::new("kernel32.dll")).as_ptr()) };
+        if k32.is_null() || module.is_null() {
+            return false;
+        }
+        let real = |n: &std::ffi::CStr| unsafe { GetProcAddress(k32, n.as_ptr().cast()) }.map(|f| f as usize);
+        let wanted: [(&[u8], Option<usize>, usize); 2] = [
+            (b"OpenEventA", real(c"OpenEventA"), claim_open_event_a as unsafe extern "system" fn(u32, BOOL, *const u8) -> HANDLE as usize),
+            (
+                b"CreateEventA",
+                real(c"CreateEventA"),
+                claim_create_event_a as unsafe extern "system" fn(*const windows_sys::Win32::Security::SECURITY_ATTRIBUTES, BOOL, BOOL, *const u8) -> HANDLE
+                    as usize,
+            ),
+        ];
+        let mut found = [false; 2];
+        for (slot, which) in unsafe { crate::guard::kernel32_slots(module.cast(), &wanted.map(|w| (w.0, w.1))) } {
+            let mut old: PAGE_PROTECTION_FLAGS = 0;
+            unsafe {
+                if VirtualProtect(slot.cast(), size_of::<usize>(), PAGE_READWRITE, &mut old) == 0 {
+                    continue;
+                }
+                slot.write_unaligned(wanted[which].2);
+                VirtualProtect(slot.cast(), size_of::<usize>(), old, &mut old);
+            }
+            found[which] = true;
+        }
+        found == [true, true]
+    }
+
     /// (system CPU busy fraction since the previous call, RAM used bytes, RAM total bytes)
     pub fn system_usage() -> (f64, u64, u64) {
         use windows_sys::Win32::Foundation::FILETIME;
@@ -573,6 +652,11 @@ mod imp {
     pub fn provide_cls_proxy_init() -> bool {
         false
     }
+    /// # Safety
+    /// Nothing to do off Windows.
+    pub unsafe fn hook_channel_claims(_: *mut std::ffi::c_void) -> bool {
+        false
+    }
     pub fn is_elevated() -> bool {
         false
     }
@@ -582,6 +666,134 @@ mod imp {
 }
 
 pub use imp::*;
+
+/// The import address table slots of kernel32.dll's `wanted` functions in a PE image loaded in
+/// this process (`base`): found by name in the import names, or, for an entry without one, by
+/// the slot already holding the function's address (`wanted.1`). (slot, index into `wanted`).
+///
+/// # Safety
+/// `base` must be the base of a PE image mapped in this process.
+pub unsafe fn kernel32_slots(base: *const u8, wanted: &[(&[u8], Option<usize>)]) -> Vec<(*mut usize, usize)> {
+    let rd32 = |off: usize| unsafe { (base.add(off) as *const u32).read_unaligned() } as usize;
+    let rd16 = |off: usize| unsafe { (base.add(off) as *const u16).read_unaligned() } as usize;
+    let mut out = Vec::new();
+    unsafe {
+        if rd16(0) != 0x5A4D {
+            return out;
+        }
+        let nt = rd32(0x3C);
+        if rd32(nt) != 0x4550 {
+            return out;
+        }
+        let opt = nt + 24;
+        let ptr = size_of::<usize>();
+        let dd = opt + match (rd16(opt), ptr) {
+            (0x10B, 4) => 96,
+            (0x20B, 8) => 112,
+            _ => return out,
+        };
+        let imports = rd32(dd + 8);
+        if imports == 0 {
+            return out;
+        }
+        let cstr = |off: usize| std::ffi::CStr::from_ptr(base.add(off).cast()).to_bytes();
+        let mut d = imports;
+        loop {
+            let (names, name, iat) = (rd32(d), rd32(d + 12), rd32(d + 16));
+            if name == 0 && iat == 0 {
+                break;
+            }
+            if cstr(name).eq_ignore_ascii_case(b"kernel32.dll") {
+                for i in 0.. {
+                    let slot = base.add(iat + i * ptr) as *mut usize;
+                    let value = slot.read_unaligned();
+                    if value == 0 {
+                        break;
+                    }
+                    let by_name = if names != 0 {
+                        let entry = (base.add(names + i * ptr) as *const usize).read_unaligned();
+                        let ordinal = entry & (1usize << (ptr * 8 - 1)) != 0;
+                        (!ordinal).then(|| cstr(entry + 2))
+                    } else {
+                        None
+                    };
+                    let which = wanted.iter().position(|(n, addr)| match by_name {
+                        Some(found) => found == *n,
+                        None => *addr == Some(value),
+                    });
+                    if let Some(w) = which {
+                        out.push((slot, w));
+                    }
+                }
+            }
+            d += 20;
+        }
+    }
+    out
+}
+
+/// Whether a DLL file imports kernel32's OpenEventA and CreateEventA by name, the calls
+/// `hook_channel_claims` hooks (packed DLLs, which resolve their imports themselves, don't).
+pub fn imports_channel_claims(dll: &std::path::Path) -> bool {
+    let Ok(b) = std::fs::read(dll) else { return false };
+    let u16_at = |o: usize| b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
+    let u32_at = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()) as usize);
+    let u64_at = |o: usize| b.get(o..o + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap()));
+    (|| -> Option<bool> {
+        let nt = u32_at(0x3C)?;
+        if u32_at(nt)? != 0x4550 {
+            return Some(false);
+        }
+        let (nsec, opt) = (u16_at(nt + 6)?, nt + 24);
+        let pe32 = u16_at(opt)? == 0x10B;
+        let imports = u32_at(opt + if pe32 { 96 } else { 112 } + 8)?;
+        let secs = opt + u16_at(nt + 20)?;
+        // A virtual address in the file, through the section table.
+        let at = |rva: usize| -> Option<usize> {
+            (0..nsec).find_map(|i| {
+                let s = secs + 40 * i;
+                let (vsize, va, rsize, raw) = (u32_at(s + 8)?, u32_at(s + 12)?, u32_at(s + 16)?, u32_at(s + 20)?);
+                (va <= rva && rva < va + vsize.max(rsize)).then_some(rva - va + raw)
+            })
+        };
+        let cstr = |o: usize| -> Option<&[u8]> {
+            let s = b.get(o..)?;
+            Some(&s[..s.iter().position(|&c| c == 0)?])
+        };
+        let (mut open, mut create) = (false, false);
+        let mut d = at(imports)?;
+        loop {
+            let (names, name) = (u32_at(d)?, u32_at(d + 12)?);
+            if name == 0 {
+                break;
+            }
+            if cstr(at(name)?)?.eq_ignore_ascii_case(b"kernel32.dll") && names != 0 {
+                let mut t = at(names)?;
+                loop {
+                    let (entry, ordinal) = if pe32 {
+                        let v = u32_at(t)? as u64;
+                        t += 4;
+                        (v, v & 0x8000_0000 != 0)
+                    } else {
+                        let v = u64_at(t)?;
+                        t += 8;
+                        (v, v >> 63 != 0)
+                    };
+                    if entry == 0 {
+                        break;
+                    }
+                    if !ordinal && let Some(n) = at(entry as usize & 0x7FFF_FFFF).and_then(|o| cstr(o + 2)) {
+                        open |= n == b"OpenEventA";
+                        create |= n == b"CreateEventA";
+                    }
+                }
+            }
+            d += 20;
+        }
+        Some(open && create)
+    })()
+    .unwrap_or(false)
+}
 
 /// Notices an install that stopped making progress: this process and everything it started
 /// (codecs, the repack's tools, tools those start) read and wrote less than `STALL_BYTES` in
@@ -630,6 +842,25 @@ impl StallCheck {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel32_import_slots_of_this_program() {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        std::hint::black_box(hook_channel_claims as unsafe fn(*mut std::ffi::c_void) -> bool);
+        // (The hooks reference both functions, so this test program imports them.)
+        let me = unsafe { GetModuleHandleW(std::ptr::null()) } as *const u8;
+        let k32 = unsafe { GetModuleHandleW([107u16, 101, 114, 110, 101, 108, 51, 50, 0].as_ptr()) };
+        let real = |n: &std::ffi::CStr| unsafe { GetProcAddress(k32, n.as_ptr().cast()) }.map(|f| f as usize);
+        let slots = unsafe { kernel32_slots(me, &[(b"OpenEventA", real(c"OpenEventA")), (b"CreateEventA", real(c"CreateEventA"))]) };
+        let found: Vec<usize> = slots.iter().map(|s| s.1).collect();
+        assert!(found.contains(&0) && found.contains(&1), "{found:?}");
+        // The slot holds the function the loader bound (kernel32's, or the one it forwards to).
+        for (slot, _) in slots {
+            assert_ne!(unsafe { slot.read_unaligned() }, 0);
+        }
+        assert!(imports_channel_claims(&std::env::current_exe().unwrap()));
+        assert!(!imports_channel_claims(std::path::Path::new("no such file.dll")));
+    }
 
     #[test]
     fn heavy_slots_are_exclusive_across_threads() {

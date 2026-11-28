@@ -119,6 +119,31 @@ fn rar(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
+/// Loads the CLS proxy DLLs in `dir` that start a helper program (`<stem>_x86.exe` or
+/// `_x64.exe`, with or without the "cls-" prefix) and hooks their channel claim
+/// (`guard::hook_channel_claims`). They stay loaded.
+fn preload_proxies(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let lower = name.to_ascii_lowercase();
+        if !(lower.starts_with("cls-") && lower.ends_with(".dll")) {
+            continue;
+        }
+        let stem = &name[..name.len() - 4];
+        let helper = ["x86", "x64"].iter().any(|a| dir.join(format!("{stem}_{a}.exe")).is_file() || dir.join(format!("{}_{a}.exe", &stem[4..])).is_file());
+        if !helper || !arc_unpack::guard::imports_channel_claims(&e.path()) {
+            continue;
+        }
+        if let Ok(lib) = unsafe { libloading::os::windows::Library::new(e.path()) } {
+            let base = lib.into_raw() as *mut std::ffi::c_void;
+            if !unsafe { arc_unpack::guard::hook_channel_claims(base) } {
+                eprintln!("unarc-host: {name}: its channel claim couldn't be hooked");
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--rar") {
@@ -144,6 +169,10 @@ fn main() {
             std::process::exit(65);
         }
     };
+    // The CLS proxies with a helper program claim a numbered channel when they start, which
+    // unarc.dll does at any time: loaded now (unarc gets the same modules) and hooked, they
+    // hold arc-unpack's codec start-up lock just while they claim, like the codec host does.
+    preload_proxies(std::path::Path::new(&args[0]).parent().unwrap_or(std::path::Path::new(".")));
     let extract: libloading::Symbol<FreeArcExtract> = match unsafe { lib.get(b"FreeArcExtract\0") } {
         Ok(f) => f,
         Err(e) => {

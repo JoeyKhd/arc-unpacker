@@ -272,7 +272,7 @@ pub fn run(archives: Vec<Archive>, cfg: &Config, opts: &Options, sink: &Sink) ->
                         compressed: job.compsize(),
                         output: job.origsize(),
                     });
-                    let proxies = ProxyUse::begin(proxy_codecs(&job, cfg), matches!(job.kind, JobKind::Unarc), &opts.cancel);
+                    let proxies = ProxyUse::begin(proxy_use(&job, cfg), &opts.cancel);
                     if let Some((secs, names)) = &proxies.waited {
                         events::info(sink, format!("{label}: waited {secs:.1} s for {}, which another job was using", names.join(", ")));
                     }
@@ -634,12 +634,15 @@ fn proxy_helper(dll: &Path) -> Option<PathBuf> {
 /// CLS codecs that run their decoder in a helper program (cls-srep.dll + cls-srep_x64.exe) talk
 /// to it through events and shared memory numbered 00-99, each instance taking the first free
 /// number: two that start at the same moment can take the same one and mix their data.
-/// arc-unpack's codec host starts them one at a time (guard::InitLock), but unarc.dll, which
-/// loads them itself for whole-archive jobs, doesn't. So a whole-archive job has such a codec to
-/// itself: it waits until no other job uses it, and jobs using it wait for it. (Assetto Corsa:
+/// arc-unpack's codec host starts them one at a time (guard::InitLock); unarc.dll, which loads
+/// them itself for whole-archive jobs and starts them at any time, gets them preloaded with
+/// their channel claim hooked to take the same lock (unarc-host, guard::hook_channel_claims).
+/// A proxy that can't be hooked there (a packed DLL) is held alone by a whole-archive job: it
+/// waits until no other job uses it, and jobs using it wait for it. (Assetto Corsa:
 /// setup-fitgirl-08's srep stages started while 09 and 12 ran srep through unarc.dll, and 08's
-/// output ended early, at a different file each time.) Per process: early extractions of later
-/// archives run in the same process.
+/// output ended early, at a different file each time.) Codecs with fixed-name temp files are
+/// held alone by any job (`SPILLING_PROXIES`). Per process: early extractions of later archives
+/// run in the same process.
 static PROXY_USE: Mutex<Vec<(String, usize, bool)>> = Mutex::new(Vec::new());
 static PROXY_FREED: std::sync::Condvar = std::sync::Condvar::new();
 
@@ -685,11 +688,9 @@ struct ProxyUse {
 }
 
 impl ProxyUse {
-    /// Waits until the codecs `names` are free for this job (`exclusive`: a whole-archive job,
-    /// which holds them all exclusively; the spilling ones are always held exclusively).
-    fn begin(names: Vec<String>, exclusive: bool, cancel: &AtomicBool) -> ProxyUse {
-        let names: Vec<(String, bool)> =
-            names.into_iter().map(|n| { let excl = exclusive || SPILLING_PROXIES.contains(&n.as_str()); (n, excl) }).collect();
+    /// Waits until the codecs `names` are free for this job: (name, whether it holds it alone;
+    /// see `proxy_use`).
+    fn begin(names: Vec<(String, bool)>, cancel: &AtomicBool) -> ProxyUse {
         if names.is_empty() {
             return ProxyUse { names, waited: None };
         }
@@ -782,15 +783,33 @@ fn proxy_codecs(job: &Job, cfg: &Config) -> Vec<String> {
         })
         .filter_map(|dll| dll.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
         .collect();
-    if let JobKind::Block(i) = job.kind
-        && names.iter().any(|n| n == "cls-srep")
-        && srep_will_swap(&job.archive.blocks[i].method, cfg)
-    {
+    let swaps = match job.kind {
+        JobKind::Block(i) => srep_will_swap(&job.archive.blocks[i].method, cfg),
+        JobKind::Unarc => job.archive.blocks.iter().any(|b| srep_will_swap(&b.method, cfg)),
+    };
+    if swaps && names.iter().any(|n| n == "cls-srep") {
         names.push(SREP_SWAP.to_string());
     }
     names.sort();
     names.dedup();
     names
+}
+
+/// The codecs a job must wait for (`proxy_codecs`), and whether it holds each alone. The ones
+/// with fixed-name temp files (`SPILLING_PROXIES`, a swapping srep) always. A whole-archive
+/// job also holds alone a proxy whose channel claim unarc-host can't hook (a packed DLL), as
+/// unarc.dll starts its instances at any time; the others claim their channel under the codec
+/// start-up lock in either host (`guard::hook_channel_claims`, `guard::InitLock`), so they
+/// are shared.
+fn proxy_use(job: &Job, cfg: &Config) -> Vec<(String, bool)> {
+    proxy_codecs(job, cfg)
+        .into_iter()
+        .map(|n| {
+            let alone = SPILLING_PROXIES.contains(&n.as_str())
+                || (matches!(job.kind, JobKind::Unarc) && !crate::guard::imports_channel_claims(&cfg.codec_dir().join(format!("{n}.dll"))));
+            (n, alone)
+        })
+        .collect()
 }
 
 struct BlockResult {
