@@ -1144,7 +1144,8 @@ pub struct Plan {
     pub parts: Parts,
     /// Steps left out with the archives the selection doesn't take.
     pub skipped: Vec<Step>,
-    /// The script's own InitializeWizard choices (`wizard_checks`).
+    /// The script's own InitializeWizard choices (`wizard_checks`); empty when the selection
+    /// was given.
     pub wizard: Vec<(i64, bool)>,
 }
 
@@ -1204,21 +1205,39 @@ fn apply_checks_to(components: &[crate::inno::Component], mut selected: BTreeSet
         .map(|c| (c.name.to_ascii_lowercase(), c.fixed, c.exclusive))
         .collect();
     let parent = |name: &str| name.rsplit_once('\\').map(|(p, _)| p.to_string());
+    // Inno's list links items to their sub-items: unticking one unticks the sub-items it may
+    // untick, and a ticked sub-item leaves its parent ticked (or greyed, which counts).
+    let untick_tree = |selected: &mut BTreeSet<String>, top: &str| {
+        let below = format!("{top}\\");
+        selected.remove(top);
+        for (n, f, _) in &shown {
+            if !*f && n.starts_with(&below) {
+                selected.remove(n);
+            }
+        }
+    };
     for &(i, checked) in checks {
         let Some((name, fixed, exclusive)) = usize::try_from(i).ok().and_then(|i| shown.get(i)) else { continue };
         if checked {
             if *exclusive {
                 let group = parent(name);
-                for (other, _, other_exclusive) in &shown {
-                    if *other_exclusive && other != name && parent(other) == group {
-                        selected.remove(other);
+                for (other, other_fixed, other_exclusive) in &shown {
+                    if *other_exclusive && !*other_fixed && other != name && parent(other) == group {
+                        untick_tree(&mut selected, other);
                     }
                 }
             }
             selected.insert(name.clone());
+            let mut up = parent(name);
+            while let Some(p) = up {
+                if shown.iter().any(|(n, _, _)| *n == p) {
+                    selected.insert(p.clone());
+                }
+                up = parent(&p);
+            }
         } else if !fixed {
             // (Inno doesn't let a fixed component be unticked.)
-            selected.remove(name);
+            untick_tree(&mut selected, name);
         }
     }
     selected
@@ -1249,10 +1268,13 @@ pub fn plan_with(
     let _ = std::fs::remove_dir_all(&tmp);
     fill_plan_tmp(setup, &tmp)?;
     let files = repack_files(repack);
-    let wizard = wizard_checks(setup, script, setup_exe, repack);
-    let selected = match selected {
-        Some(chosen) => with_exclusive_choices(setup, chosen),
-        None => apply_wizard_checks(setup, default_components(setup, &files), &wizard),
+    // (The script's own ticks only matter for the default choice.)
+    let (selected, wizard) = match selected {
+        Some(chosen) => (with_exclusive_choices(setup, chosen), Vec::new()),
+        None => {
+            let wizard = wizard_checks(setup, script, setup_exe, repack);
+            (apply_wizard_checks(setup, default_components(setup, &files), &wizard), wizard)
+        }
     };
     let parts = parts_for(setup, &files, &selected);
     let components = setup
