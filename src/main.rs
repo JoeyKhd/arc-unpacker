@@ -187,6 +187,7 @@ fn real_main() -> Result<()> {
                 host_dir: std::env::current_exe()?.parent().map(PathBuf::from).unwrap_or_default(),
                 tune: true,
                 reg: reg.clone(),
+                readahead: true,
             };
             let file = std::fs::File::open(&input).with_context(|| format!("open {}", input.display()))?;
             let started = Instant::now();

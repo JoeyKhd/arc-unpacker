@@ -124,6 +124,9 @@ pub struct Ctx {
     pub host_dir: PathBuf,
     pub tune: bool,
     pub reg: Registry,
+    /// Deep read-ahead around codecs that stop reading while they work (`barrier_codec`); off
+    /// inside 4x4, whose blocks are in memory already.
+    pub readahead: bool,
 }
 
 /// Builds the decode pipeline. `stages` are in compression order; `final_size` is the size of
@@ -201,7 +204,8 @@ pub fn build(stages: &[Stage], input: Stream, final_size: u64, ctx: &Ctx) -> Res
 fn four_by_four(inner: Vec<Stage>, input: Stream, ctx: &Ctx, label: String) -> Result<Stream> {
     use std::collections::BTreeMap;
     let (mut w, r) = pipe(8);
-    let ctx2 = ctx.clone();
+    let mut ctx2 = ctx.clone();
+    ctx2.readahead = false;
     ctx.reg.worker(label.clone(), move || {
         let mut input = input;
         let mut v = [0u8; 4];
@@ -590,6 +594,8 @@ fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream>
     if !spec.header && !spec.input_file && !spec.output_file {
         // zstdrec: done here with the repack's libzstd.dll, on every core.
         if let Some(dll) = crate::zstdrec::known(&spec.argv) {
+            // (zstdrec.exe can't run without it either: it crashes on its first record.)
+            ensure!(dll.is_file(), "{}: {} is missing (zstdrec.exe needs it)", spec.label, dll.display());
             match crate::zstdrec::open(&dll) {
                 Ok(lib) => {
                     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -612,13 +618,18 @@ fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream>
             }
         }
         // Fast path: stdin -> codec -> stdout, read directly by the next stage.
+        let (ahead_in, ahead_out) = if ctx.readahead { barrier_codec(&spec) } else { (0, 0) };
+        if ahead_in > 0 {
+            input = readahead(input, ahead_in, format!("read-ahead {}", spec.label), ctx);
+        }
         let own_dir = own_workdir(&spec, ctx)?;
         let mut cmd = command(&spec, Path::new(""), Path::new(""), workdir_of(&spec, &own_dir), ctx.tune);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
         let sp = spawn_child(&spec, cmd, ctx)?;
         let stdin = sp.stdin.unwrap();
         ctx.reg.worker(format!("feed {}", spec.label), move || feed(input, stdin));
-        return Ok(Box::new(ChildOut {
+        let label = spec.label.clone();
+        let out: Stream = Box::new(ChildOut {
             out: sp.stdout.unwrap(),
             child: sp.child,
             label: spec.label,
@@ -626,7 +637,11 @@ fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream>
             checked: false,
             reg: ctx.reg.clone(),
             _own_dir: own_dir,
-        }));
+        });
+        if ahead_out > 0 {
+            return Ok(readahead(out, ahead_out, format!("write-behind {label}"), ctx));
+        }
+        return Ok(out);
     }
 
     let (mut w, r) = pipe(8);
@@ -656,6 +671,84 @@ fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream>
         Ok(())
     });
     Ok(Box::new(r))
+}
+
+/// Codecs that read a whole record, batch or chunk, work on it, write it, and read nothing
+/// meanwhile (reverse-engineered): the stage before them stops as soon as the few MB of pipe
+/// between are full. (MiB of read-ahead in front, MiB behind.) By SHA-256:
+/// - ucrn.exe: a batch at a time, decoded in parallel, then written (448, 448: a batch and its
+///   output each fit its 446 MiB budget);
+/// - the 2018 XTool builds (`xt`): a full barrier per record (256, 0);
+/// - cls-pzlib.dll: no read while a chunk is restored (512, 0).
+/// `ARC_UNPACK_READAHEAD=<text>` gives (256, 0) to any codec whose label contains it, `=off`
+/// turns this off. The same process gets the same bytes in the same order: only buffering.
+fn barrier_codec(spec: &ExtSpec) -> (usize, usize) {
+    const UCRN: &str = "0c19ea829bbd7b8fba706e4f3a6e25510263bccdea7909e31b376610e9d98716";
+    const PZLIB: &str = "1b382ddcc9db8cf7f6edfa505201e9720d65dee400e8cd0ea80a36a9facafc60";
+    match std::env::var("ARC_UNPACK_READAHEAD") {
+        Ok(v) if v.eq_ignore_ascii_case("off") => return (0, 0),
+        Ok(v) if !v.is_empty() && spec.label.contains(v.as_str()) => return (256, 0),
+        _ => {}
+    }
+    let name = |p: &str| Path::new(p).file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let exe = spec.argv.first().map(String::as_str).unwrap_or("");
+    if name(exe) == "ucrn.exe" && file_sha256(Path::new(exe)).as_deref() == Some(UCRN) {
+        return (448, 448);
+    }
+    if name(exe).starts_with("xtool") && file_sha256(Path::new(exe)).is_some_and(|h| crate::xtsplit::OLD_XTOOL.contains(&h.as_str())) {
+        return (256, 0);
+    }
+    if let Some(dll) = spec.argv.get(1)
+        && name(dll) == "cls-pzlib.dll"
+        && file_sha256(Path::new(dll)).as_deref() == Some(PZLIB)
+    {
+        return (512, 0);
+    }
+    (0, 0)
+}
+
+/// A file's SHA-256 in hex, once per path and size.
+fn file_sha256(p: &Path) -> Option<String> {
+    static SEEN: Mutex<Vec<(PathBuf, u64, Option<String>)>> = Mutex::new(Vec::new());
+    let len = std::fs::metadata(p).ok()?.len();
+    let mut seen = SEEN.lock().unwrap();
+    if let Some((_, _, h)) = seen.iter().find(|(q, l, _)| q == p && *l == len) {
+        return h.clone();
+    }
+    let h = crate::tools::sha256_file(p).ok().map(|d| crate::extract::hex(&d));
+    seen.push((p.to_path_buf(), len, h.clone()));
+    h
+}
+
+/// `input` read ahead into a pipe of up to `mib` MiB on its own thread: at most an eighth of
+/// the free RAM (a sixteenth of a RAM limit), at least the usual 8 MiB. An error upstream
+/// reaches the reader as an error, never as a short stream.
+fn readahead(mut input: Stream, mib: usize, label: String, ctx: &Ctx) -> Stream {
+    let (free, _) = crate::guard::memory();
+    let mut cap = (free >> 20) / 8;
+    if let Some(limit) = crate::memlimit::get() {
+        cap = cap.min((limit >> 20) / 16);
+    }
+    let depth = (mib as u64).min(cap).max(8) as usize;
+    let (mut w, r) = pipe(depth);
+    ctx.reg.worker(label, move || {
+        let mut buf = vec![0u8; crate::pipe::CHUNK];
+        loop {
+            let n = input.read(&mut buf).context("reading stage input")?;
+            if n == 0 {
+                break;
+            }
+            match w.write_all(&buf[..n]) {
+                Ok(()) => {}
+                // The next stage stopped reading early: as in `feed`, its checks tell.
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+                Err(e) => return Err(e).context("passing stage data on"),
+            }
+        }
+        w.finish()?;
+        Ok(())
+    });
+    Box::new(r)
 }
 
 /// Restores a precomp.inside stream with several plain precomp.exe processes (see `pcfsplit`).
@@ -702,6 +795,8 @@ fn xtool_split(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx
     let spawn = move |_chunk: u64| -> Result<crate::xtsplit::Worker> {
         let mut spec = base.clone();
         spec.label = format!("{} (split)", base.label);
+        // Each its own folder, whatever a config says (xtool finds its plugins next to itself).
+        spec.workdir = None;
         let own_dir = own_workdir(&spec, &ctx2)?;
         let mut cmd = command(&spec, Path::new(""), Path::new(""), workdir_of(&spec, &own_dir), ctx2.tune);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -869,10 +964,35 @@ mod tests {
             expect.extend_from_slice(&block);
         }
         let stages = Config::default().resolve("4x4:b1mb:storing").unwrap();
-        let ctx = Ctx { temp_dir: std::env::temp_dir(), host_dir: std::env::temp_dir(), tune: false, reg: Registry::default() };
+        let ctx = Ctx { temp_dir: std::env::temp_dir(), host_dir: std::env::temp_dir(), tune: false, reg: Registry::default(), readahead: true };
         let mut out = Vec::new();
         build(&stages, Box::new(io::Cursor::new(data)), expect.len() as u64, &ctx).unwrap().read_to_end(&mut out).unwrap();
         assert!(ctx.reg.join().is_empty());
         assert_eq!(out, expect);
+    }
+
+    #[test]
+    fn readahead_passes_bytes_and_errors_on() {
+        let ctx = Ctx { temp_dir: std::env::temp_dir(), host_dir: std::env::temp_dir(), tune: false, reg: Registry::default(), readahead: true };
+        let data: Vec<u8> = (0..(3usize << 20) + 17).map(|i| (i * 7) as u8).collect();
+        let mut out = Vec::new();
+        readahead(Box::new(io::Cursor::new(data.clone())), 16, "t".into(), &ctx).read_to_end(&mut out).unwrap();
+        assert_eq!(out, data);
+        // An upstream that fails halfway: the reader gets an error, not a short stream.
+        struct Fails(usize);
+        impl Read for Fails {
+            fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("upstream failed"));
+                }
+                self.0 -= 1;
+                let n = b.len().min(1000);
+                b[..n].fill(1);
+                Ok(n)
+            }
+        }
+        let mut out = Vec::new();
+        assert!(readahead(Box::new(Fails(5)), 16, "t".into(), &ctx).read_to_end(&mut out).is_err());
+        assert_eq!(ctx.reg.join().len(), 1);
     }
 }

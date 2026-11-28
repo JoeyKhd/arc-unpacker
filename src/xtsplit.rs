@@ -23,6 +23,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 const MAGIC: &[u8; 4] = b"XTL0";
+
+/// The 2018 XTool builds (method `xt`, `xtool.exe d:precomp:t100p - -`; reverse-engineered):
+/// 0.2 (Mad Max), 0.6 (Dark Souls Remastered), 0.9 x86 (Prototype, Max Payne 3, Spintires,
+/// ETS2) and 0.9 x64 (Octopath, Crysis 3, Rocksmith, RE2, Stray, Civ 6, FS22, A Way Out, Dune).
+pub const OLD_XTOOL: [&str; 4] = [
+    "cfc5263f290c924c1c20fdac66e59c5a14d3166995fca8b0f139698e4a041f9d",
+    "25e63404a25f54a28b5c9664a988739ae140b82cef977d5c99c5a282a2abedc7",
+    "17dbbea161ec11e96d7ee9fcd63ada7716a2d27e5c0d8b8cce5f6de6b0c94ca9",
+    "0bb81d315a5c73509ea33aded9ce932457a68c7a694c697ae5da1796c80b7a14",
+];
 const HEADER_LEN: usize = 18;
 /// Kind bit of a stream that copies an earlier stream's data (xtool's deduplication). Such a
 /// stream may refer to a chunk another worker restored, so these streams can't be split.

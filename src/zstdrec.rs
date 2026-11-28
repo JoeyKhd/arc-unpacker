@@ -38,8 +38,9 @@ pub fn known(argv: &[String]) -> Option<PathBuf> {
     if !exe.file_name()?.to_string_lossy().eq_ignore_ascii_case("zstdrec.exe") || std::fs::metadata(exe).ok()?.len() != ZSTDREC.0 {
         return None;
     }
+    // (Even when it is missing: then the stage says so.)
     let dll = exe.with_file_name("libzstd.dll");
-    (dll.is_file() && crate::tools::sha256_file(exe).is_ok_and(|h| crate::extract::hex(&h) == ZSTDREC.1)).then_some(dll)
+    crate::tools::sha256_file(exe).is_ok_and(|h| crate::extract::hex(&h) == ZSTDREC.1).then_some(dll)
 }
 
 type Compress = unsafe extern "C" fn(*mut u8, usize, *const u8, usize, i32) -> usize;
