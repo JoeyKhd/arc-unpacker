@@ -30,13 +30,13 @@
 | Enshrouded | 25.3 GB | 4 min 54 s | 1 min 41 s | **2.9×** | 0.1.0-beta.11 |
 | Probably Stolen | 0.6 GB | 29 s | 10 s | **2.9×** | 0.1.0-beta.7 |
 | Transport Fever 3 | 20.7 GB | 6 min 31 s | 2 min 16 s | **2.9×** | 0.1.0-beta.11 |
-| Flick | 2.1 GB | 54 s | 19 s | **2.8×** | 0.1.0-beta.6 |
 | Hazard Levels | 6.3 GB | 2 min 13 s | 47 s | **2.8×** | 0.1.0-beta.10 |
 | Spider-Man - Shattered Dimensions | 4.4 GB | 2 min 35 s | 55 s | **2.8×** | 1.0.3-dev |
 | Halls of Torment | 0.9 GB | 34 s | 13 s | **2.7×** | 0.1.0-beta.8 |
 | Shipping Store Simulator 2037 | 2.0 GB | 1 min 45 s | 39 s | **2.7×** | 0.1.0-beta.9 |
 | ATOM RPG | 5.5 GB | 2 min 37 s | 1 min 00 s | **2.6×** | 0.1.0-beta.9 |
 | Far Cry 3 - Duology | 6.3 GB | 12 min 41 s | 4 min 53 s | **2.6×** | 1.0.6 |
+| Flick | 2.1 GB | 54 s | 21 s | **2.6×** | 1.0.7 |
 | Outer Wilds | 2.5 GB | 2 min 01 s | 47 s | **2.6×** | 1.0.3-dev |
 | Stardew Valley | 0.4 GB | 36 s | 14 s | **2.6×** | 0.1.0-beta.7 |
 | Cuphead | 4.3 GB | 2 min 34 s | 1 min 03 s | **2.5×** | 0.1.0-beta.8 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 13 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 15 s** | **1.8×** | |
