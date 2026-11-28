@@ -614,14 +614,21 @@ fn codecs_needing_admin(jobs: &[Job], cfg: &Config) -> Vec<String> {
     }
     let has_global = |p: &Path| std::fs::read(p).map(|b| b.windows(7).any(|w| w == b"Global\\")).unwrap_or(false);
     dlls.into_iter()
-        .filter(|dll| {
-            let stem = dll.with_extension("");
-            [dll.clone(), stem.with_file_name(format!("{}_x64.exe", stem.file_name().unwrap_or_default().to_string_lossy()))]
-                .iter()
-                .any(|p| has_global(p))
-        })
+        .filter(|dll| has_global(dll) || proxy_helper(dll).is_some_and(|h| has_global(&h)))
         .map(|d| d.file_name().unwrap_or_default().to_string_lossy().into_owned())
         .collect()
+}
+
+/// The helper program a CLS codec runs its decoder in, if it has one: `<stem>_x64.exe` or
+/// `_x86.exe` next to it (cls-srep.dll + cls-srep_x64.exe), or the same without the "cls-"
+/// prefix (cls-sdr.dll looks for cls-sdr_x64.exe, then sdr_x64.exe, which Sleeping Dogs ships;
+/// reverse-engineered).
+fn proxy_helper(dll: &Path) -> Option<PathBuf> {
+    let stem = dll.file_stem()?.to_string_lossy().into_owned();
+    let bare = stem.get(..4).filter(|p| p.eq_ignore_ascii_case("cls-")).map(|_| stem[4..].to_string());
+    ["x64", "x86"].iter().find_map(|a| {
+        std::iter::once(&stem).chain(bare.as_ref()).map(|s| dll.with_file_name(format!("{s}_{a}.exe"))).find(|p| p.is_file())
+    })
 }
 
 /// CLS codecs that run their decoder in a helper program (cls-srep.dll + cls-srep_x64.exe) talk
@@ -771,8 +778,7 @@ fn proxy_codecs(job: &Job, cfg: &Config) -> Vec<String> {
         .iter()
         .filter(|dll| {
             let stem = dll.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            SPILLING_PROXIES.contains(&stem.to_lowercase().as_str())
-                || ["x64", "x86"].iter().any(|a| dll.with_file_name(format!("{stem}_{a}.exe")).is_file())
+            SPILLING_PROXIES.contains(&stem.to_lowercase().as_str()) || proxy_helper(dll).is_some()
         })
         .filter_map(|dll| dll.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
         .collect();
@@ -844,7 +850,7 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
     });
 
     let reg = Registry::default();
-    let ctx = Ctx { temp_dir: opts.temp_dir.clone(), host_dir: opts.host_dir.clone(), tune: opts.tune, reg: reg.clone() };
+    let ctx = Ctx { temp_dir: opts.temp_dir.clone(), host_dir: opts.host_dir.clone(), tune: opts.tune, reg: reg.clone(), readahead: true };
     let output = stage::build(&stages, input, block.origsize, &ctx)?;
     let produced = Arc::new(AtomicU64::new(0));
     let output: Stream = Box::new(CountOut { inner: output, n: produced.clone(), id, sink: sink.clone(), reported: 0 });
@@ -1424,6 +1430,17 @@ mod tests {
         // Plain FreeArc methods never are.
         assert!(!method_is_heavy("dispack070+delta+lzma:96mb", 8 * gb, &cfg));
         assert!(!method_is_heavy("storing", 50 * gb, &cfg));
+    }
+
+    #[test]
+    fn helpers_with_and_without_the_cls_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["cls-sdr.dll", "sdr_x64.exe", "cls-srep.dll", "cls-srep_x64.exe", "cls-msc.dll"] {
+            std::fs::write(dir.path().join(f), b"x").unwrap();
+        }
+        assert_eq!(proxy_helper(&dir.path().join("cls-sdr.dll")), Some(dir.path().join("sdr_x64.exe")));
+        assert_eq!(proxy_helper(&dir.path().join("cls-srep.dll")), Some(dir.path().join("cls-srep_x64.exe")));
+        assert_eq!(proxy_helper(&dir.path().join("cls-msc.dll")), None);
     }
 
     #[test]
