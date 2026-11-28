@@ -144,6 +144,15 @@ pub fn arc_ini(text: &str, limit: u64, physical: u64) -> String {
                 w.to_string()
             })
             .collect();
+        // A line without -dm uses xtool's default of 75% of RAM for its deduplication store
+        // (rtool's xt3d9 lines, the 0.7.9 xt3u ones): give it the limit's share, right after
+        // "decode" (always as a percentage; an absolute size would follow xtool's working set).
+        let mut words = words;
+        if !words.iter().any(|w| w.starts_with("-dm"))
+            && let Some(i) = words.iter().position(|w| w.eq_ignore_ascii_case("decode"))
+        {
+            words.insert(i + 1, format!("-dm{dm}p"));
+        }
         out.push_str(&words.join(" "));
         out.push_str(ending);
     }
@@ -347,10 +356,13 @@ mod tests {
         // 8 GB of 32: dedup memory a fifth of the limit = 5% of this PC; threads stay.
         let got = arc_ini(ini, 8 * GB, 32 * GB);
         assert!(got.contains("xtool.exe decode -t100p -dm5p - - <stdin> <stdout>\n"));
-        assert!(got.contains("xtool3\\xtool.exe decode -t100p - -"));
+        // A line without -dm gets one (xtool's default would be 75% of RAM).
+        assert!(got.contains("xtool3\\xtool.exe decode -dm5p -t100p - -"));
         // 4 GB: two threads per GB, and other programs' options are left alone.
         let got = arc_ini(ini, 4 * GB, 32 * GB);
-        assert!(got.contains("xtool.exe decode -t8 -dm2p - -") && got.contains("xtool3\\xtool.exe decode -t8 - -"));
+        assert!(got.contains("xtool.exe decode -t8 -dm2p - -") && got.contains("xtool3\\xtool.exe decode -dm2p -t8 - -"));
+        let rtool = "unpackcmd = rtool.exe decode -t100p - - <stdin> <stdout>\n";
+        assert_eq!(arc_ini(rtool, 4 * GB, 32 * GB), "unpackcmd = rtool.exe decode -dm2p -t8 - - <stdin> <stdout>\n");
         assert!(got.contains("rz.exe d -t100p - -"));
     }
 
