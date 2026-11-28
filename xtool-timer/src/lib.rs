@@ -17,8 +17,13 @@
 //!    spill) and then rises (the memory part grows), the spilled streams are read back from the
 //!    wrong place: the largest repeated files are restored wrong, without any error. That
 //!    happens whenever other programs free memory while xtool runs. Here xtool's calls to
-//!    `GlobalMemoryStatusEx` get the figures from when it started, so its memory part either
-//!    grows from the start or never does, both of which xtool handles correctly.
+//!    `GlobalMemoryStatusEx` get the figures from when it started. With those, the memory part
+//!    grows by the same amount C at every stream it adds. Streams are under 2 GiB, so for C = 0
+//!    (everything goes to the spill part) or C >= 2 GiB (the memory part never fills) xtool gets
+//!    it right. A C in between (a loaded or small PC: used memory just under the -dm share, or
+//!    free memory just over 1 GiB) can still fill, spill and grow; then the snapshot reports at
+//!    most 1 GiB free, which makes xtool's C exactly 0 (reverse-engineered: CalcDupSysMem, the
+//!    same in xtool 0.7.9, 0.8.8, 0.9.2 and rtool 0.8.9). Spilled or not, the same bytes come back.
 //!    `ARC_UNPACK_XTOOL_LIVE_MEMORY` (set to anything) turns this off.
 
 use core::ffi::c_void;
@@ -49,6 +54,7 @@ unsafe extern "system" {
     fn VirtualProtect(address: *mut c_void, size: usize, protect: u32, old: *mut u32) -> i32;
     fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
     fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
+    fn GetCommandLineW() -> *const u16;
 }
 
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -136,6 +142,17 @@ unsafe fn steady_memory_view() {
         if GlobalMemoryStatusEx(snapshot) == 0 {
             return;
         }
+        let cmd = GetCommandLineW();
+        if !cmd.is_null() {
+            let mut n = 0;
+            while *cmd.add(n) != 0 {
+                n += 1;
+            }
+            let line = core::slice::from_raw_parts(cmd, n);
+            if let Some(pct) = dedup_percent(line) {
+                (*snapshot).avail_phys = avoid_small_budget((*snapshot).total_phys, (*snapshot).avail_phys, pct);
+            }
+        }
         let Some(slot) = import_slot(base, b"kernel32.dll", b"GlobalMemoryStatusEx") else { return };
         READY.store(1, Ordering::Release);
         let mut old = 0u32;
@@ -145,6 +162,62 @@ unsafe fn steady_memory_view() {
         let hook: unsafe extern "system" fn(*mut MemoryStatusEx) -> i32 = steady_global_memory_status_ex;
         core::ptr::write_volatile(slot, hook as *const () as usize);
         VirtualProtect(slot.cast(), 8, old, &mut old);
+    }
+}
+
+/// The deduplication memory xtool takes, as a share of RAM in percent: its last `-dm<N>p` (or
+/// `%`) on the command line, 75 without one. None for an absolute size or anything unclear
+/// (left alone: an absolute -dm follows xtool's working set, not these figures).
+fn dedup_percent(line: &[u16]) -> Option<u64> {
+    let mut pct = Some(75);
+    for word in line.split(|&c| c == b' ' as u16 || c == b'\t' as u16) {
+        let Some(rest) = word.strip_prefix(&[b'-' as u16, b'd' as u16, b'm' as u16][..]) else { continue };
+        let digits = rest.iter().take_while(|&&c| (b'0' as u16..=b'9' as u16).contains(&c)).count();
+        let suffix = &rest[digits..];
+        let value = rest[..digits].iter().fold(0u64, |v, &c| v.saturating_mul(10).saturating_add((c - b'0' as u16) as u64));
+        pct = (digits > 0 && (suffix == [b'p' as u16] || suffix == [b'%' as u16])).then_some(value);
+    }
+    pct
+}
+
+/// The free memory to report: unchanged, unless xtool's budget from these figures,
+/// C = min(pct% x total - used, free - 1 GiB), would land between 0 and 2 GiB; then at most
+/// 1 GiB, which makes it 0.
+fn avoid_small_budget(total: u64, avail: u64, pct: u64) -> u64 {
+    const GIB: u64 = 1 << 30;
+    let share = (total / 100).saturating_mul(pct.min(100));
+    let used = total.saturating_sub(avail);
+    let budget = share.saturating_sub(used).min(avail.saturating_sub(GIB));
+    if budget > 0 && budget < 2 * GIB { avail.min(GIB) } else { avail }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn dedup_share_from_the_command_line() {
+        assert_eq!(dedup_percent(&w(r"rtool.exe decode -t100p - - ")), Some(75));
+        assert_eq!(dedup_percent(&w(r"xtool.exe decode -t100p -dm50p - -")), Some(50));
+        assert_eq!(dedup_percent(&w(r"xtool.exe decode -dm10% - -")), Some(10));
+        assert_eq!(dedup_percent(&w(r"xtool.exe decode -dm512mb - -")), None);
+    }
+
+    #[test]
+    fn small_budgets_become_none() {
+        const GIB: u64 = 1 << 30;
+        // 32 GB PC, 75%: 24 GB share. Little used: a big budget, left alone.
+        assert_eq!(avoid_small_budget(32 * GIB, 30 * GIB, 75), 30 * GIB);
+        // 23 GB used: a 1 GB budget, which can fill and grow: report 1 GiB free (budget 0).
+        assert_eq!(avoid_small_budget(32 * GIB, 9 * GIB, 75), GIB);
+        // More used than the share: the budget is 0 already.
+        assert_eq!(avoid_small_budget(32 * GIB, 6 * GIB, 75), 6 * GIB);
+        // 16 GB PC, -dm50p, 7 GB used: an 8 GB share leaves a 1 GB budget: small too.
+        assert_eq!(avoid_small_budget(16 * GIB, 9 * GIB, 50), GIB);
     }
 }
 
