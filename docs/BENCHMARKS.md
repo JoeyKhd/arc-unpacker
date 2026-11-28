@@ -23,9 +23,9 @@
 | BALL x PIT | 0.4 GB | 50 s | 16 s | **3.1×** | 1.0.5 |
 | Mr. Prepper | 2.2 GB | 1 min 39 s | 32 s | **3.1×** | 0.1.0-beta.10 |
 | Neighbours Back From Hell | 0.7 GB | 33 s | 11 s | **3.1×** | 1.0.3-dev |
+| Slime Rancher 2 | 1.7 GB | 2 min 29 s | 48 s | **3.1×** | 1.0.7 |
 | Bendy and the Dark Revival | 3.0 GB | 1 min 40 s | 33 s | **3.0×** | 0.1.0-beta.8 |
 | Crysis 3 Remastered | 12.5 GB | 5 min 37 s | 1 min 53 s | **3.0×** | 1.0.3-dev |
-| Slime Rancher 2 | 1.7 GB | 2 min 29 s | 50 s | **3.0×** | 0.1.0-beta.6 |
 | Cities - Skylines | 7.6 GB | 3 min 51 s | 1 min 21 s | **2.9×** | 0.1.0-beta.8 |
 | Enshrouded | 25.3 GB | 4 min 54 s | 1 min 41 s | **2.9×** | 0.1.0-beta.11 |
 | Probably Stolen | 0.6 GB | 29 s | 10 s | **2.9×** | 0.1.0-beta.7 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 14 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 13 s** | **1.8×** | |
