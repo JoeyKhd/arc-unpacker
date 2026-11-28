@@ -17,7 +17,7 @@
 | God of War III Remastered | 30.0 GB | 6 min 14 s | 1 min 49 s | **3.4×** | 0.1.0-beta.7 |
 | Assetto Corsa | 7.3 GB | 10 min 50 s | 3 min 23 s | **3.2×** | 1.0.7 |
 | Call of Duty - Black Ops | 13.5 GB | 16 min 19 s | 5 min 03 s | **3.2×** | 1.0.1 |
-| Castlevania - Belmont's Curse | 5.1 GB | 3 min 40 s | 1 min 09 s | **3.2×** | 0.1.0-beta.6 |
+| Castlevania - Belmont's Curse | 5.1 GB | 3 min 40 s | 1 min 08 s | **3.2×** | 1.0.7 |
 | Factorio | 4.9 GB | 9 min 57 s | 3 min 04 s | **3.2×** | 0.1.0-beta.8 |
 | Octopath Traveler | 1.8 GB | 3 min 04 s | 57 s | **3.2×** | 1.0.3 |
 | BALL x PIT | 0.4 GB | 50 s | 16 s | **3.1×** | 1.0.5 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 24 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 23 s** | **1.8×** | |
