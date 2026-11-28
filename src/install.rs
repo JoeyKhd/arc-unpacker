@@ -846,12 +846,14 @@ fn run_scripted(
         }
     }
     crate::memlimit::set(opts.memory_limit);
-    let (_, physical) = crate::guard::memory();
+    let (free, physical) = crate::guard::memory();
     if let Some(note) = crate::memlimit::make_safe(&tmp, physical) {
         events::info(sink, note);
     }
     if let Some(limit) = opts.memory_limit {
         events::info(sink, crate::memlimit::apply(&tmp, limit, physical));
+    } else if let Some(note) = crate::memlimit::size_fogg(&tmp, free) {
+        events::info(sink, note);
     }
     std::fs::create_dir_all(&target)?;
 

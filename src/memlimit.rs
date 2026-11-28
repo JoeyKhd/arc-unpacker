@@ -159,6 +159,61 @@ pub fn arc_ini(text: &str, limit: u64, physical: u64) -> String {
     out
 }
 
+/// arc.ini with fogg.exe's `-m` (MiB) set by `size(current MiB)`. fogg (balrogg's Ogg Vorbis
+/// recompressor with FitGirl's Wwise/FSB5 layers) decodes as many blocks at once as fit in
+/// -m by its own estimate (4 x block + 72 MiB per pool, reverse-engineered): FitGirl's `-m2g`
+/// holds it to about ten 30 MB blocks, and one 0.5 GB block at a time. -m and -t only gate
+/// admission, and blocks are written in stream order, so the output is the same. Only lines
+/// that set -m are changed (fogg's own default is unknown).
+fn fogg_ini(text: &str, size: impl Fn(u64) -> u64) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let ending = &line[body.len()..];
+        if !body.trim_start().to_ascii_lowercase().starts_with("unpackcmd") {
+            out.push_str(line);
+            continue;
+        }
+        let mut words: Vec<String> = body.split(' ').map(str::to_string).collect();
+        let is_fogg = |w: &str| w.trim_matches('"').rsplit(['\\', '/']).next().is_some_and(|n| n.eq_ignore_ascii_case("fogg.exe"));
+        let Some(prog) = words.iter().position(|w| is_fogg(w)) else {
+            out.push_str(line);
+            continue;
+        };
+        // "-m2g": k, m or g; a bare number is bytes.
+        let mib = |w: &str| -> Option<u64> {
+            let rest = w.strip_prefix("-m")?;
+            let (num, unit) = rest.split_at(rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len()));
+            let n: u64 = num.parse().ok()?;
+            match unit.to_ascii_lowercase().as_str() {
+                "" => Some(n >> 20),
+                "k" => Some(n >> 10),
+                "m" => Some(n),
+                "g" => Some(n << 10),
+                _ => None,
+            }
+        };
+        if let Some((i, current)) = words.iter().enumerate().skip(prog + 1).find_map(|(i, w)| mib(w).map(|m| (i, m))) {
+            let new = size(current);
+            if new != current {
+                words[i] = format!("-m{new}m");
+            }
+        }
+        out.push_str(&words.join(" "));
+        out.push_str(ending);
+    }
+    out
+}
+
+/// fogg's -m for this install: a quarter of the free RAM, at most 8 GiB, never lower than the
+/// repack's (fogg's estimate counts each of its two stages separately, so up to half the free
+/// RAM). Returns a line for the log when it changed arc.ini.
+pub fn size_fogg(tmp: &Path, free: u64) -> Option<String> {
+    let want = (free / 4).min(8 << 30) >> 20;
+    let changed = edit_files(tmp, |name, text| (name == "arc.ini").then(|| fogg_ini(text, |cur| cur.max(want))));
+    changed.then(|| format!("fogg: -m raised to {want} MB, so more audio blocks decode at once"))
+}
+
 /// The old lolz helpers that hang with 17 or more decode threads: cls-magic_x64.exe (= magicl),
 /// cls-lolly_x64.exe, cls-lollypop_x64.exe and cls-lollypop2_x64.exe. Each reads the CLS.ini
 /// section named like itself (the helper's name without "cls-" and "_x64").
@@ -317,7 +372,8 @@ pub fn make_safe(dir: &Path, _physical: u64) -> Option<String> {
 pub fn apply(tmp: &Path, limit: u64, physical: u64) -> String {
     edit_files(tmp, |name, text| match name {
         "cls.ini" => Some(cls_ini(text, limit, physical)),
-        "arc.ini" => Some(arc_ini(text, limit, physical)),
+        // fogg gets a quarter of the limit, at least 512 MiB, never more than the repack's.
+        "arc.ini" => Some(fogg_ini(&arc_ini(text, limit, physical), |cur| ((limit >> 20) / 4).max(512).min(cur))),
         _ => None,
     });
     format!(
@@ -333,6 +389,20 @@ mod tests {
     use super::*;
 
     const GB: u64 = 1 << 30;
+
+    #[test]
+    fn fogg_memory() {
+        let ini = "[External compressor:fogg]\r\nheader = 0\r\nunpackcmd = fogg.exe -m2g <stdin> <stdout>\r\n[External compressor:fogg2]\r\nunpackcmd = fogg.exe -t100p -m2g <stdin> <stdout>\r\n[External compressor:x]\r\nunpackcmd = xfogg.exe -m2g <stdin> <stdout>\r\nunpackcmd = fogg.exe <stdin> <stdout>";
+        // Raised (8 GiB), with -t and other programs and lines left alone.
+        let up = fogg_ini(ini, |cur| cur.max(8192));
+        assert_eq!(up, ini.replacen("fogg.exe -m2g", "fogg.exe -m8192m", 1).replacen("-t100p -m2g", "-t100p -m8192m", 1));
+        // Never lowered by the raise, and a line without -m keeps fogg's default.
+        assert_eq!(fogg_ini(ini, |cur| cur.max(1024)), ini);
+        // Under a 2 GB limit: 512 MiB.
+        assert!(fogg_ini(ini, |cur| ((2u64 << 10) / 4).max(512).min(cur)).contains("unpackcmd = fogg.exe -m512m <stdin>"));
+        // Units: a bare number is bytes.
+        assert_eq!(fogg_ini("unpackcmd = fogg.exe -m1073741824 <stdin> <stdout>\n", |c| c * 2), "unpackcmd = fogg.exe -m2048m <stdin> <stdout>\n");
+    }
 
     #[test]
     fn cls_ini_follows_the_limit() {
