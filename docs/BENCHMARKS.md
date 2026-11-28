@@ -68,7 +68,6 @@
 | Frontier - Path of Shadows | 0.7 GB | 1 min 45 s | 52 s | **2.0×** | 0.1.0-beta.9 |
 | Hozy | 5.2 GB | 2 min 31 s | 1 min 16 s | **2.0×** | 0.1.0-beta.8 |
 | The Blood of Dawnwalker | 48.6 GB | 8 min 12 s | 4 min 11 s | **2.0×** | 1.0.7 |
-| 771 - Smile and Work | 0.7 GB | 24 s | 12 s | **1.9×** | 0.1.0-beta.6 |
 | Ancient Wars - Sparta HD | 5.1 GB | 1 min 07 s | 35 s | **1.9×** | 0.1.0-beta.10 |
 | Football Manager 27 | 4.7 GB | 6 min 48 s | 3 min 32 s | **1.9×** | 0.1.0-beta.8 |
 | Goat Simulator 3 | 5.5 GB | 3 min 18 s | 1 min 45 s | **1.9×** | 0.1.0-beta.8 |
@@ -94,6 +93,7 @@
 | Motorcycle Ride - Infinity | 3.0 GB | 1 min 45 s | 1 min 10 s | **1.5×** | 0.1.0-beta.9 |
 | Stray | 5.0 GB | 4 min 04 s | 2 min 44 s | **1.5×** | 1.0.2 |
 | The Sims 3 | 16.5 GB | 15 min 42 s | 10 min 38 s | **1.5×** | 1.0.5 |
+| 771 - Smile and Work | 0.7 GB | 24 s | 17 s | **1.4×** | 1.0.7 |
 | Dark Souls Remastered | 4.3 GB | 4 min 00 s | 2 min 51 s | **1.4×** | 1.0.1 |
 | Red Dead Redemption | 6.4 GB | 5 min 18 s | 3 min 42 s | **1.4×** | 1.0.5 |
 | Takeover 2 | 4.2 GB | 3 min 15 s | 2 min 15 s | **1.4×** | 0.1.0-beta.9 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 17 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 22 s** | **1.8×** | |
