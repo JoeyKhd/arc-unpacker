@@ -729,8 +729,11 @@ impl Drop for RemoveDir {
 }
 
 /// Like FreeArc, an external process without a configured working folder gets its own empty
-/// one: some codecs (the Razor stdio build) keep a fixed-name temp file there and crash when
-/// two processes share it.
+/// one: some codecs keep fixed-name temp files there. Razor's stdio build (rz-1.03.7-stdio.exe
+/// with razor.dll, "Razor Stdio Patch"; reverse-engineered) creates razor.tmp2 and razor.tmp1
+/// (share mode 0) in its working folder and deletes them at the end: a second copy in the same
+/// folder fails, and the first to finish deletes the other's files (Slime Rancher 2). xtool and
+/// rtool spill to `<exe name>-vm.tmp` there.
 fn own_workdir(spec: &ExtSpec, ctx: &Ctx) -> Result<Option<RemoveDir>> {
     if spec.workdir.is_some() {
         return Ok(None);

@@ -594,8 +594,11 @@ static PROXY_FREED: std::sync::Condvar = std::sync::Condvar::new();
 /// - magic2l and magicl write `<ldmfTempPath>temp_<worker>.ldmf` (fopen "w+b"); a second
 ///   instance shows "Can't create vm temp file!" and crashes;
 /// - precomp.inside (CLS-precomp.dll, which drives the repack's precomp.exe rather than an
-///   `_x64` helper) names its shared memory `Global\PrecompInside_*` with no instance number, and
-///   its temp file has a fixed name. Call of Duty: Black Ops runs two such blocks.
+///   `_x64` helper; reverse-engineered): it numbers its events and mappings with a 2-digit NN
+///   found by probing `OpenEventA(PrecompInside_IOEvent<NN>)`, never checking for an existing
+///   object (a probe/claim race), and the patched precomp.exe spills a record's output beyond
+///   CLS.ini [Precomp] Memory (256 MiB after PrecompInit) to the fixed `<TempPath>\tempPrecomp.tmp`
+///   (CREATE_ALWAYS, shared). Call of Duty: Black Ops runs two such blocks.
 const SPILLING_PROXIES: [&str; 3] = ["cls-magic2l", "cls-magicl", "cls-precomp"];
 
 struct ProxyUse {
