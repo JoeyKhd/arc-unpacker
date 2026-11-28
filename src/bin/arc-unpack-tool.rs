@@ -220,13 +220,21 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
         let text: String = bytes.iter().map(|&b| b as char).collect();
         // Every program the lines run must touch only the files on its line: a tool with a
         // fixed-name temp file (xtool's <exe>-vm.tmp) would collide with its other copies.
-        // (run.exe runs its lines in its own folder, which is ours.)
+        // (run.exe runs its lines in the folder it was started in, the bat's; each is a
+        // `cmd /c`, which looks for a program there first. Our own folder is run.exe's.)
+        let cwd = std::env::current_dir().ok()?;
         let here = std::env::current_exe().ok()?.parent()?.to_path_buf();
         let programs = tools::run_list_programs(&text);
         let mut mode_words = std::collections::HashMap::new();
         for p in &programs {
             let path = Path::new(p);
-            let path = if path.is_absolute() { path.to_path_buf() } else { here.join(path) };
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else if cwd.join(path).is_file() {
+                cwd.join(path)
+            } else {
+                here.join(path)
+            };
             mode_words.insert(p.to_ascii_lowercase(), tools::named_files_tool(&path, Some(map))?);
         }
         let modes = |w: &str| mode_words.get(&w.to_ascii_lowercase()).copied().unwrap_or(0);
@@ -234,7 +242,7 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
             return None;
         }
         let widen = n > 1 && (n as usize) < cpus;
-        let sorted = tools::run_list_largest_first(&bytes, &std::env::current_dir().ok()?, &modes);
+        let sorted = tools::run_list_largest_first(&bytes, &cwd, &modes);
         if !widen && sorted.is_none() {
             return None;
         }
