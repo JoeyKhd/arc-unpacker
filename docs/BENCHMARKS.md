@@ -50,6 +50,7 @@
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
+| Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.5 |
 | Sleeping Dogs Pack | 10.4 GB | 7 min 08 s | 3 min 19 s | **2.2×** | 1.0.5 |
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
@@ -82,6 +83,7 @@
 | AI LIMIT | 14.8 GB | 4 min 43 s | 3 min 00 s | **1.6×** | 0.1.0-beta.12 |
 | Football Manager 2023 | 2.3 GB | 2 min 40 s | 1 min 40 s | **1.6×** | 0.1.0-beta.8 |
 | MGS 4 - Master Collection Version | 18.5 GB | 8 min 00 s | 4 min 57 s | **1.6×** | 0.1.0-beta.12 |
+| Cricket 19 | 12.3 GB | 27 min 13 s | 18 min 34 s | **1.5×** | 1.0.5 |
 | Kerbal Space Program | 1.5 GB | 3 min 23 s | 2 min 18 s | **1.5×** | 1.0.5 |
 | Mad Max | 4.0 GB | 7 min 11 s | 4 min 55 s | **1.5×** | 1.0.3-dev |
 | Motorcycle Ride - Infinity | 3.0 GB | 1 min 45 s | 1 min 10 s | **1.5×** | 0.1.0-beta.9 |
@@ -91,6 +93,7 @@
 | Red Dead Redemption | 6.4 GB | 5 min 18 s | 3 min 42 s | **1.4×** | 1.0.5 |
 | Takeover 2 | 4.2 GB | 3 min 15 s | 2 min 15 s | **1.4×** | 0.1.0-beta.9 |
 | Bloodborne | 15.1 GB | 10 min 44 s | 8 min 10 s | **1.3×** | 0.1.0-beta.11 |
+| ENTITY - THE BLACK DAY | 30.8 GB | 17 min 00 s | 13 min 10 s | **1.3×** | 1.0.5 |
 | Metal Gear Solid V - TPP | 11.6 GB | 8 min 13 s | 6 min 06 s | **1.3×** | 0.1.0-beta.11 |
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Palworld | 25.4 GB | 10 min 48 s | 8 min 18 s | **1.3×** | 0.1.0-beta.11 |
@@ -99,7 +102,6 @@
 | Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | Batman - Arkham Asylum GotY | 5.1 GB | 13 min 08 s | 11 min 24 s | **1.2×** | 1.0.5 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
-| Cricket 19 | 12.3 GB | 27 min 13 s | 22 min 51 s | **1.2×** | 1.0.1 |
 | Dune - Awakening | 24.2 GB | 15 min 48 s | 12 min 44 s | **1.2×** | 0.1.0-beta.11 |
 | Euro Truck Simulator 2 | 18.2 GB | 11 min 20 s | 9 min 23 s | **1.2×** | 0.1.0-beta.11 |
 | GTA Trilogy - Definitive Edition | 24.5 GB | 9 min 48 s | 7 min 52 s | **1.2×** | 0.1.0-beta.10 |
@@ -112,7 +114,6 @@
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
 | Prototype | 5.4 GB | 3 min 13 s | 3 min 17 s | **1.0×** | 1.0.5 |
 | Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | |
-| 007 First Light | 36.1 GB | 11 min 01 s | failed | – | 1.0.4 |
 | Forza Horizon 6 | 81.6 GB | – | – | – | |
 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
 | Marvel's Spider-Man 2 | 64.5 GB | – | – | – | |
@@ -208,4 +209,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 109 measured** | | **579 min 38 s** | **333 min 14 s** | **1.7×** | |
+| **All 111 measured** | | **597 min 14 s** | **342 min 23 s** | **1.7×** | |
