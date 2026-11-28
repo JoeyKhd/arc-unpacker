@@ -692,7 +692,8 @@ fn precomp_split(spec: ExtSpec, exe: PathBuf, input: Stream, ctx: &Ctx) -> Resul
     let single: crate::pcfsplit::Single = Box::new(move |s: Stream| external_untee(base.clone(), s, &ctx2));
     let reg = ctx.reg.clone();
     let workers = crate::pcfsplit::workers();
-    crate::pcfsplit::run(header, rest, workers, Default::default(), &ctx.temp_dir, spawn, single, move |label, f| reg.worker(label, f), &spec.label)
+    let aborted = ctx.reg.aborted.clone();
+    crate::pcfsplit::run(header, rest, workers, Default::default(), &ctx.temp_dir, spawn, single, aborted, move |label, f| reg.worker(label, f), &spec.label)
 }
 
 /// Decodes an xtool stream with up to `workers` xtool processes (see `xtsplit`).

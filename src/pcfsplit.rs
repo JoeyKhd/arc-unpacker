@@ -383,6 +383,8 @@ struct Part {
     kind: Kind,
     /// Its output bytes, from its records.
     out: u64,
+    /// The bytes it takes in the temp folder (its part file and its result).
+    disk: u64,
     state: State,
 }
 
@@ -393,14 +395,18 @@ struct Shared {
     queue: VecDeque<u64>,
     /// How many parts there are, once the reader is done.
     total: Option<u64>,
-    /// Parts written but not yet passed on.
+    /// Parts written but not yet passed on, and their bytes in the temp folder.
     in_flight: usize,
+    staged: u64,
     failed: Option<String>,
 }
 
 struct Coord {
     s: Mutex<Shared>,
     cv: Condvar,
+    /// The block's stop flag (set when the install is cancelled, stalls or another stage fails):
+    /// a process killed then must not be taken for a failed part.
+    aborted: Arc<AtomicBool>,
 }
 
 impl Coord {
@@ -412,14 +418,63 @@ impl Coord {
         self.cv.notify_all();
     }
 
+    fn aborted(&self) -> bool {
+        self.aborted.load(Ordering::Relaxed)
+    }
+
+    /// Waits for a change, at most a moment, and turns the block's stop flag into a failure.
+    fn wait<'a>(&self, s: std::sync::MutexGuard<'a, Shared>) -> std::sync::MutexGuard<'a, Shared> {
+        let mut s = self.cv.wait_timeout(s, Duration::from_millis(200)).unwrap().0;
+        if self.aborted() && s.failed.is_none() {
+            s.failed = Some("stopped".into());
+            self.cv.notify_all();
+        }
+        s
+    }
+
     fn add(&self, k: u64, part: Part) {
         let mut s = self.s.lock().unwrap();
         if matches!(part.kind, Kind::Pcf) {
             s.queue.push_back(k);
         }
         s.in_flight += 1;
+        s.staged += part.disk;
         s.parts.insert(k, part);
         self.cv.notify_all();
+    }
+
+    /// Waits until another part may be written (`limits`: parts, temp bytes); false once the
+    /// block stops. One part is always allowed, so this can't wait for itself.
+    fn room(&self, limits: (usize, u64)) -> bool {
+        let mut s = self.s.lock().unwrap();
+        while (s.in_flight >= limits.0 || s.staged >= limits.1) && s.in_flight > 0 && s.failed.is_none() {
+            s = self.wait(s);
+        }
+        if self.aborted() && s.failed.is_none() {
+            s.failed = Some("stopped".into());
+            self.cv.notify_all();
+        }
+        s.failed.is_none()
+    }
+
+    /// A new part folder, unless the block has stopped (then nothing is created any more).
+    fn new_dir(&self, root: &Path, k: u64) -> Result<PathBuf> {
+        let s = self.s.lock().unwrap();
+        if let Some(f) = &s.failed {
+            return Err(anyhow!("{f}"));
+        }
+        let dir = root.join(k.to_string());
+        std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+        Ok(dir)
+    }
+}
+
+/// The parts' folder, removed when its last user (the reader, a process slot, the output) is gone.
+struct RootGuard(PathBuf);
+
+impl Drop for RootGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -439,7 +494,8 @@ fn copy_n(input: &mut Stream, out: &mut impl Write, mut n: u64) -> io::Result<()
 
 /// Restores `rest` (the records after `header`) with up to `workers` precomp processes started
 /// by `spawn`, in parts under a new folder in `temp_dir`; `single` is precomp.inside, for what
-/// those can't do. `run_thread` starts the block's threads.
+/// those can't do. `aborted` is the block's stop flag; `run_thread` starts the block's threads.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     header: Vec<u8>,
     rest: Stream,
@@ -448,19 +504,25 @@ pub fn run(
     temp_dir: &Path,
     spawn: Spawn,
     single: Single,
+    aborted: Arc<AtomicBool>,
     run_thread: impl Fn(String, Box<dyn FnOnce() -> Result<()> + Send>),
     label: &str,
 ) -> Result<Stream> {
     let root = std::path::absolute(temp_dir.join(format!("arcunp-pcf-{}-{}", std::process::id(), crate::stage::unique())))?;
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new() });
-    let max_in_flight = 2 * workers + 2;
+    let guard = Arc::new(RootGuard(root.clone()));
+    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new(), aborted });
+    // Parts ahead of the output, and their bytes in the temp folder: a quarter of its free
+    // space, 1 to 8 GiB (the game is being written to the same drive, maybe).
+    let free = crate::guard::free_space(&root).unwrap_or(16 << 30);
+    let limits = (2 * workers + 2, (free / 4).clamp(1 << 30, 8 << 30));
 
     // The reader: cuts the stream into parts.
     {
-        let (coord, root, owned) = (coord.clone(), root.clone(), label.to_string());
+        let (coord, root, owned, guard) = (coord.clone(), root.clone(), label.to_string(), guard.clone());
         let reader = move || -> Result<()> {
-            let r = read_parts(header, rest, sizes, &root, &coord, max_in_flight, &owned);
+            let _guard = guard;
+            let r = read_parts(header, rest, sizes, &root, &coord, limits, &owned);
             if let Err(e) = &r {
                 coord.fail(format!("{e:#}"));
             }
@@ -471,56 +533,60 @@ pub fn run(
     // The precomp processes.
     let spawn = Arc::new(spawn);
     for w in 0..workers {
-        let (coord, spawn) = (coord.clone(), spawn.clone());
+        let (coord, spawn, guard) = (coord.clone(), spawn.clone(), guard.clone());
         std::thread::Builder::new()
             .name(format!("{label} (split) {w}"))
-            .spawn(move || restore_parts(&coord, &**spawn))
+            .spawn(move || {
+                let _guard = guard;
+                restore_parts(&coord, &**spawn)
+            })
             .expect("spawn thread");
     }
-    Ok(Box::new(Output { coord, single, root, next: 0, cur: None }))
+    Ok(Box::new(Output { coord, single, _root: guard, next: 0, cur: None }))
 }
 
-fn read_parts(header: Vec<u8>, mut input: Stream, sizes: Sizes, root: &Path, coord: &Coord, max_in_flight: usize, label: &str) -> Result<()> {
+fn read_parts(header: Vec<u8>, mut input: Stream, sizes: Sizes, root: &Path, coord: &Coord, limits: (usize, u64), label: &str) -> Result<()> {
     let mut k = 0u64;
     // The part being written: (folder, file, PCF bytes, output bytes).
     let mut cur: Option<(PathBuf, BufWriter<std::fs::File>, u64, u64)> = None;
     let finish = |cur: &mut Option<(PathBuf, BufWriter<std::fs::File>, u64, u64)>, k: &mut u64| -> Result<()> {
-        if let Some((dir, mut w, _, out)) = cur.take() {
+        if let Some((dir, mut w, len, out)) = cur.take() {
             w.flush()?;
             drop(w);
-            coord.add(*k, Part { dir, kind: Kind::Pcf, out, state: State::Waiting });
+            coord.add(*k, Part { dir, kind: Kind::Pcf, out, disk: len + out, state: State::Waiting });
             *k += 1;
         }
         Ok(())
     };
     loop {
-        {
-            let mut s = coord.s.lock().unwrap();
-            while s.in_flight >= max_in_flight && s.failed.is_none() {
-                s = coord.cv.wait(s).unwrap();
-            }
-            if s.failed.is_some() {
-                return Ok(());
-            }
+        if !coord.room(limits) {
+            return Ok(());
         }
         let mut f = Fields { input: &mut input, bytes: Vec::with_capacity(64) };
         match parse(&mut f) {
             Ok(h) if h.raw && h.data >= sizes.raw_alone => {
+                // Passed on as it is, in pieces within the temp budget (its output is its bytes).
                 finish(&mut cur, &mut k)?;
-                let dir = root.join(k.to_string());
-                std::fs::create_dir(&dir)?;
-                let mut w = BufWriter::with_capacity(1 << 20, std::fs::File::create(dir.join("raw.bin"))?);
-                copy_n(&mut input, &mut w, h.data)?;
-                w.flush()?;
-                drop(w);
-                coord.add(k, Part { dir, kind: Kind::Raw, out: h.data, state: State::Done });
-                k += 1;
+                let mut left = h.data;
+                while left > 0 {
+                    if left != h.data && !coord.room(limits) {
+                        return Ok(());
+                    }
+                    let n = left.min(sizes.part.max(1));
+                    let dir = coord.new_dir(root, k)?;
+                    let mut w = BufWriter::with_capacity(1 << 20, std::fs::File::create(dir.join("raw.bin"))?);
+                    copy_n(&mut input, &mut w, n)?;
+                    w.flush()?;
+                    drop(w);
+                    coord.add(k, Part { dir, kind: Kind::Raw, out: n, disk: n, state: State::Done });
+                    k += 1;
+                    left -= n;
+                }
             }
             Ok(h) => {
                 let bytes = std::mem::take(&mut f.bytes);
                 if cur.is_none() {
-                    let dir = root.join(k.to_string());
-                    std::fs::create_dir(&dir)?;
+                    let dir = coord.new_dir(root, k)?;
                     let mut w = BufWriter::with_capacity(1 << 20, std::fs::File::create(dir.join("part.pcf"))?);
                     w.write_all(&header)?;
                     cur = Some((dir, w, header.len() as u64, 0));
@@ -542,7 +608,7 @@ fn read_parts(header: Vec<u8>, mut input: Stream, sizes: Sizes, root: &Path, coo
                 finish(&mut cur, &mut k)?;
                 eprintln!("note: {label}: precomp.inside restores the rest from {why} on");
                 let rest: Stream = Box::new(io::Cursor::new([header.clone(), bytes].concat()).chain(input));
-                coord.add(k, Part { dir: root.join(k.to_string()), kind: Kind::Rest(Some(rest)), out: 0, state: State::Done });
+                coord.add(k, Part { dir: root.join(k.to_string()), kind: Kind::Rest(Some(rest)), out: 0, disk: 0, state: State::Done });
                 k += 1;
                 let mut s = coord.s.lock().unwrap();
                 s.total = Some(k);
@@ -564,7 +630,7 @@ fn restore_parts(coord: &Coord, spawn: &(dyn Fn(&Path, &Path, &Path) -> Result<A
         let (k, dir, out) = {
             let mut s = coord.s.lock().unwrap();
             loop {
-                if s.failed.is_some() {
+                if s.failed.is_some() || coord.aborted() {
                     return;
                 }
                 if let Some(k) = s.queue.pop_front() {
@@ -574,7 +640,7 @@ fn restore_parts(coord: &Coord, spawn: &(dyn Fn(&Path, &Path, &Path) -> Result<A
                 if s.total.is_some() {
                     return;
                 }
-                s = coord.cv.wait(s).unwrap();
+                s = coord.wait(s);
             }
         };
         let result = restore(&dir, out, spawn, coord);
@@ -597,12 +663,21 @@ fn restore(dir: &Path, expected: u64, spawn: &(dyn Fn(&Path, &Path, &Path) -> Re
         if let Some(st) = child.lock().unwrap().try_wait()? {
             break st;
         }
-        if coord.s.lock().unwrap().failed.is_some() {
-            let _ = child.lock().unwrap().kill();
+        if coord.s.lock().unwrap().failed.is_some() || coord.aborted() {
+            // Gone before its slot lets go of the folder, so its files can be removed.
+            let mut c = child.lock().unwrap();
+            let _ = c.kill();
+            let _ = c.wait();
+            coord.fail("stopped".into());
             return Err(anyhow!("stopped"));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    // Killed with the rest of the block: that's not a part that failed.
+    if coord.aborted() {
+        coord.fail("stopped".into());
+        return Err(anyhow!("stopped"));
+    }
     // precomp exits with 0 even after "Error recompressing data!": the size tells.
     let got = std::fs::metadata(&result).map(|m| m.len()).unwrap_or(0);
     if !status.success() || got != expected {
@@ -615,10 +690,11 @@ fn restore(dir: &Path, expected: u64, spawn: &(dyn Fn(&Path, &Path, &Path) -> Re
 struct Output {
     coord: Arc<Coord>,
     single: Single,
-    root: PathBuf,
+    _root: Arc<RootGuard>,
     next: u64,
-    /// The part being passed on: its reader, its folder, and what it should come to.
-    cur: Option<(Box<dyn Read + Send>, PathBuf, Option<u64>, u64)>,
+    /// The part being passed on: its reader, its folder, what it should come to, what it has
+    /// come to, and its bytes in the temp folder.
+    cur: Option<(Box<dyn Read + Send>, PathBuf, Option<u64>, u64, u64)>,
 }
 
 impl Read for Output {
@@ -627,7 +703,7 @@ impl Read for Output {
             return Ok(0);
         }
         loop {
-            if let Some((r, dir, expected, got)) = &mut self.cur {
+            if let Some((r, dir, expected, got, disk)) = &mut self.cur {
                 let n = r.read(buf)?;
                 if n > 0 {
                     *got += n as u64;
@@ -641,10 +717,12 @@ impl Read for Output {
                     return Err(io::Error::other(msg));
                 }
                 let _ = std::fs::remove_dir_all(&*dir);
+                let disk = *disk;
                 self.cur = None;
                 self.next += 1;
                 let mut s = self.coord.s.lock().unwrap();
                 s.in_flight -= 1;
+                s.staged -= disk;
                 self.coord.cv.notify_all();
                 continue;
             }
@@ -657,37 +735,43 @@ impl Read for Output {
                     return Ok(0);
                 }
                 let Some(p) = s.parts.get_mut(&self.next) else {
-                    s = self.coord.cv.wait(s).unwrap();
+                    s = self.coord.wait(s);
                     continue;
                 };
-                let dir = p.dir.clone();
+                let (dir, disk) = (p.dir.clone(), p.disk);
                 match (&mut p.kind, &p.state) {
                     (_, State::Waiting) => {
-                        s = self.coord.cv.wait(s).unwrap();
+                        s = self.coord.wait(s);
                         continue;
                     }
                     (Kind::Pcf, State::Done) => {
                         let f = std::fs::File::open(dir.join("result.bin"))?;
-                        self.cur = Some((Box::new(io::BufReader::with_capacity(1 << 20, f)), dir, Some(p.out), 0));
+                        self.cur = Some((Box::new(io::BufReader::with_capacity(1 << 20, f)), dir, Some(p.out), 0, disk));
                     }
                     (Kind::Raw, _) => {
                         let f = std::fs::File::open(dir.join("raw.bin"))?;
-                        self.cur = Some((Box::new(io::BufReader::with_capacity(1 << 20, f)), dir, Some(p.out), 0));
+                        self.cur = Some((Box::new(io::BufReader::with_capacity(1 << 20, f)), dir, Some(p.out), 0, disk));
                     }
                     (Kind::Pcf, State::Failed(why)) => {
+                        if self.coord.aborted() {
+                            return Err(io::Error::other("stopped"));
+                        }
                         // This part through precomp.inside, and the rest of this install too.
                         DISABLED.store(true, Ordering::Relaxed);
                         eprintln!("note: precomp part {} failed ({why}); precomp.inside restores it", self.next);
                         let (out, f) = (p.out, std::fs::File::open(dir.join("part.pcf"))?);
                         drop(s);
                         let r = (self.single)(Box::new(io::BufReader::with_capacity(1 << 20, f))).map_err(|e| io::Error::other(format!("{e:#}")))?;
-                        self.cur = Some((r, dir, Some(out), 0));
+                        self.cur = Some((r, dir, Some(out), 0, disk));
                     }
                     (Kind::Rest(rest), _) => {
+                        if self.coord.aborted() {
+                            return Err(io::Error::other("stopped"));
+                        }
                         let rest = rest.take().ok_or_else(|| io::Error::other("the rest of the precomp stream was taken twice"))?;
                         drop(s);
                         let r = (self.single)(rest).map_err(|e| io::Error::other(format!("{e:#}")))?;
-                        self.cur = Some((r, dir, None, 0));
+                        self.cur = Some((r, dir, None, 0, disk));
                     }
                 }
                 break;
@@ -706,8 +790,8 @@ impl Drop for Output {
             }
             self.coord.cv.notify_all();
         }
+        // (The folder goes with the last of the reader, the process slots and this.)
         self.cur = None;
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -842,7 +926,7 @@ mod tests {
         };
         // Small parts, so there are several, and raw records of their own.
         let sizes = Sizes { part: 512 << 10, raw_alone: 64 << 10 };
-        let mut out = run(header, rest, 3, sizes, tmp.path(), spawn, single, threads, "precomp").unwrap();
+        let mut out = run(header, rest, 3, sizes, tmp.path(), spawn, single, Arc::new(AtomicBool::new(false)), threads, "precomp").unwrap();
         let mut got = Vec::new();
         out.read_to_end(&mut got).unwrap();
         let want = std::fs::read(orig).unwrap();
