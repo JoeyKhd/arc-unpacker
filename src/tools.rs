@@ -88,6 +88,8 @@ const KNOWN: &[(u64, &str, Role)] = &[
 /// - hpatchz 2.5.3 (x5.exe; HDiffPatch, open source): `x5 old diff new`.
 /// - xdelta3 3.0.8 / 3.0.11 (x.exe; open source): `x -f -d -s src delta out`.
 /// - oggvorbis2fsb5 (fsb.exe; open source): `fsb in out`.
+/// - Farming Simulator 22's .NET shapes tool (fgpack.exe, 24,576 B; reverse-engineered:
+///   File.Open(in), File.Create(out), a keystream XOR): `fgpack in out`.
 const OVERLAP_SAFE: &[(u64, &str)] = &[
     (74240, "c6ae9b328578ee6b43021b6ec90fbaf152c7cdba0085fda72ab51b9259a5b361"),
     (159232, "342b579afeff5651e9c0c57a6d2e785f119655f170d106dd01dfb97162efe385"),
@@ -96,6 +98,7 @@ const OVERLAP_SAFE: &[(u64, &str)] = &[
     (548804, "9bf8d067de9448e521afe1f8108caa0f85b4b7c7933641efd44bc43533920565"),
     (331264, "d1f00ff506d77a3f219c497e444306f7949c0a9b9e029f15bb862aa521fd26f8"),
     (1153277, "98d7c11a27dc7b0da976d5b01374e0359d92b2d3b5439c5d26bad70ec618d811"),
+    (24576, "eb9a914ff781bc2f088e70d1b99faca73d98a96325a4a154cf52b3b52a4f860a"),
 ];
 
 /// If `path` is a tool in `OVERLAP_SAFE` or a stand-in listed in `map`: how many leading
@@ -836,8 +839,20 @@ pub fn freearc_extract(archive: &Path, out: &Path, original: &Path) -> Result<St
 // ---------------------------------------------------------------------------------------------
 // FitGirl's run.exe (see the module doc).
 
+/// The programs (`*.exe` words) the command lines of a run.exe list run, quotes removed.
+pub fn run_list_programs(list: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in list.replace('"', " ").replace("&&", " ").split_whitespace() {
+        if w.to_ascii_lowercase().ends_with(".exe") && !out.iter().any(|o| o.eq_ignore_ascii_case(w)) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
 /// Whether the command lines of a run.exe list touch disjoint sets of files: every word that is
-/// not a program (`*.exe`), a switch or a cmd built-in counts as a file, quotes removed.
+/// not a program (`*.exe`), a switch or a cmd built-in counts as a file, quotes removed. (The
+/// programs themselves must touch only those files: see `run_list_programs`.)
 pub fn run_list_lines_independent(list: &str) -> bool {
     const SKIP: [&str; 12] = ["cmd", "/c", "del", "erase", "move", "copy", "ren", "rename", "rd", "rmdir", "md", "mkdir"];
     let mut seen = std::collections::HashSet::new();
@@ -871,6 +886,7 @@ mod tests {
         let line = |n: &str| format!("cmd /c \"\"{t}\\work\\fgpack.exe\" {n}.fgu {n}.fgr_&&del {n}.fgu&&\"{t}\\work\\x.exe\" -f -d -s {n}.fgr_ {n}.shapes.x {n}.shapes&&del {n}.fgr_ {n}.shapes.x\"\r\n");
         let fs22: String = ["0001", "0002", "0003"].iter().map(|n| line(n)).collect();
         assert!(run_list_lines_independent(&fs22));
+        assert_eq!(run_list_programs(&fs22), vec![format!("{t}\\work\\fgpack.exe"), format!("{t}\\work\\x.exe")]);
         // A line that works on another line's output must keep the list's own order and count.
         let chained = format!("{}cmd /c copy /b 0001.shapes+0002.shapes all.shapes\r\n", fs22);
         assert!(!run_list_lines_independent(&chained));

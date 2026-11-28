@@ -26,7 +26,7 @@ fn run() -> i32 {
         return 1;
     };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let Some(mut job) = understood(entry.role, &args) else {
+    let Some(mut job) = understood(entry.role, &args, &map) else {
         return run_original(&entry, None);
     };
     job.original = entry.original.clone();
@@ -116,18 +116,31 @@ impl Job {
 
 /// The command lines we do ourselves: exactly the forms the repacks use, with an input file
 /// that exists and an output that doesn't (the tools' own handling of other cases is theirs).
-fn understood(role: Role, args: &[OsString]) -> Option<Job> {
+fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
     let s: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
     if role == Role::RunExe {
         // run " " <url> <list> <N> [NAME=value ...]: only N below the CPU count, for a list whose
         // lines touch disjoint files, changes (to 0 = one per CPU).
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(64);
         let n: i64 = s.get(3)?.trim().parse().ok()?;
-        if !s[0].starts_with(' ') || n <= 0 || n as usize >= cpus {
+        // (N=1 may mean the lines must run one after the other.)
+        if !s[0].starts_with(' ') || n <= 1 || n as usize >= cpus {
             return None;
         }
         let text: String = std::fs::read(s[2]).ok()?.iter().map(|&b| b as char).collect();
         if !tools::run_list_lines_independent(&text) {
+            return None;
+        }
+        // Every program the lines run must touch only the files on its line: a tool with a
+        // fixed-name temp file (xtool's <exe>-vm.tmp) would collide with its other copies.
+        // (run.exe runs its lines in its own folder, which is ours.)
+        let here = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        let programs = tools::run_list_programs(&text);
+        if programs.is_empty() || !programs.iter().all(|p| {
+            let p = Path::new(p);
+            let p = if p.is_absolute() { p.to_path_buf() } else { here.join(p) };
+            tools::named_files_tool(&p, Some(map)).is_some()
+        }) {
             return None;
         }
         let mut wider = args.to_vec();
