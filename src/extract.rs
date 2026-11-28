@@ -630,7 +630,27 @@ static PROXY_FREED: std::sync::Condvar = std::sync::Condvar::new();
 ///   object (a probe/claim race), and the patched precomp.exe spills a record's output beyond
 ///   CLS.ini [Precomp] Memory (256 MiB after PrecompInit) to the fixed `<TempPath>\tempPrecomp.tmp`
 ///   (CREATE_ALWAYS, shared). Call of Duty: Black Ops runs two such blocks.
-const SPILLING_PROXIES: [&str; 3] = ["cls-magic2l", "cls-magicl", "cls-precomp"];
+/// - srep (cls-srep.dll's helper) swaps what doesn't fit in CLS.ini's [Srep] Memory to
+///   `<TempPath>\srep-virtual-memory.tmp` (_fsopen "w+b", shared): two swapping at once corrupt
+///   each other silently. Only blocks that will swap take `SREP_SWAP`, so the others still run
+///   side by side.
+const SPILLING_PROXIES: [&str; 4] = ["cls-magic2l", "cls-magicl", "cls-precomp", SREP_SWAP];
+
+/// The name a srep block that will swap holds exclusively (see `SPILLING_PROXIES`).
+const SREP_SWAP: &str = "srep-virtual-memory.tmp";
+
+/// Whether this block's srep needs more than CLS.ini lets it keep in memory ("mem900mb" in its
+/// method is what the compressor says decoding needs), so it swaps to its temp file.
+fn srep_will_swap(method: &str, cfg: &Config) -> bool {
+    let declared = crate::method::parse_chain(method)
+        .iter()
+        .filter(|m| m.name.eq_ignore_ascii_case("srep"))
+        .filter_map(|m| m.params.iter().find_map(|p| p.strip_prefix("mem").and_then(crate::method::parse_size)))
+        .max();
+    let Some(need) = declared else { return false };
+    let (_, physical) = crate::guard::memory();
+    crate::memlimit::srep_memory_mb(&cfg.codec_dir(), physical).is_some_and(|mb| need > mb << 20)
+}
 
 struct ProxyUse {
     /// Codec names, and whether this job holds each one exclusively.
@@ -738,6 +758,12 @@ fn proxy_codecs(job: &Job, cfg: &Config) -> Vec<String> {
         })
         .filter_map(|dll| dll.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
         .collect();
+    if let JobKind::Block(i) = job.kind
+        && names.iter().any(|n| n == "cls-srep")
+        && srep_will_swap(&job.archive.blocks[i].method, cfg)
+    {
+        names.push(SREP_SWAP.to_string());
+    }
     names.sort();
     names.dedup();
     names

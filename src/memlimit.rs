@@ -58,6 +58,26 @@ fn eval_mb(expr: &str, physical: u64) -> Option<u64> {
     Some(total.max(0) as u64)
 }
 
+/// srep's decode memory in MB as the installer's CLS.ini in `dir` sets it (`[Srep] Memory`,
+/// e.g. "60%-2048m"), on a PC with `physical` bytes of RAM. None if it isn't set.
+pub(crate) fn srep_memory_mb(dir: &Path, physical: u64) -> Option<u64> {
+    let bytes = std::fs::read(dir.join("CLS.ini")).ok()?;
+    let text: String = bytes.iter().map(|&b| b as char).collect();
+    let mut section = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            section = name.trim().to_ascii_lowercase();
+        } else if section == "srep"
+            && let Some((k, v)) = t.split_once('=')
+            && k.trim().eq_ignore_ascii_case("Memory")
+        {
+            return eval_mb(v, physical);
+        }
+    }
+    None
+}
+
 /// The lolz-family sections that take MaxMemoryUsage.
 const LOLZ_SECTIONS: [&str; 7] = ["magic", "magicl", "magic2", "magic2l", "lolly", "lollypop", "lollypop2"];
 
@@ -389,6 +409,15 @@ mod tests {
     use super::*;
 
     const GB: u64 = 1 << 30;
+
+    #[test]
+    fn srep_memory_from_cls_ini() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(srep_memory_mb(dir.path(), 16 * GB), None);
+        std::fs::write(dir.path().join("CLS.ini"), "[magic2]\r\nMemory=1g\r\n[Srep]\r\nTempPath=C:\\t\\\r\nMemory=60%-2048m\r\n").unwrap();
+        // 60% of 16 GB less 2 GB: 7782 MB (the [magic2] Memory isn't srep's).
+        assert_eq!(srep_memory_mb(dir.path(), 16 * GB), Some(16384 * 60 / 100 - 2048));
+    }
 
     #[test]
     fn fogg_memory() {
