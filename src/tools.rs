@@ -77,9 +77,9 @@ impl Role {
         matches!(self, Role::Xor | Role::Lz4Cli194 | Role::X2n | Role::FgpackSegLzma | Role::DelzoRestore)
     }
 
-    /// Leading command-line words that are a mode, not a file (delzo's `r`).
+    /// Leading command-line words that are a mode, not a file (delzo's `r`, Cricket fgpack's `e`).
     pub fn mode_words(self) -> usize {
-        matches!(self, Role::DelzoRestore) as usize
+        matches!(self, Role::DelzoRestore | Role::FgpackSegLzma) as usize
     }
 
     /// The original must stay in its own folder (renamed): FreeArc's console unarc finds arc.ini
@@ -883,12 +883,88 @@ pub fn is_dir_diff(diff: &Path) -> bool {
     head.get(nul + 1..nul + 3) == Some(&[1, 1][..])
 }
 
-/// The programs (`*.exe` words) the command lines of a run.exe list run, quotes removed.
+/// A piece of a run.exe list line as cmd sees it.
+#[derive(Debug, PartialEq)]
+enum Tok {
+    Word(String),
+    /// `&&` between two commands.
+    And,
+}
+
+/// One list line split the way cmd splits it, or None for what this doesn't follow (a single
+/// `&`, `|`, `^`, brackets). run.exe's `@` prefix goes; in `cmd /c "..."` cmd drops the first
+/// quote and the last one; then words end at blanks (and at `+` when `plus`: `copy /b a+b c`)
+/// outside quotes, with the quotes removed, and `&&` separates commands. `2>&1` stays a word.
+fn list_tokens(line: &str, plus: bool) -> Option<Vec<Tok>> {
+    let line = line.trim().trim_start_matches('@').trim_start();
+    let mut toks = Vec::new();
+    let mut rest = line.to_string();
+    let lower = line.to_ascii_lowercase();
+    for prefix in ["cmd /c ", "cmd.exe /c "] {
+        if lower.starts_with(prefix) {
+            toks.push(Tok::Word(line[..prefix.len() - 4].trim().to_string()));
+            toks.push(Tok::Word("/c".into()));
+            let mut r = line[prefix.len()..].trim_start().to_string();
+            if r.starts_with('"') {
+                r.remove(0);
+                if let Some(i) = r.rfind('"') {
+                    r.remove(i);
+                }
+            }
+            rest = r;
+            break;
+        }
+    }
+    let (mut word, mut quoted, mut any) = (String::new(), false, false);
+    let mut chars = rest.chars().peekable();
+    let end = |word: &mut String, any: &mut bool, toks: &mut Vec<Tok>| {
+        if *any {
+            toks.push(Tok::Word(std::mem::take(word)));
+            *any = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            quoted = !quoted;
+            any = true;
+            continue;
+        }
+        if quoted {
+            word.push(c);
+            continue;
+        }
+        match c {
+            c if c.is_whitespace() => end(&mut word, &mut any, &mut toks),
+            '+' if plus => end(&mut word, &mut any, &mut toks),
+            '&' if chars.peek() == Some(&'&') => {
+                chars.next();
+                end(&mut word, &mut any, &mut toks);
+                toks.push(Tok::And);
+            }
+            // `2>&1`, `1>&2`: a handle, part of the redirection.
+            '&' if word.ends_with('>') => word.push(c),
+            '&' | '|' | '^' | '(' | ')' => return None,
+            _ => {
+                word.push(c);
+                any = true;
+            }
+        }
+    }
+    end(&mut word, &mut any, &mut toks);
+    Some(toks)
+}
+
+/// The programs (`*.exe` words) the command lines of a run.exe list run.
 pub fn run_list_programs(list: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for w in list.replace('"', " ").replace("&&", " ").split_whitespace() {
-        if w.to_ascii_lowercase().ends_with(".exe") && !out.iter().any(|o| o.eq_ignore_ascii_case(w)) {
-            out.push(w.to_string());
+    for line in run_list_lines(list) {
+        for t in list_tokens(line, false).unwrap_or_default() {
+            if let Tok::Word(w) = t
+                && w.to_ascii_lowercase().ends_with(".exe")
+                && !out.iter().any(|o| o.eq_ignore_ascii_case(&w))
+            {
+                out.push(w);
+            }
         }
     }
     out
@@ -903,56 +979,112 @@ fn run_list_lines(list: &str) -> impl Iterator<Item = &str> {
 /// (lzma's `e`; see `named_files_tool`).
 pub type ModeWords<'a> = &'a dyn Fn(&str) -> usize;
 
-/// The files one command line of a run.exe list names: every word that is not a program
-/// (`*.exe`), one of its mode words, a switch or a cmd built-in, quotes removed, and the
-/// targets of redirections (`echo 123>1.test`; `>nul` and `2>&1` name none). None if the line
-/// uses an environment variable (run.exe expands them), which hides what it touches.
+/// The files one command line of a run.exe list names, or None if it can't be told (then the
+/// list is left as it is). Each command (the line's first, and each after `&&`) must be a
+/// program (`*.exe`, which `run_list_programs` vets) or one of cmd's del/copy/move/ren/echo;
+/// anything else (md, rd, cd, call, for, a .bat) makes it None, as do variables (run.exe
+/// expands them) and wildcards. Every other word is a file, except a program's mode words and
+/// switches; a redirection names the files on both sides (`base.dat>nul`, `echo 1>a.log`), but
+/// not nul or a handle (`2>&1`).
 fn run_line_files(line: &str, modes: ModeWords) -> Option<Vec<String>> {
-    const SKIP: [&str; 13] = ["cmd", "/c", "del", "erase", "move", "copy", "ren", "rename", "rd", "rmdir", "md", "mkdir", "echo"];
-    if line.contains('%') {
+    const BUILTINS: [&str; 7] = ["del", "erase", "move", "copy", "ren", "rename", "echo"];
+    if line.contains(['%', '*', '?']) {
         return None;
     }
-    let (mut out, mut mode_words) = (Vec::new(), 0);
-    // (`copy /b a+b c`: '+' joins file names.)
-    for w in line.replace('"', " ").replace("&&", " ").replace('+', " ").split_whitespace() {
-        let redirected = w.contains(['>', '<']);
-        if !redirected && w.to_ascii_lowercase().ends_with(".exe") {
-            mode_words = modes(w);
+    let (mut out, mut mode_words, mut at_command, mut echo) = (Vec::new(), 0usize, true, false);
+    for t in list_tokens(line, true)? {
+        let w = match t {
+            Tok::And => {
+                (at_command, mode_words, echo) = (true, 0, false);
+                continue;
+            }
+            Tok::Word(w) => w,
+        };
+        let lw = w.to_ascii_lowercase();
+        if at_command {
+            // (`cmd /c`: the command comes after it.)
+            if lw == "cmd" || lw == "cmd.exe" || lw == "/c" {
+                continue;
+            }
+            at_command = false;
+            if lw.ends_with(".exe") && !lw.contains(['>', '<']) {
+                mode_words = modes(&w);
+                continue;
+            }
+            if BUILTINS.contains(&lw.as_str()) {
+                echo = lw == "echo";
+                continue;
+            }
+            return None;
+        }
+        if lw.contains(['>', '<']) {
+            let parts: Vec<&str> = w.split(['>', '<']).collect();
+            for part in parts {
+                let part = part.trim_start_matches('&');
+                let lp = part.to_ascii_lowercase();
+                // A handle number (`2>`, `>&1`), nul, or echo's text before the `>`.
+                if part.is_empty() || lp == "nul" || part.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                if [".exe", ".bat", ".cmd", ".com"].iter().any(|e| lp.ends_with(e)) {
+                    return None;
+                }
+                out.push(part.to_string());
+            }
             continue;
         }
-        if mode_words > 0 && !redirected && !w.starts_with('-') && !w.starts_with('/') {
+        if echo {
+            // echo's own words are text, not files.
+            continue;
+        }
+        if mode_words > 0 && !w.starts_with('-') && !w.starts_with('/') {
             mode_words -= 1;
             continue;
         }
-        // `echo 123>1.test`: the part before the operator is the command's argument.
-        let parts: Vec<&str> = if redirected { w.split(['>', '<']).skip(1).collect() } else { vec![w] };
-        for part in parts {
-            let part = part.trim_start_matches('&');
-            let lp = part.to_ascii_lowercase();
-            if part.is_empty() || lp == "nul" || part.chars().all(|c| c.is_ascii_digit()) || part.contains(['|', '&']) {
-                continue;
-            }
-            if !redirected && (lp.starts_with('-') || lp.starts_with('/') || lp.ends_with(".exe") || SKIP.contains(&lp.as_str())) {
-                continue;
-            }
-            out.push(part.to_string());
+        if w.starts_with('-') || (w.starts_with('/') && w.len() <= 3) {
+            continue;
         }
+        out.push(w);
     }
     Some(out)
 }
 
 /// Whether the command lines of a run.exe list touch disjoint sets of files (`run_line_files`;
-/// the programs themselves must touch only those files: see `run_list_programs`).
+/// the programs themselves must touch only those files: see `run_list_programs`). Two lines
+/// share a file when they name the same file name, or the same path, or one names a folder the
+/// other names something in.
 pub fn run_list_lines_independent(list: &str, modes: ModeWords) -> bool {
-    let mut seen = std::collections::HashSet::new();
+    use std::collections::HashSet;
+    let (mut names, mut paths, mut folders) = (HashSet::new(), HashSet::new(), HashSet::new());
+    let norm = |w: &str| {
+        let p = w.to_ascii_lowercase().replace('/', "\\");
+        let p = p.trim_end_matches('\\');
+        p.strip_prefix(".\\").unwrap_or(p).to_string()
+    };
     for line in run_list_lines(list) {
         let Some(files) = run_line_files(line, modes) else { return false };
-        let mine: std::collections::HashSet<String> =
-            files.iter().map(|w| w.to_ascii_lowercase().rsplit(['\\', '/']).next().unwrap_or("").to_string()).collect();
-        if mine.iter().any(|n| seen.contains(n)) {
-            return false;
+        let mine: Vec<String> = files.iter().map(|w| norm(w)).collect();
+        for p in &mine {
+            let name = p.rsplit('\\').next().unwrap_or("");
+            let mut up = p.as_str();
+            let mut inside_one = false;
+            while let Some((parent, _)) = up.rsplit_once('\\') {
+                inside_one |= paths.contains(parent);
+                up = parent;
+            }
+            if names.contains(name) || paths.contains(p) || folders.contains(p) || inside_one {
+                return false;
+            }
         }
-        seen.extend(mine);
+        for p in mine {
+            let mut up = p.as_str();
+            while let Some((parent, _)) = up.rsplit_once('\\') {
+                folders.insert(parent.to_string());
+                up = parent;
+            }
+            names.insert(p.rsplit('\\').next().unwrap_or("").to_string());
+            paths.insert(p);
+        }
     }
     true
 }
@@ -1005,6 +1137,19 @@ pub fn run_list_largest_first(list: &[u8], cwd: &Path, modes: ModeWords) -> Opti
 // runs N chunks on N new threads, waits for all, writes them, and goes on: a batch lasts as long
 // as its largest chunk, so Far Cry 3 got about 3 of 16 threads busy for 408 s.
 
+/// A stand-in declining a job it could do but that isn't worth it (small, no room): the
+/// original runs, and the log doesn't call it a failure.
+#[derive(Debug)]
+pub struct LeftToOriginal(pub String);
+
+impl std::fmt::Display for LeftToOriginal {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LeftToOriginal {}
+
 /// The parts of a delzo .fgu.
 struct Fgu {
     max_chunk: u32,
@@ -1053,9 +1198,13 @@ pub fn delzo_parallel(fgu_path: &Path, dat: &Path, fat_path: &Path, original: &P
     let (read, out): (u64, u64) = chunks.iter().fold((0, 0), |a, c| (a.0 + c.0, a.1 + c.1));
     ensure!(out == fgu.dat_len, "chunk sizes add up to {out}, the .dat was {}", fgu.dat_len);
     ensure!(std::fs::metadata(fgu_path)?.len() == fgu.data_start + read, "the .fgu's data doesn't match its tables");
-    ensure!(read >= 32 << 20 && n >= 64, "small: left to the original");
-    if let Some(free) = crate::guard::free_space(dat.parent().unwrap_or(Path::new("."))) {
-        ensure!(free > 2 * read + out + (1 << 30), "not enough free space for the pieces");
+    if read < 32 << 20 || n < 64 {
+        return Err(LeftToOriginal("small".into()).into());
+    }
+    if let Some(free) = crate::guard::free_space(dat.parent().unwrap_or(Path::new(".")))
+        && free <= 2 * read + out + (1 << 30)
+    {
+        return Err(LeftToOriginal("not enough free space for the pieces".into()).into());
     }
     // Contiguous chunk ranges of about equal input size.
     let k = cpus.clamp(1, 64).min(n);
@@ -1133,13 +1282,17 @@ pub fn delzo_parallel(fgu_path: &Path, dat: &Path, fat_path: &Path, original: &P
             std::io::copy(&mut std::fs::File::open(pdat)?, &mut out)?;
         }
         out.flush()?;
-        std::fs::write(fat_path, &fgu.fat)?;
+        // (In verify mode the original has written it already: left alone when it's the same.)
+        if std::fs::read(fat_path).ok().as_deref() != Some(&fgu.fat[..]) {
+            std::fs::write(fat_path, &fgu.fat)?;
+        }
         Ok(())
     })();
     cleanup();
     if let Err(e) = result {
+        // (Only the .dat: the original, run next, writes the .fat again, and in verify mode
+        // the .fat is the original's own.)
         let _ = std::fs::remove_file(dat);
-        let _ = std::fs::remove_file(fat_path);
         return Err(e);
     }
     Ok(format!("{n} chunks, {} MB, in {} pieces", read >> 20, ranges.len()))
@@ -1192,6 +1345,19 @@ mod tests {
         assert!(!run_list_lines_independent(cricket, &none));
         // run.exe expands variables: what such a line touches isn't known here.
         assert!(!run_list_lines_independent("tool.exe %TEMP%\\a b\r\n", &none));
+        // Nor folder commands, wildcards, a single & or a glued program.
+        let x = |rest: &str| format!("cmd /c \"\"w\\x.exe\" -f -d -s {rest}\"\r\n");
+        assert!(!run_list_lines_independent(&format!("cmd /c \"md out\"\r\n{}", x("1.bin 1.x out\\1.bin")), &none));
+        assert!(!run_list_lines_independent(&x("*.bin 1.x 1.out"), &none));
+        assert!(!run_list_lines_independent(&format!("{}cmd /c \"del a.bin&del b.bin\"\r\n", x("1.bin 1.x 1.out")), &none));
+        assert!(!run_list_lines_independent("cmd /c \"w\\tool.exe>nul a b\"\r\n", &none));
+        // A folder one line names and a file in it another line names.
+        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x out\\1.bin"), x("2.bin 2.x out")), &none));
+        assert!(!run_list_lines_independent(&format!("{}{}", x("1.bin 1.x base.dat>nul"), x("base.dat 2.x 2.out")), &none));
+        // A quoted path with a blank is one word (a user name with a space).
+        let spaced = "cmd /c \"\"C:\\Users\\John Smith\\tmp\\work\\x.exe\" -f -d -s 1.fgr 1.x 1.out&&del 1.fgr\"\r\ncmd /c \"\"C:\\Users\\John Smith\\tmp\\work\\x.exe\" -f -d -s 2.fgr 2.x 2.out&&del 2.fgr\"\r\n";
+        assert!(run_list_lines_independent(spaced, &none));
+        assert_eq!(run_list_programs(spaced), vec!["C:\\Users\\John Smith\\tmp\\work\\x.exe".to_string()]);
     }
 
     #[test]

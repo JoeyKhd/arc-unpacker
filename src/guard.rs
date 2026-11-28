@@ -363,6 +363,8 @@ mod imp {
     /// Free bytes on the volume holding `path` (or its nearest existing ancestor).
     pub fn free_space(path: &std::path::Path) -> Option<u64> {
         use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        // (A bare file name's parent is "": the current folder.)
+        let path = if path.as_os_str().is_empty() { std::path::Path::new(".") } else { path };
         let abs = std::path::absolute(path).ok()?;
         let existing = abs.ancestors().find(|p| p.exists())?;
         let w = wide(existing.as_os_str());

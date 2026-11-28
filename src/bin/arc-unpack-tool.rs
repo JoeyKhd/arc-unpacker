@@ -41,7 +41,12 @@ fn run() -> i32 {
         // The original does the patch, without re-reading unchanged files; its exit code is ours.
         return match std::process::Command::new(&job.original).args(&job.args).status() {
             Ok(st) => {
-                let note = format!("{} native {:.1} s {} (with -C-new: unchanged files not re-read)", entry.role.name(), started.elapsed().as_secs_f64(), job.output.display());
+                let secs = started.elapsed().as_secs_f64();
+                let note = if st.success() {
+                    format!("{} native {secs:.1} s {} (with -C-new: unchanged files not re-read)", entry.role.name(), job.output.display())
+                } else {
+                    format!("{} (the original, with -C-new) exited with {:?} after {secs:.1} s: {}", entry.role.name(), st.code(), job.output.display())
+                };
                 log(&map, "log", &note);
                 st.code().unwrap_or(1)
             }
@@ -78,7 +83,11 @@ fn run() -> i32 {
             if job.output.is_file() {
                 let _ = std::fs::remove_file(&job.output);
             }
-            log(&map, "log", &format!("{} failed ({e:#}), running the original: {}", entry.role.name(), job.input.display()));
+            let what = match e.downcast_ref::<tools::LeftToOriginal>() {
+                Some(why) => format!("{} left to the original ({why})", entry.role.name()),
+                None => format!("{} failed ({e:#}), running the original", entry.role.name()),
+            };
+            log(&map, "log", &format!("{what}: {}", job.input.display()));
             run_original(&entry, None)
         }
     }
