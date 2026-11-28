@@ -37,6 +37,20 @@ fn run() -> i32 {
         return run_verified(&entry, &map, &job);
     }
     let started = Instant::now();
+    if job.role == Role::X5nDirPatch {
+        // The original does the patch, without re-reading unchanged files; its exit code is ours.
+        return match std::process::Command::new(&job.original).args(&job.args).status() {
+            Ok(st) => {
+                let note = format!("{} native {:.1} s {} (with -C-new: unchanged files not re-read)", entry.role.name(), started.elapsed().as_secs_f64(), job.output.display());
+                log(&map, "log", &note);
+                st.code().unwrap_or(1)
+            }
+            Err(e) => {
+                log(&map, "log", &format!("{} failed to start ({e}), running the original: {}", entry.role.name(), job.output.display()));
+                run_original(&entry, None)
+            }
+        };
+    }
     // An x2n map that doesn't check out stays the original's, before anything is touched.
     let plan = match job.role {
         Role::X2n => match tools::x2n_plan(&job.input, job.extra.as_deref().unwrap_or(Path::new(""))) {
@@ -105,6 +119,7 @@ impl Job {
             }
             Role::FgpackSegLzma => tools::fgpack_parallel(&self.input, &self.output, &self.original, threads),
             Role::FreeArcUnarc => tools::freearc_extract(&self.input, &self.output, &self.original),
+            Role::X5nDirPatch => anyhow::bail!("run by run() itself"),
             Role::RunExe => {
                 // (Its exit code is always 0; once it has started, its lines have run: no fallback.)
                 std::process::Command::new(&self.original).args(&self.args).status()?;
@@ -118,6 +133,39 @@ impl Job {
 /// that exists and an output that doesn't (the tools' own handling of other cases is theirs).
 fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
     let s: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
+    if role == Role::X5nDirPatch {
+        // hpatchz [-s-<size> | -m] [-f] [-n-<n>] <old> <diff> <new>, patching a folder in place
+        // (old and new the same folder) from a directory diff, without a -C option of its own.
+        let mut paths = Vec::new();
+        for a in &s {
+            if a.starts_with('-') {
+                let known = a.starts_with("-s-") || *a == "-s" || *a == "-m" || *a == "-f" || a.starts_with("-n-");
+                if !known {
+                    return None;
+                }
+            } else {
+                paths.push(*a);
+            }
+        }
+        let [old, diff, new] = paths[..] else { return None };
+        let abs = |p: &str| std::path::absolute(p).ok();
+        if abs(old).is_none() || abs(old) != abs(new) || !Path::new(old).is_dir() || !tools::is_dir_diff(Path::new(diff)) {
+            return None;
+        }
+        let mut with = vec![OsString::from("-C-new")];
+        with.extend(args.iter().cloned());
+        return Some(Job {
+            role,
+            input: PathBuf::from(diff),
+            output: PathBuf::from(new),
+            key: Vec::new(),
+            output_arg: usize::MAX,
+            in_place: true,
+            extra: None,
+            original: PathBuf::new(),
+            args: with,
+        });
+    }
     if role == Role::RunExe {
         // run " " <url> <list> <N> [NAME=value ...]: only N below the CPU count, for a list whose
         // lines touch disjoint files, changes (to 0 = one per CPU).

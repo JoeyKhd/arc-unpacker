@@ -30,6 +30,10 @@
 //! - FitGirl's run.exe: `run " " <url> <list> <N>` runs the list's command lines N at a time
 //!   (0 = one per CPU). Farming Simulator 22 passes N=4 for 2,155 independent lines. When N is
 //!   below the CPU count and no two lines name the same file, the original runs with N=0.
+//! - HDiffPatch's hpatchz 4.8.0 (x5n.exe), patching a folder in place (`x5n -s-2g -f . d .`): by
+//!   default it reads every unchanged file in full only to checksum it before keeping it. The
+//!   original runs with `-C-new` added, which skips that read; the patched files are the same
+//!   (the bytes come from the diff). Source: HDiffPatch, dir_patch / new_dir_output.c.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -44,6 +48,7 @@ pub enum Role {
     FgpackSegLzma,
     FreeArcUnarc,
     RunExe,
+    X5nDirPatch,
 }
 
 impl Role {
@@ -55,7 +60,15 @@ impl Role {
             Role::FgpackSegLzma => "fgpack-seg-lzma",
             Role::FreeArcUnarc => "freearc-unarc-0.67",
             Role::RunExe => "fitgirl-run",
+            Role::X5nDirPatch => "hpatchz-4.8.0",
         }
+    }
+
+    /// Whether its job touches only the files its command line names, so that steps running it
+    /// may run beside each other (install.rs `overlap_paths`). Not FreeArc's unarc (it writes an
+    /// archive's files), run.exe (it runs a whole list) or x5n (it patches a folder).
+    pub fn touches_only_named_files(self) -> bool {
+        matches!(self, Role::Xor | Role::Lz4Cli194 | Role::X2n | Role::FgpackSegLzma)
     }
 
     /// The original must stay in its own folder (renamed): FreeArc's console unarc finds arc.ini
@@ -78,6 +91,7 @@ const KNOWN: &[(u64, &str, Role)] = &[
     (205312, "f6594b8f7773a9223bc7f1c5c3ecf9971c4988ee34db6321a13673511cdde665", Role::FgpackSegLzma),
     (333312, "09ea4478b379a1839e21896a8b3fd82b4adf81c1b2b387795abefe5df3e57549", Role::FreeArcUnarc),
     (81920, "3243562d5d0685b57bc237b24f254d1d18d6abcb1f8ddac2698c2d9208c76247", Role::RunExe),
+    (436736, "234168f765294a5db867163e639c9288f04f976976bdf80da29fbba9eae39917", Role::X5nDirPatch),
 ];
 
 /// Repack tools that touch only the files named on their command line: no fixed-name temp
@@ -104,8 +118,8 @@ const OVERLAP_SAFE: &[(u64, &str)] = &[
 /// If `path` is a tool in `OVERLAP_SAFE` or a stand-in listed in `map`: how many leading
 /// arguments are not file names (raw2hif's mode word, `d9`). None for any other program.
 pub fn named_files_tool(path: &Path, map: Option<&Path>) -> Option<usize> {
-    if map.is_some_and(|m| lookup(m, path).is_some()) {
-        return Some(0);
+    if let Some(e) = map.and_then(|m| lookup(m, path)) {
+        return e.role.touches_only_named_files().then_some(0);
     }
     let meta = std::fs::metadata(path).ok()?;
     if !OVERLAP_SAFE.iter().any(|k| k.0 == meta.len()) {
@@ -839,6 +853,19 @@ pub fn freearc_extract(archive: &Path, out: &Path, original: &Path) -> Result<St
 // ---------------------------------------------------------------------------------------------
 // FitGirl's run.exe (see the module doc).
 
+/// Whether `diff` is an HDiffPatch directory diff ("HDIFF19&..." and a NUL byte, then the varints
+/// oldPathIsDir and newPathIsDir, both 1).
+pub fn is_dir_diff(diff: &Path) -> bool {
+    let mut head = [0u8; 64];
+    let n = std::fs::File::open(diff).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    let head = &head[..n];
+    if !head.starts_with(b"HDIFF19&") {
+        return false;
+    }
+    let Some(nul) = head.iter().position(|&b| b == 0) else { return false };
+    head.get(nul + 1..nul + 3) == Some(&[1, 1][..])
+}
+
 /// The programs (`*.exe` words) the command lines of a run.exe list run, quotes removed.
 pub fn run_list_programs(list: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -878,6 +905,27 @@ pub fn run_list_lines_independent(list: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hdiffpatch_directory_diffs() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("new.x5n");
+        let with = |flags: [u8; 2]| {
+            let mut h = b"HDIFF19&zstd&fadler64".to_vec();
+            h.push(0);
+            h.extend(flags);
+            h.extend([7u8; 20]);
+            std::fs::write(&f, &h).unwrap();
+            is_dir_diff(&f)
+        };
+        assert!(with([1, 1]), "folder to folder");
+        assert!(!with([0, 1]), "file to folder");
+        std::fs::write(&f, b"HDIFF13&zstd").unwrap();
+        assert!(!is_dir_diff(&f), "a single-file diff");
+        // Only the tools that touch just their named files may run beside other steps.
+        assert!(Role::X2n.touches_only_named_files() && !Role::FreeArcUnarc.touches_only_named_files());
+        assert!(!Role::RunExe.touches_only_named_files() && !Role::X5nDirPatch.touches_only_named_files());
+    }
 
     #[test]
     fn run_lists_with_independent_lines() {
