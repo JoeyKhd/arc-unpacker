@@ -41,9 +41,16 @@ const END: u8 = 3;
 /// Probabilities per size model, and models: 21 decoder-thread slots and the header size.
 const MODEL: usize = 69;
 const NMODELS: usize = 22;
-/// A coded block bigger than this isn't held in memory (nor one bigger than the memory budget,
-/// `budget()`): the rest goes to one cls-zstd. Dark Souls Remastered's first video is 295 MB.
+/// A coded block bigger than this is never held in memory: the rest goes to one cls-zstd.
 const BLOCK_MAX: u64 = 1 << 30;
+
+/// The biggest coded block the split holds, for a memory budget: a group is charged 2.25 times
+/// its input (input plus the output estimate), so at 4/9 of the budget one block's charge still
+/// fits in it; never less than 256 MiB (a block that big then goes when it is in turn, as in
+/// 1.0.6). Dark Souls Remastered's first video is 295 MB; at the usual 1 GiB budget this is 455 MiB.
+fn block_max(budget: u64) -> u64 {
+    (budget / 9 * 4).clamp(256 << 20, BLOCK_MAX)
+}
 /// Input bytes of whole coded blocks given to one process. The first groups are smaller, so a
 /// short stream starts at once.
 const GROUP: usize = 32 << 20;
@@ -403,7 +410,7 @@ pub fn run(
     let budget = budget();
     let dispatcher = move || -> Result<()> {
         let r = match probe(input) {
-            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, budget.min(BLOCK_MAX), &spawn, &coord2, &abort2, &label2),
+            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, block_max(budget), &spawn, &coord2, &abort2, &label2),
             Ok(Plan::Single { reason, replay }) => {
                 eprintln!("note: {label2}: not split ({reason}); one cls-zstd decodes it");
                 let mut s = coord2.s.lock().unwrap();
@@ -579,6 +586,8 @@ fn dispatch(
                     group.reserve_exact(limit.max(blk.len()) + 1);
                 }
                 group.append(&mut blk);
+                // (`append` keeps blk's room: let it go before flush may wait for its turn.)
+                drop(blk);
                 if group.len() >= limit {
                     flush(&mut group, &mut item)?;
                     limit = (limit * 2).min(GROUP);
@@ -961,6 +970,18 @@ mod tests {
             Ok(v)
         })();
         (r, spawned.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn a_block_fits_its_budget() {
+        // One block's charge (input plus a quarter more for the output) fits in the budget.
+        for budget in [256u64 << 20, 512 << 20, 1 << 30] {
+            let b = block_max(budget);
+            assert!(b >= 256 << 20, "never below 1.0.6's limit");
+            assert!(b == 256 << 20 || b + b * 5 / 4 < budget, "{budget}: {b}");
+        }
+        // Dark Souls Remastered's 295 MB first video at the usual 1 GiB budget.
+        assert!(block_max(1 << 30) > 295_000_000);
     }
 
     #[test]
