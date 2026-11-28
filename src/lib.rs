@@ -24,3 +24,4 @@ pub mod stage;
 pub mod tools;
 pub mod uninstall;
 pub mod xtsplit;
+pub mod zstdrec;

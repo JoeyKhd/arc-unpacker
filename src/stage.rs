@@ -588,6 +588,18 @@ fn external(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
 /// `external` on a stream already tee'd.
 fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream> {
     if !spec.header && !spec.input_file && !spec.output_file {
+        // zstdrec: done here with the repack's libzstd.dll, on every core.
+        if let Some(dll) = crate::zstdrec::known(&spec.argv) {
+            match crate::zstdrec::open(&dll) {
+                Ok(lib) => {
+                    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                    let (reg, native, label) = (ctx.reg.clone(), ctx.reg.native.clone(), format!("{} (in arc-unpack)", spec.label));
+                    let report = move |cpu: f64, wall: f64| native.lock().unwrap().push((label.clone(), cpu, wall));
+                    return Ok(crate::zstdrec::run(&lib, input, threads, move |l, f| reg.worker(l, f), report));
+                }
+                Err(e) => eprintln!("note: {}: {e:#}; zstdrec.exe decodes it", spec.label),
+            }
+        }
         // xtool restores one chunk at a time: give whole chunks to several xtool processes.
         let workers = crate::xtsplit::workers();
         if workers > 1 && crate::xtsplit::is_stream_decode(&spec.argv) {
