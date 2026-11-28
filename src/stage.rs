@@ -809,13 +809,6 @@ fn precomp_split(spec: ExtSpec, exe: PathBuf, input: Stream, ctx: &Ctx) -> Resul
 /// `bikzsplit`).
 fn bink_split(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
     let input = tee_if_requested(&spec, input)?;
-    let rest = match crate::bikzsplit::probe(input)? {
-        crate::bikzsplit::Plan::Split { rest } => rest,
-        crate::bikzsplit::Plan::Single { reason, replay } => {
-            eprintln!("note: {}: not split ({reason}); one cls-zstd decodes it", spec.label);
-            return external_untee(spec, replay, ctx);
-        }
-    };
     let mut base = spec.clone();
     base.label = format!("{} (split)", spec.label);
     let ctx2 = ctx.clone();
@@ -839,7 +832,8 @@ fn bink_split(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
     let single: crate::bikzsplit::Single = Box::new(move |s: Stream| external_untee(one.clone(), s, &ctx3));
     let (reg, reg2) = (ctx.reg.clone(), ctx.reg.clone());
     let workers = crate::bikzsplit::workers();
-    crate::bikzsplit::run(rest, workers, spawn, single, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
+    let aborted = ctx.reg.aborted.clone();
+    crate::bikzsplit::run(input, workers, spawn, single, aborted, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
 }
 
 /// Decodes an xtool stream with up to `workers` xtool processes (see `xtsplit`).

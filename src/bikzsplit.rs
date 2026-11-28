@@ -86,7 +86,7 @@ fn budget() -> u64 {
     b.max(256 << 20)
 }
 
-pub enum Plan {
+enum Plan {
     /// A cls-zstd stream: the blocks after its magic.
     Split { rest: Stream },
     /// Something else: one cls-zstd decodes it. The bytes already read are put back in front.
@@ -110,7 +110,7 @@ fn read_exact_into(input: &mut Stream, buf: &mut Vec<u8>, n: usize) -> io::Resul
 }
 
 /// Reads the stream's magic and first block start and decides whether to split.
-pub fn probe(mut input: Stream) -> Result<Plan> {
+fn probe(mut input: Stream) -> Result<Plan> {
     let mut got = Vec::with_capacity(9);
     let reason = if !read_exact_into(&mut input, &mut got, 5)? {
         Some("too short")
@@ -309,10 +309,12 @@ fn next_head(input: &mut Stream, head: &mut Vec<u8>) -> io::Result<std::result::
     Ok(Ok(true))
 }
 
+/// Writes a process's whole input and closes it.
+pub type Feed = Box<dyn FnOnce(&[u8]) -> io::Result<()> + Send>;
+
 /// One cls-zstd process.
 pub struct Worker {
-    /// Writes the process's whole input and closes it.
-    pub input: Box<dyn FnOnce(&[u8]) -> io::Result<()> + Send>,
+    pub input: Feed,
     pub output: Box<dyn Read + Send>,
     /// Waits for the process to end: the error for a failed exit.
     pub wait: Box<dyn FnOnce() -> Result<()> + Send>,
@@ -350,15 +352,18 @@ impl Coord {
     }
 }
 
-/// Decodes `rest` (the blocks after the stream's magic) with one process per group of whole
-/// coded blocks, at most `max_workers` at a time, started by `spawn`; stored blocks are passed on
-/// here, and from anything unexpected on the rest goes to `single`. `abort` stops every process
-/// of the block (on any failure).
+/// Decodes a cls-zstd stream with one process per group of whole coded blocks, at most
+/// `max_workers` at a time, started by `spawn`; stored blocks are passed on here, and from
+/// anything unexpected on (a stream of another kind: all of it) the rest goes to `single`.
+/// `abort` stops every process of the block (on any failure); `aborted` says it was stopped.
+/// The stream is read on its own thread only, so this returns at once.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
-    rest: Stream,
+    input: Stream,
     max_workers: usize,
     spawn: impl Fn(u64) -> Result<Worker> + Send + 'static,
     single: Single,
+    aborted: Arc<AtomicBool>,
     abort: impl Fn() + Send + Sync + 'static,
     run_thread: impl Fn(String, Box<dyn FnOnce() -> Result<()> + Send>),
     label: &str,
@@ -368,7 +373,18 @@ pub fn run(
     let (coord2, abort2, label2) = (coord.clone(), abort.clone(), label.to_string());
     let budget = budget();
     let dispatcher = move || -> Result<()> {
-        let r = dispatch(rest, max_workers, budget, &spawn, &coord2, &abort2, &label2);
+        let r = match probe(input) {
+            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, &spawn, &coord2, &aborted, &abort2, &label2),
+            Ok(Plan::Single { reason, replay }) => {
+                eprintln!("note: {label2}: not split ({reason}); one cls-zstd decodes it");
+                let mut s = coord2.s.lock().unwrap();
+                s.rest = Some((0, replay));
+                s.items = Some(1);
+                coord2.cv.notify_all();
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
         if let Err(e) = &r {
             coord2.fail(format!("{e:#}"));
             abort2();
@@ -379,27 +395,29 @@ pub fn run(
     Ok(Box::new(Output { coord, single, cur: None }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     mut input: Stream,
     max_workers: usize,
     budget: u64,
     spawn: &dyn Fn(u64) -> Result<Worker>,
     coord: &Arc<Coord>,
+    aborted: &Arc<AtomicBool>,
     abort: &Arc<dyn Fn() + Send + Sync>,
     label: &str,
 ) -> Result<()> {
     let mut item = 0u64;
-    let mut group: Vec<u8> = Vec::new();
+    // The group being gathered, as its process input: the magic, then whole blocks.
+    let mut group: Vec<u8> = MAGIC.to_vec();
     let mut limit = FIRST_GROUP;
-    // Hands out the group being gathered (its process input: magic, blocks, end byte).
+    // Hands out the group with the end byte, and starts a fresh buffer (so a far bigger video
+    // doesn't keep its room).
     let flush = |group: &mut Vec<u8>, item: &mut u64| -> Result<()> {
-        if group.is_empty() {
+        if group.len() == MAGIC.len() {
             return Ok(());
         }
-        let mut data = Vec::with_capacity(MAGIC.len() + group.len() + 1);
-        data.extend_from_slice(MAGIC);
-        data.append(group);
-        data.push(END);
+        group.push(END);
+        let data = std::mem::replace(group, MAGIC.to_vec());
         // Output estimate: Bink files come out about a fifth bigger.
         let (inlen, est) = (data.len() as u64, data.len() as u64 * 5 / 4);
         {
@@ -419,7 +437,7 @@ fn dispatch(
         }
         let wk = spawn(*item)?;
         let n = *item;
-        let (coord3, abort3, mut output, wait) = (coord.clone(), abort.clone(), wk.output, wk.wait);
+        let (coord3, aborted3, abort3, mut output, wait) = (coord.clone(), aborted.clone(), abort.clone(), wk.output, wk.wait);
         std::thread::Builder::new()
             .name(format!("{label} blocks {n}"))
             .spawn(move || {
@@ -438,6 +456,10 @@ fn dispatch(
                         s.done.insert(n, out);
                         coord3.cv.notify_all();
                     }
+                    // Killed with the rest of the block (stopped, or another stage failed): that
+                    // says nothing about the split, whose own failure sets this before it stops
+                    // the block.
+                    Err(_) if aborted3.load(Ordering::Relaxed) => coord3.fail("stopped".into()),
                     Err(e) => {
                         DISABLED.store(true, Ordering::Relaxed);
                         coord3.fail(format!("{e:#}"));
@@ -474,15 +496,19 @@ fn dispatch(
         Ok(())
     };
     // Passes output on as it is (stored blocks), after the group before it.
-    let emit = |data: Vec<u8>, item: &mut u64| {
+    let emit = |data: Vec<u8>, item: &mut u64| -> Result<()> {
         let mut s = coord.s.lock().unwrap();
         while s.pending > 0 && s.pending + data.len() as u64 > budget && *item != s.next_out && s.failed.is_none() {
             s = coord.cv.wait(s).unwrap();
+        }
+        if let Some(f) = &s.failed {
+            bail!("{f}");
         }
         s.pending += data.len() as u64;
         s.done.insert(*item, data);
         coord.cv.notify_all();
         *item += 1;
+        Ok(())
     };
     let mut head = Vec::with_capacity(5);
     let mut blocks = 0u64;
@@ -530,7 +556,7 @@ fn dispatch(
                     return Err(cut_short().into());
                 }
                 flush(&mut group, &mut item)?;
-                emit(data, &mut item);
+                emit(data, &mut item)?;
                 match next_head(&mut input, &mut head)? {
                     Ok(true) => {}
                     Ok(false) => bail!("cls-zstd stream ended without its end marker"),
@@ -879,11 +905,8 @@ mod tests {
         };
         let single: Single = Box::new(|s| Ok(Box::new(io::Cursor::new(fake_decode(s))) as Stream));
         let r = (|| {
-            let rest = match probe(Box::new(io::Cursor::new(data.to_vec())))? {
-                Plan::Split { rest } => rest,
-                Plan::Single { reason, .. } => bail!("not split: {reason}"),
-            };
-            let mut out = run(rest, workers, spawn, single, || {}, |_, f| {
+            let input: Stream = Box::new(io::Cursor::new(data.to_vec()));
+            let mut out = run(input, workers, spawn, single, Default::default(), || {}, |_, f| {
                 std::thread::spawn(f);
             }, "test")?;
             let mut v = Vec::new();
@@ -969,7 +992,11 @@ mod tests {
         assert!(whole.contains(&b'?'));
         let (got, _) = split(&bad, 4);
         assert!(got.unwrap() == whole);
-        // Not a stream of this kind: not split, every byte kept.
+        // Not a stream of this kind: all of it to one cls-zstd, every byte kept.
+        let other = b"ARJ\x01xyz".to_vec();
+        let (got, spawned) = split(&other, 3);
+        assert_eq!(got.unwrap(), fake_decode(Box::new(io::Cursor::new(other))));
+        assert_eq!(spawned, 0);
         match probe(Box::new(io::Cursor::new(b"ARJ\x01xyz".to_vec()))).unwrap() {
             Plan::Single { mut replay, .. } => {
                 let mut v = Vec::new();
@@ -985,11 +1012,11 @@ mod tests {
     #[test]
     #[ignore]
     fn real_stream_walk() {
-        let Ok(path) = std::env::var("BIKZ_TEST") else { return };
+        let path = std::env::var("BIKZ_TEST").expect("BIKZ_TEST=<captured cls-zstd input>");
         let f = std::fs::File::open(&path).unwrap();
         let (coded, stored) = walk(Box::new(io::BufReader::with_capacity(1 << 20, f))).unwrap();
         eprintln!("{path}: {coded} videos, {stored} stored blocks");
-        if let Some(n) = std::env::var("BIKZ_VIDEOS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        if let Some(n) = std::env::var("BIKZ_VIDEOS").ok().map(|v| v.trim().parse::<u64>().expect("BIKZ_VIDEOS=<count>")) {
             assert_eq!(coded, n);
         }
     }
