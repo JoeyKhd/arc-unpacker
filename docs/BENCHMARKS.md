@@ -37,10 +37,10 @@
 | ATOM RPG | 5.5 GB | 2 min 37 s | 1 min 00 s | **2.6×** | 0.1.0-beta.9 |
 | Far Cry 3 - Duology | 6.3 GB | 12 min 41 s | 4 min 53 s | **2.6×** | 1.0.6 |
 | Flick | 2.1 GB | 54 s | 21 s | **2.6×** | 1.0.7 |
+| Hollow Knight | 1.1 GB | 1 min 24 s | 33 s | **2.6×** | 1.0.7 |
 | Outer Wilds | 2.5 GB | 2 min 01 s | 47 s | **2.6×** | 1.0.3-dev |
 | Cuphead | 4.3 GB | 2 min 34 s | 1 min 03 s | **2.5×** | 0.1.0-beta.8 |
 | Dice Hoarder | 1.5 GB | 2 min 04 s | 49 s | **2.5×** | 0.1.0-beta.8 |
-| Hollow Knight | 1.1 GB | 1 min 24 s | 33 s | **2.5×** | 0.1.0-beta.7 |
 | Stardew Valley | 0.4 GB | 36 s | 15 s | **2.5×** | 1.0.7 |
 | Persona 3 Reload | 12.3 GB | 3 min 38 s | 1 min 30 s | **2.4×** | 0.1.0-beta.11 |
 | Ticket to Ride | 0.7 GB | 45 s | 18 s | **2.4×** | 0.1.0-beta.9 |
