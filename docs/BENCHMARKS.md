@@ -32,10 +32,10 @@
 | Flick | 2.1 GB | 54 s | 19 s | **2.8×** | 0.1.0-beta.6 |
 | Hazard Levels | 6.3 GB | 2 min 13 s | 47 s | **2.8×** | 0.1.0-beta.10 |
 | Spider-Man - Shattered Dimensions | 4.4 GB | 2 min 35 s | 55 s | **2.8×** | 1.0.3-dev |
-| Far Cry 3 - Duology | 6.3 GB | 12 min 41 s | 4 min 37 s | **2.7×** | 1.0.5 |
 | Halls of Torment | 0.9 GB | 34 s | 13 s | **2.7×** | 0.1.0-beta.8 |
 | Shipping Store Simulator 2037 | 2.0 GB | 1 min 45 s | 39 s | **2.7×** | 0.1.0-beta.9 |
 | ATOM RPG | 5.5 GB | 2 min 37 s | 1 min 00 s | **2.6×** | 0.1.0-beta.9 |
+| Far Cry 3 - Duology | 6.3 GB | 12 min 41 s | 4 min 53 s | **2.6×** | 1.0.6 |
 | Outer Wilds | 2.5 GB | 2 min 01 s | 47 s | **2.6×** | 1.0.3-dev |
 | Stardew Valley | 0.4 GB | 36 s | 14 s | **2.6×** | 0.1.0-beta.7 |
 | Assetto Corsa | 7.3 GB | 10 min 50 s | 4 min 17 s | **2.5×** | 1.0.5 |
@@ -51,13 +51,14 @@
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
 | Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.5 |
-| Sleeping Dogs Pack | 10.4 GB | 7 min 08 s | 3 min 19 s | **2.2×** | 1.0.5 |
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
 | Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
 | over the hill | 2.1 GB | 3 min 35 s | 1 min 44 s | **2.1×** | 0.1.0-beta.8 |
+| Rocksmith 2014 Remastered | 11.7 GB | 5 min 19 s | 2 min 29 s | **2.1×** | 1.0.6 |
 | Sekiro - Shadows Die Twice | 9.5 GB | 6 min 46 s | 3 min 15 s | **2.1×** | 0.1.0-beta.7 |
+| Sleeping Dogs Pack | 10.4 GB | 7 min 08 s | 3 min 22 s | **2.1×** | 1.0.6 |
 | Sniper Elite 3 | 9.1 GB | 11 min 34 s | 5 min 36 s | **2.1×** | 1.0.1 |
 | Solo Leveling - ARISE OVERDRIVE | 17.9 GB | 12 min 26 s | 5 min 49 s | **2.1×** | 0.1.0-beta.11 |
 | Assassin's Creed Black Flag Resynced | 42.0 GB | 20 min 54 s | 10 min 19 s | **2.0×** | 1.0.4 |
@@ -99,7 +100,6 @@
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Palworld | 25.4 GB | 10 min 48 s | 8 min 18 s | **1.3×** | 0.1.0-beta.11 |
 | Resident Evil 2 | 18.5 GB | 7 min 02 s | 5 min 33 s | **1.3×** | 0.1.0-beta.11 |
-| Rocksmith 2014 Remastered | 11.7 GB | 5 min 19 s | 3 min 57 s | **1.3×** | 1.0.5 |
 | Tokyo Xtreme Racer | 8.3 GB | 3 min 34 s | 2 min 51 s | **1.3×** | 0.1.0-beta.6 |
 | Batman - Arkham Asylum GotY | 5.1 GB | 13 min 08 s | 11 min 24 s | **1.2×** | 1.0.5 |
 | BrokenLore - DON'T LIE | 4.7 GB | 2 min 57 s | 2 min 25 s | **1.2×** | 0.1.0-beta.9 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 112 measured** | | **611 min 16 s** | **353 min 01 s** | **1.7×** | |
+| **All 112 measured** | | **611 min 16 s** | **351 min 53 s** | **1.7×** | |
