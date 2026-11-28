@@ -46,6 +46,7 @@
 | Ticket to Ride | 0.7 GB | 45 s | 18 s | **2.4×** | 0.1.0-beta.9 |
 | Farming Simulator 17 | 3.5 GB | 5 min 33 s | 2 min 24 s | **2.3×** | 1.0.5 |
 | Moadra | 3.3 GB | 50 s | 22 s | **2.3×** | 0.1.0-beta.6 |
+| Prototype | 5.4 GB | 3 min 13 s | 1 min 24 s | **2.3×** | 1.0.6 |
 | Silver Pines | 2.1 GB | 2 min 28 s | 1 min 04 s | **2.3×** | 0.1.0-beta.8 |
 | Dinkum | 0.9 GB | 1 min 07 s | 30 s | **2.2×** | 0.1.0-beta.6 |
 | GTA - The Original Trilogy | 6.8 GB | 4 min 39 s | 2 min 05 s | **2.2×** | 1.0.3-dev |
@@ -114,7 +115,6 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| Prototype | 5.4 GB | 3 min 13 s | 3 min 17 s | **1.0×** | 1.0.5 |
 | Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | |
 | Forza Horizon 6 | 81.6 GB | – | – | – | |
 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 113 measured** | | **614 min 05 s** | **353 min 25 s** | **1.7×** | |
+| **All 113 measured** | | **614 min 05 s** | **351 min 32 s** | **1.7×** | |
