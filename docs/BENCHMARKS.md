@@ -99,7 +99,7 @@
 | Takeover 2 | 4.2 GB | 3 min 15 s | 2 min 15 s | **1.4×** | 0.1.0-beta.9 |
 | 007 First Light | 38.8 GB | 14 min 02 s | 10 min 50 s | **1.3×** | 1.0.7 |
 | Bloodborne | 15.1 GB | 10 min 44 s | 8 min 10 s | **1.3×** | 0.1.0-beta.11 |
-| ENTITY - THE BLACK DAY | 30.8 GB | 17 min 00 s | 13 min 10 s | **1.3×** | 1.0.5 |
+| ENTITY - THE BLACK DAY | 30.8 GB | 17 min 00 s | 13 min 03 s | **1.3×** | 1.0.7 |
 | Metal Gear Solid V - TPP | 11.6 GB | 8 min 13 s | 6 min 06 s | **1.3×** | 0.1.0-beta.11 |
 | Nocturnal 2 | 0.8 GB | 41 s | 32 s | **1.3×** | 0.1.0-beta.9 |
 | Palworld | 25.4 GB | 10 min 48 s | 8 min 18 s | **1.3×** | 0.1.0-beta.11 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 28 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 22 s** | **1.8×** | |
