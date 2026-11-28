@@ -15,6 +15,7 @@
 | Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 41 s | **3.5×** | 0.1.0-beta.6 |
 | The Witch's Bakery | 2.3 GB | 39 s | 11 s | **3.5×** | 0.1.0-beta.10 |
 | God of War III Remastered | 30.0 GB | 6 min 14 s | 1 min 49 s | **3.4×** | 0.1.0-beta.7 |
+| Assetto Corsa | 7.3 GB | 10 min 50 s | 3 min 23 s | **3.2×** | 1.0.7 |
 | Call of Duty - Black Ops | 13.5 GB | 16 min 19 s | 5 min 03 s | **3.2×** | 1.0.1 |
 | Castlevania - Belmont's Curse | 5.1 GB | 3 min 40 s | 1 min 09 s | **3.2×** | 0.1.0-beta.6 |
 | Factorio | 4.9 GB | 9 min 57 s | 3 min 04 s | **3.2×** | 0.1.0-beta.8 |
@@ -38,7 +39,6 @@
 | Far Cry 3 - Duology | 6.3 GB | 12 min 41 s | 4 min 53 s | **2.6×** | 1.0.6 |
 | Outer Wilds | 2.5 GB | 2 min 01 s | 47 s | **2.6×** | 1.0.3-dev |
 | Stardew Valley | 0.4 GB | 36 s | 14 s | **2.6×** | 0.1.0-beta.7 |
-| Assetto Corsa | 7.3 GB | 10 min 50 s | 4 min 17 s | **2.5×** | 1.0.5 |
 | Cuphead | 4.3 GB | 2 min 34 s | 1 min 03 s | **2.5×** | 0.1.0-beta.8 |
 | Dice Hoarder | 1.5 GB | 2 min 04 s | 49 s | **2.5×** | 0.1.0-beta.8 |
 | Hollow Knight | 1.1 GB | 1 min 24 s | 33 s | **2.5×** | 0.1.0-beta.7 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 39 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **357 min 44 s** | **1.8×** | |
