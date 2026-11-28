@@ -1,7 +1,7 @@
 <p align="center"><img src="docs/banner.svg" alt="arc-unpacker: fast, parallel installer for FreeArc-based repacks" width="100%"></p>
 
 <p align="center">
-  <a href="https://github.com/JoeyKhd/arc-unpacker/releases"><img alt="Release v1.0.5" src="https://img.shields.io/badge/release-v1.0.5-blue"></a>
+  <a href="https://github.com/JoeyKhd/arc-unpacker/releases"><img alt="Release v1.0.6" src="https://img.shields.io/badge/release-v1.0.6-blue"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4">
   <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-dea584">
 </p>
