@@ -78,6 +78,7 @@
 | Fran Bow | 0.9 GB | 1 min 59 s | 1 min 05 s | **1.8×** | 1.0.3-dev |
 | Frontier Paladin | 8.7 GB | 5 min 15 s | 2 min 54 s | **1.8×** | 0.1.0-beta.9 |
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
+| Need for Speed - Most Wanted | 3.6 GB | 2 min 49 s | 1 min 32 s | **1.8×** | 1.0.6 |
 | Batman - Arkham City | 13.5 GB | 12 min 27 s | 7 min 30 s | **1.7×** | 1.0.3-dev |
 | Hades | 9.2 GB | 6 min 00 s | 3 min 34 s | **1.7×** | 1.0.5 |
 | The Rogue Prince of Persia | 0.5 GB | 41 s | 25 s | **1.7×** | 0.1.0-beta.9 |
@@ -119,7 +120,7 @@
 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
 | Marvel's Spider-Man 2 | 64.5 GB | – | – | – | |
 | Red Dead Redemption 2 | 68.8 GB | – | – | – | |
-| The Last of Us: Part I | 38.8 GB | – | – | – | |
+| The Last of Us: Part I | 38.8 GB | – | failed | – | 1.0.6 |
 | Assassin's Creed Shadows | 77.3 GB | – | – | – | |
 | Call of Duty: Modern Warfare II | 22.5 GB | – | – | – | |
 | The Blood of Dawnwalker | 39.1 GB | – | – | – | |
@@ -152,7 +153,6 @@
 | Atomic Heart | 48.0 GB | – | – | – | |
 | HITMAN: World of Assassination | 58.7 GB | – | – | – | |
 | Avatar: Frontiers of Pandora | 78.5 GB | – | – | – | |
-| Need for Speed: Most Wanted | 2.6 GB | – | – | – | |
 | Gears of War: E-Day | 78.3 GB | – | – | – | |
 | NBA 2K27 | 71.5 GB | – | – | – | |
 | The Sims 4 | 44.3 GB | – | – | – | |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 112 measured** | | **611 min 16 s** | **351 min 53 s** | **1.7×** | |
+| **All 113 measured** | | **614 min 05 s** | **353 min 25 s** | **1.7×** | |
