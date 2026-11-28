@@ -98,8 +98,10 @@ struct Job {
     extra: Option<PathBuf>,
     /// The original tool (Cricket's fgpack runs it on pieces of the input).
     original: PathBuf,
-    /// run.exe: the original's command line, with its worker count changed.
+    /// run.exe: the original's command line, with its worker count or list changed.
     args: Vec<OsString>,
+    /// What was changed, for the log.
+    note: String,
 }
 
 impl Job {
@@ -125,9 +127,17 @@ impl Job {
                 tools::delzo_parallel(&self.input, &self.output, fat, &self.original, threads)
             }
             Role::RunExe => {
+                // The reordered list goes next to the original one, for the run only.
+                if !self.key.is_empty() {
+                    std::fs::write(&self.output, &self.key)?;
+                }
                 // (Its exit code is always 0; once it has started, its lines have run: no fallback.)
-                std::process::Command::new(&self.original).args(&self.args).status()?;
-                Ok(format!("its lines one per CPU instead of {}", self.key.len()))
+                let status = std::process::Command::new(&self.original).args(&self.args).status();
+                if !self.key.is_empty() {
+                    let _ = std::fs::remove_file(&self.output);
+                }
+                status?;
+                Ok(self.note.clone())
             }
         }
     }
@@ -160,6 +170,7 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
             extra: Some(PathBuf::from(fat)),
             original: PathBuf::new(),
             args: Vec::new(),
+            note: String::new(),
         });
     }
     if role == Role::X5nDirPatch {
@@ -193,46 +204,63 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
             extra: None,
             original: PathBuf::new(),
             args: with,
+            note: String::new(),
         });
     }
     if role == Role::RunExe {
-        // run " " <url> <list> <N> [NAME=value ...]: only N below the CPU count, for a list whose
-        // lines touch disjoint files, changes (to 0 = one per CPU).
+        // run " " <url> <list> <N> [NAME=value ...], for a list whose lines touch disjoint
+        // files: N below the CPU count changes to 0 (one per CPU), and the lines go largest
+        // first. (N=1 may mean the lines must run one after the other.)
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(64);
         let n: i64 = s.get(3)?.trim().parse().ok()?;
-        // (N=1 may mean the lines must run one after the other.)
-        if !s[0].starts_with(' ') || n <= 1 || n as usize >= cpus {
+        if !s[0].starts_with(' ') || n == 1 {
             return None;
         }
-        let text: String = std::fs::read(s[2]).ok()?.iter().map(|&b| b as char).collect();
-        if !tools::run_list_lines_independent(&text) {
-            return None;
-        }
+        let bytes = std::fs::read(s[2]).ok()?;
+        let text: String = bytes.iter().map(|&b| b as char).collect();
         // Every program the lines run must touch only the files on its line: a tool with a
         // fixed-name temp file (xtool's <exe>-vm.tmp) would collide with its other copies.
         // (run.exe runs its lines in its own folder, which is ours.)
         let here = std::env::current_exe().ok()?.parent()?.to_path_buf();
         let programs = tools::run_list_programs(&text);
-        if programs.is_empty() || !programs.iter().all(|p| {
-            let p = Path::new(p);
-            let p = if p.is_absolute() { p.to_path_buf() } else { here.join(p) };
-            tools::named_files_tool(&p, Some(map)).is_some()
-        }) {
+        let mut mode_words = std::collections::HashMap::new();
+        for p in &programs {
+            let path = Path::new(p);
+            let path = if path.is_absolute() { path.to_path_buf() } else { here.join(path) };
+            mode_words.insert(p.to_ascii_lowercase(), tools::named_files_tool(&path, Some(map))?);
+        }
+        let modes = |w: &str| mode_words.get(&w.to_ascii_lowercase()).copied().unwrap_or(0);
+        if programs.is_empty() || !tools::run_list_lines_independent(&text, &modes) {
             return None;
         }
-        let mut wider = args.to_vec();
-        wider[3] = OsString::from("0");
-        // (`key` keeps the old count, for the log.)
+        let widen = n > 1 && (n as usize) < cpus;
+        let sorted = tools::run_list_largest_first(&bytes, &std::env::current_dir().ok()?, &modes);
+        if !widen && sorted.is_none() {
+            return None;
+        }
+        let mut changed = args.to_vec();
+        let mut notes = Vec::new();
+        if widen {
+            changed[3] = OsString::from("0");
+            notes.push(format!("its lines one per CPU instead of {n}"));
+        }
+        let list = PathBuf::from(s[2]);
+        let sorted_list = list.with_file_name(format!("{}.arc-unpack-order", list.file_name()?.to_string_lossy()));
+        if sorted.is_some() {
+            changed[2] = sorted_list.clone().into_os_string();
+            notes.push("largest inputs first".to_string());
+        }
         return Some(Job {
             role,
-            input: PathBuf::from(s[2]),
-            output: PathBuf::new(),
-            key: vec![0; n as usize],
+            input: list,
+            output: sorted_list,
+            key: sorted.unwrap_or_default(),
             output_arg: usize::MAX,
             in_place: false,
             extra: None,
             original: PathBuf::new(),
-            args: wider,
+            args: changed,
+            note: notes.join(", "),
         });
     }
     if role == Role::FreeArcUnarc {
@@ -258,7 +286,7 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
             return None;
         }
         // (Not in place: when ours fails, the original's -o+ rewrites every file.)
-        return Some(Job { role, input: archive, output: out, key: Vec::new(), output_arg: usize::MAX, in_place: false, extra: None, original: PathBuf::new(), args: Vec::new() });
+        return Some(Job { role, input: archive, output: out, key: Vec::new(), output_arg: usize::MAX, in_place: false, extra: None, original: PathBuf::new(), args: Vec::new(), note: String::new() });
     }
     if let (Role::X2n, [t, d, m]) = (role, s.as_slice()) {
         // x2n <target> <data> <map>: all three exist, three different files.
@@ -269,7 +297,7 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
             return None;
         }
         let [target, data, map] = <[PathBuf; 3]>::try_from(paths).ok()?;
-        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map), original: PathBuf::new(), args: Vec::new() });
+        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map), original: PathBuf::new(), args: Vec::new(), note: String::new() });
     }
     let (input, output, key, output_arg) = match (role, s.as_slice()) {
         (Role::Xor, [i, o, k]) => (*i, *o, tools::xor_key(k)?, 1),
@@ -285,7 +313,7 @@ fn understood(role: Role, args: &[OsString], map: &Path) -> Option<Job> {
     if !input.is_file() || output.exists() || same(&input, &output) || output.parent().is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
         return None;
     }
-    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None, original: PathBuf::new(), args: Vec::new() })
+    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None, original: PathBuf::new(), args: Vec::new(), note: String::new() })
 }
 
 /// Runs the original tool with this command line (or with argument `replace.0` replaced).

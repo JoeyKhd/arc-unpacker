@@ -116,19 +116,25 @@ const KNOWN: &[(u64, &str, Role)] = &[
 /// - oggvorbis2fsb5 (fsb.exe; open source): `fsb in out`.
 /// - Farming Simulator 22's .NET shapes tool (fgpack.exe, 24,576 B; reverse-engineered:
 ///   File.Open(in), File.Create(out), a keystream XOR): `fgpack in out`.
-const OVERLAP_SAFE: &[(u64, &str)] = &[
-    (74240, "c6ae9b328578ee6b43021b6ec90fbaf152c7cdba0085fda72ab51b9259a5b361"),
-    (159232, "342b579afeff5651e9c0c57a6d2e785f119655f170d106dd01dfb97162efe385"),
-    (145408, "0eb2633f7414b79a39cc93bd9f36fa286a17905492235fe72a882d916b3fa30d"),
-    (317952, "09763ca90c09a5f815a94527399b1f2a88685e9de462e2ff1bc5648d320e707a"),
-    (548804, "9bf8d067de9448e521afe1f8108caa0f85b4b7c7933641efd44bc43533920565"),
-    (331264, "d1f00ff506d77a3f219c497e444306f7949c0a9b9e029f15bb862aa521fd26f8"),
-    (1153277, "98d7c11a27dc7b0da976d5b01374e0359d92b2d3b5439c5d26bad70ec618d811"),
-    (24576, "eb9a914ff781bc2f088e70d1b99faca73d98a96325a4a154cf52b3b52a4f860a"),
+/// - LZMA SDK 15.12 and 19.00 lzma.exe (LzmaAlone, open source; Kerbal Space Program's and
+///   RimWorld's fgpack.exe / fgpack2.exe; CreateFileW is their only file import):
+///   `lzma e -d19 ... in out`.
+/// (size, SHA-256, how many leading arguments are mode words, not files)
+const OVERLAP_SAFE: &[(u64, &str, usize)] = &[
+    (74240, "c6ae9b328578ee6b43021b6ec90fbaf152c7cdba0085fda72ab51b9259a5b361", 1),
+    (159232, "342b579afeff5651e9c0c57a6d2e785f119655f170d106dd01dfb97162efe385", 0),
+    (145408, "0eb2633f7414b79a39cc93bd9f36fa286a17905492235fe72a882d916b3fa30d", 0),
+    (317952, "09763ca90c09a5f815a94527399b1f2a88685e9de462e2ff1bc5648d320e707a", 0),
+    (548804, "9bf8d067de9448e521afe1f8108caa0f85b4b7c7933641efd44bc43533920565", 0),
+    (331264, "d1f00ff506d77a3f219c497e444306f7949c0a9b9e029f15bb862aa521fd26f8", 0),
+    (1153277, "98d7c11a27dc7b0da976d5b01374e0359d92b2d3b5439c5d26bad70ec618d811", 0),
+    (24576, "eb9a914ff781bc2f088e70d1b99faca73d98a96325a4a154cf52b3b52a4f860a", 0),
+    (97280, "5c7ecad4da5b60aca44594b29e8b6529dec2489d5e05e1a5f59af345b9b43045", 1),
+    (108544, "a95222984f60e3f5bea4099cab85868946523391b0e50d7f6dcc5e866d0b0dbd", 1),
 ];
 
 /// If `path` is a tool in `OVERLAP_SAFE` or a stand-in listed in `map`: how many leading
-/// arguments are not file names (raw2hif's mode word, `d9`). None for any other program.
+/// arguments are not file names (raw2hif's `d9`, lzma's `e`). None for any other program.
 pub fn named_files_tool(path: &Path, map: Option<&Path>) -> Option<usize> {
     if let Some(e) = map.and_then(|m| lookup(m, path)) {
         return e.role.touches_only_named_files().then_some(e.role.mode_words());
@@ -138,8 +144,7 @@ pub fn named_files_tool(path: &Path, map: Option<&Path>) -> Option<usize> {
         return None;
     }
     let d = crate::extract::hex(&sha256_file(path).ok()?);
-    let i = OVERLAP_SAFE.iter().position(|k| k.0 == meta.len() && k.1 == d)?;
-    Some(if i == 0 { 1 } else { 0 })
+    OVERLAP_SAFE.iter().find(|k| k.0 == meta.len() && k.1 == d).map(|k| k.2)
 }
 
 /// The name ending of an original kept in its own folder (see `Role::keeps_its_folder`).
@@ -889,29 +894,105 @@ pub fn run_list_programs(list: &str) -> Vec<String> {
     out
 }
 
-/// Whether the command lines of a run.exe list touch disjoint sets of files: every word that is
-/// not a program (`*.exe`), a switch or a cmd built-in counts as a file, quotes removed. (The
-/// programs themselves must touch only those files: see `run_list_programs`.)
-pub fn run_list_lines_independent(list: &str) -> bool {
-    const SKIP: [&str; 12] = ["cmd", "/c", "del", "erase", "move", "copy", "ren", "rename", "rd", "rmdir", "md", "mkdir"];
-    let mut seen = std::collections::HashSet::new();
-    for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with(';')) {
-        let mut mine = std::collections::HashSet::new();
-        // (`copy /b a+b c`: '+' joins file names.)
-        for w in line.replace('"', " ").replace("&&", " ").replace('+', " ").split_whitespace() {
-            let w = w.to_ascii_lowercase();
-            if w.starts_with('-') || w.starts_with('/') || w.ends_with(".exe") || SKIP.contains(&w.as_str()) || w.contains(['>', '<', '|', '&', '%']) {
+/// The lines run.exe runs (fgets in file order; empty, '#' and ';' lines skipped).
+fn run_list_lines(list: &str) -> impl Iterator<Item = &str> {
+    list.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#') && !l.starts_with(';'))
+}
+
+/// How many words after a program (as a run.exe list names it) are mode words, not files
+/// (lzma's `e`; see `named_files_tool`).
+pub type ModeWords<'a> = &'a dyn Fn(&str) -> usize;
+
+/// The files one command line of a run.exe list names: every word that is not a program
+/// (`*.exe`), one of its mode words, a switch or a cmd built-in, quotes removed, and the
+/// targets of redirections (`echo 123>1.test`; `>nul` and `2>&1` name none). None if the line
+/// uses an environment variable (run.exe expands them), which hides what it touches.
+fn run_line_files(line: &str, modes: ModeWords) -> Option<Vec<String>> {
+    const SKIP: [&str; 13] = ["cmd", "/c", "del", "erase", "move", "copy", "ren", "rename", "rd", "rmdir", "md", "mkdir", "echo"];
+    if line.contains('%') {
+        return None;
+    }
+    let (mut out, mut mode_words) = (Vec::new(), 0);
+    // (`copy /b a+b c`: '+' joins file names.)
+    for w in line.replace('"', " ").replace("&&", " ").replace('+', " ").split_whitespace() {
+        let redirected = w.contains(['>', '<']);
+        if !redirected && w.to_ascii_lowercase().ends_with(".exe") {
+            mode_words = modes(w);
+            continue;
+        }
+        if mode_words > 0 && !redirected && !w.starts_with('-') && !w.starts_with('/') {
+            mode_words -= 1;
+            continue;
+        }
+        // `echo 123>1.test`: the part before the operator is the command's argument.
+        let parts: Vec<&str> = if redirected { w.split(['>', '<']).skip(1).collect() } else { vec![w] };
+        for part in parts {
+            let part = part.trim_start_matches('&');
+            let lp = part.to_ascii_lowercase();
+            if part.is_empty() || lp == "nul" || part.chars().all(|c| c.is_ascii_digit()) || part.contains(['|', '&']) {
                 continue;
             }
-            let name = w.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-            mine.insert(name);
+            if !redirected && (lp.starts_with('-') || lp.starts_with('/') || lp.ends_with(".exe") || SKIP.contains(&lp.as_str())) {
+                continue;
+            }
+            out.push(part.to_string());
         }
+    }
+    Some(out)
+}
+
+/// Whether the command lines of a run.exe list touch disjoint sets of files (`run_line_files`;
+/// the programs themselves must touch only those files: see `run_list_programs`).
+pub fn run_list_lines_independent(list: &str, modes: ModeWords) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    for line in run_list_lines(list) {
+        let Some(files) = run_line_files(line, modes) else { return false };
+        let mine: std::collections::HashSet<String> =
+            files.iter().map(|w| w.to_ascii_lowercase().rsplit(['\\', '/']).next().unwrap_or("").to_string()).collect();
         if mine.iter().any(|n| seen.contains(n)) {
             return false;
         }
         seen.extend(mine);
     }
     true
+}
+
+/// A run.exe list (of independent lines) with the lines whose existing files (relative to
+/// `cwd`, run.exe's working folder) are largest first: run.exe starts its lines in file order,
+/// so a big one near the end runs alone at the end (Kerbal Space Program: 222 LZMA re-encodes,
+/// the last stretch at 15% CPU). None if the order stays the same, or if a line is too long
+/// for run.exe's 4,096-byte line buffer.
+pub fn run_list_largest_first(list: &[u8], cwd: &Path, modes: ModeWords) -> Option<Vec<u8>> {
+    let text: String = list.iter().map(|&b| b as char).collect();
+    let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).filter(|l| !l.is_empty()).collect();
+    if lines.iter().any(|l| l.len() >= 4094) {
+        return None;
+    }
+    let size = |l: &str| -> u64 {
+        if run_list_lines(l).next().is_none() {
+            return 0;
+        }
+        run_line_files(l, modes)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|f| {
+                let p = Path::new(f);
+                std::fs::metadata(if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }).ok().filter(|m| m.is_file())
+            })
+            .map(|m| m.len())
+            .sum()
+    };
+    let mut order: Vec<(usize, u64)> = lines.iter().enumerate().map(|(i, l)| (i, size(l))).collect();
+    order.sort_by_key(|&(i, s)| (std::cmp::Reverse(s), i));
+    if order.iter().enumerate().all(|(k, &(i, _))| k == i) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(list.len() + 2 * lines.len());
+    for (i, _) in order {
+        out.extend(lines[i].chars().map(|c| c as u8));
+        out.extend(b"\r\n");
+    }
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1095,11 +1176,39 @@ mod tests {
         let t = r"C:\run\tmp";
         let line = |n: &str| format!("cmd /c \"\"{t}\\work\\fgpack.exe\" {n}.fgu {n}.fgr_&&del {n}.fgu&&\"{t}\\work\\x.exe\" -f -d -s {n}.fgr_ {n}.shapes.x {n}.shapes&&del {n}.fgr_ {n}.shapes.x\"\r\n");
         let fs22: String = ["0001", "0002", "0003"].iter().map(|n| line(n)).collect();
-        assert!(run_list_lines_independent(&fs22));
+        let none = |_: &str| 0;
+        assert!(run_list_lines_independent(&fs22, &none));
         assert_eq!(run_list_programs(&fs22), vec![format!("{t}\\work\\fgpack.exe"), format!("{t}\\work\\x.exe")]);
         // A line that works on another line's output must keep the list's own order and count.
         let chained = format!("{}cmd /c copy /b 0001.shapes+0002.shapes all.shapes\r\n", fs22);
-        assert!(!run_list_lines_independent(&chained));
+        assert!(!run_list_lines_independent(&chained, &none));
+        // Redirection targets are files (Batman: Arkham Asylum's `echo 123>N.test`); nul isn't.
+        assert!(run_list_lines_independent("cmd /c \"echo 123>1.test\"\r\ncmd /c \"echo 123>2.test\"\r\n", &none));
+        assert!(!run_list_lines_independent("cmd /c \"echo 1>a.log\"\r\ncmd /c \"echo 2>>a.log\"\r\n", &none));
+        let cricket = "cmd /c \"\"w\\fgpack.exe\" e 04.fgpack 04.fgpack_ >nul 2>&1&&del 04.fgpack\"\r\ncmd /c \"\"w\\fgpack.exe\" e 21.fgpack 21.fgpack_ >nul 2>&1&&del 21.fgpack\"\r\n";
+        // ("e" is fgpack's mode word: as a file name, every line would share it.)
+        let fgpack = |w: &str| usize::from(w.to_ascii_lowercase().ends_with("fgpack.exe"));
+        assert!(run_list_lines_independent(cricket, &fgpack));
+        assert!(!run_list_lines_independent(cricket, &none));
+        // run.exe expands variables: what such a line touches isn't known here.
+        assert!(!run_list_lines_independent("tool.exe %TEMP%\\a b\r\n", &none));
+    }
+
+    #[test]
+    fn run_lists_largest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        for (n, len) in [("001", 10usize), ("002", 300), ("003", 20)] {
+            std::fs::write(dir.path().join(format!("{n}.fgu")), vec![0u8; len]).unwrap();
+        }
+        let line = |n: &str| format!("cmd /c \"\"w\\fgpack2.exe\" e -d19 {n}.fgu {n}.fgr&&del {n}.fgu\"");
+        let list = format!("{}\r\n# note\r\n{}\r\n{}", line("001"), line("002"), line("003"));
+        let lzma = |_: &str| 1;
+        assert!(run_list_lines_independent(&list, &lzma));
+        let sorted = run_list_largest_first(list.as_bytes(), dir.path(), &lzma).unwrap();
+        assert_eq!(String::from_utf8(sorted).unwrap(), format!("{}\r\n{}\r\n{}\r\n# note\r\n", line("002"), line("003"), line("001")));
+        // Already in order: nothing to do.
+        let list = format!("{}\r\n{}\r\n", line("002"), line("001"));
+        assert!(run_list_largest_first(list.as_bytes(), dir.path(), &lzma).is_none());
     }
 
     #[test]

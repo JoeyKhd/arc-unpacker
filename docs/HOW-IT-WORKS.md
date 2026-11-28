@@ -8,7 +8,16 @@ arc-unpack includes a small Pascal Script interpreter ([`src/pascal.rs`](../src/
 
 - **Archive extraction** (ISDone's `ISArcExtract`) goes through arc-unpack's parallel engine.
 - **The repack's own tools** (`ISExec`, `Exec`) run exactly as the script says, in the same order, without windows. A tool the script starts without waiting (`Exec` with `ewNoWait`) runs alongside the steps after it; it starts once the archives just before it are fully unpacked, because such tools wait for a file those archives contain and then work on the files unpacked before it.
-- **Faster stand-ins for tools we know exactly** ([`src/tools.rs`](../src/tools.rs)). Some repack tools were reverse-engineered well enough to do their work exactly; they are recognised by their SHA-256, whatever the repack calls them. Before each program the script runs, arc-unpack puts `arc-unpack-tool.exe` in such a tool's place in its own temporary folder and moves the original aside. The stand-in does the work for the command lines it understands and runs the original for anything else. So far: FitGirl's XOR tool (Luigi Auriemma's Xor 0.2) in large buffers, and her LZ4 1.9.4 tool at `-12`, whose independent 4 MB blocks are compressed on all cores with the same LZ4 1.9.4 library calls. `ARC_UNPACK_TOOL_VERIFY=1` runs the original as well and compares the outputs; `ARC_UNPACK_NO_TOOL_STANDINS=1` turns the stand-ins off.
+- **Faster stand-ins for tools we know exactly** ([`src/tools.rs`](../src/tools.rs)). Some repack tools were reverse-engineered well enough to do their work exactly; they are recognised by their SHA-256, whatever the repack calls them. Before each program the script runs, arc-unpack puts `arc-unpack-tool.exe` in such a tool's place in its own temporary folder and moves the original aside. The stand-in does the work for the command lines it understands and runs the original for anything else. So far:
+  - FitGirl's XOR tool (Luigi Auriemma's Xor 0.2), in large buffers.
+  - Her LZ4 1.9.4 tool at `-12`. Its independent 4 MB blocks are compressed on all cores with the same LZ4 1.9.4 library calls.
+  - The x2n patcher, on memory-mapped files.
+  - Cricket 19's fgpack and Far Cry 3's delzo. Copies of the original work on independent pieces of the input at once, and the pieces are joined.
+  - FreeArc 0.67's console unarc. arc-unpack's own engine does the extraction.
+  - Her `run.exe`. When its lines touch separate files, it runs one line per CPU, largest inputs first.
+  - hpatchz folder patches, which then skip re-reading unchanged files.
+
+  `ARC_UNPACK_TOOL_VERIFY=1` runs the original as well and compares the outputs; `ARC_UNPACK_NO_TOOL_STANDINS=1` turns the stand-ins off.
 - **RAR archives** some older repacks rebuild and then unpack (ISDone's `ISRarExtract`) go through the installer's own `Unrar.dll`, in a 32-bit helper like `unarc.dll`.
 - **Codec settings** the script hands to ISDone (`PrecompInit`'s temp folder and memory) are written into the installer's `CLS.ini`, as ISDone does.
 - **The installer's window**, progress bars and music are accepted and ignored.
