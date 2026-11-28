@@ -108,9 +108,11 @@ fn le_i64(b: &[u8]) -> i64 {
     i64::from_le_bytes(b[..8].try_into().unwrap())
 }
 
-/// Block bytes of 2018-XTool records given to one process: whole records, at least one (their
-/// records are the encoder's 16 MB chunks, so one process each would mostly be start-up).
+/// Input bytes (streams and gaps) of 2018-XTool records given to one process: whole records,
+/// at least one (their records are the encoder's 16 MB chunks, so one process each would mostly
+/// be start-up). The first groups are smaller, so a short stream starts restoring at once.
 const OLD_GROUP: u64 = 64 << 20;
+const OLD_FIRST_GROUP: u64 = 4 << 20;
 
 /// `xtool.exe d:precomp[:...] - -` of one of the 2018 builds (`OLD_XTOOL`), with no crilayla.dll
 /// next to it (with one, those builds copy it to fixed crilayla<N>.dll names in their folder).
@@ -537,8 +539,13 @@ pub fn run_old(
                 let (coord3, abort3, mut stdin) = (coord2.clone(), abort2.clone(), wk.stdin);
                 std::thread::Builder::new()
                     .name(format!("{label2} records {n} in"))
-                    .spawn(move || {
-                        if let Err(e) = stdin.write_all(&data) {
+                    .spawn(move || match stdin.write_all(&data) {
+                        Ok(()) => {}
+                        // xtool died or stopped reading: collect_old reports its exit status and
+                        // what it said (a clean exit with input left over comes out short, and
+                        // the file CRCs catch that, as in `feed`).
+                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+                        Err(e) => {
                             coord3.fail(format!("writing to xtool: {e}"));
                             abort3();
                         }
@@ -547,7 +554,8 @@ pub fn run_old(
                 *item += 1;
                 Ok(())
             };
-            let mut block_in_group = 0u64;
+            // Groups grow from OLD_FIRST_GROUP to OLD_GROUP.
+            let mut limit = OLD_FIRST_GROUP;
             loop {
                 let mut head = Vec::with_capacity(16);
                 if !read_exact_into(&mut input, &mut head, 4)? {
@@ -566,7 +574,6 @@ pub fn run_old(
                         ensure!(read_exact_into(&mut input, &mut data, len as usize)?, "xtool stream cut short");
                     }
                     flush(&mut group, &mut estimate, &mut item)?;
-                    block_in_group = 0;
                     let mut s = coord2.s.lock().unwrap();
                     while s.pending > 0 && s.pending + data.len() as u64 > OUTPUT_BUDGET && item != s.next_out && s.failed.is_none() {
                         s = coord2.cv.wait(s).unwrap();
@@ -598,10 +605,11 @@ pub fn run_old(
                     }
                 }
                 estimate += block + gaps;
-                block_in_group += block;
-                if block_in_group >= OLD_GROUP {
+                if group.len() as u64 >= limit {
                     flush(&mut group, &mut estimate, &mut item)?;
-                    block_in_group = 0;
+                    // (A record far bigger than a group: no need to keep its room.)
+                    group.shrink_to((OLD_GROUP as usize) + (16 << 20));
+                    limit = (limit * 2).min(OLD_GROUP);
                 }
             }
             flush(&mut group, &mut estimate, &mut item)?;

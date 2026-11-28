@@ -755,8 +755,12 @@ fn readahead(mut input: Stream, mib: usize, label: String, ctx: &Ctx) -> Stream 
                 Err(e) => return Err(e).context("passing stage data on"),
             }
         }
-        w.finish()?;
-        Ok(())
+        match w.finish() {
+            Ok(()) => Ok(()),
+            // The next stage stopped reading before the end: as above.
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(e).context("passing stage data on"),
+        }
     });
     Box::new(r)
 }
@@ -830,7 +834,12 @@ fn xtool_split(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx
 /// with few groups still gets most of the CPUs.
 fn xtool_split_old(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx: &Ctx) -> Result<Stream> {
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let k = (cpus * 2).div_ceil(workers.max(1)).clamp(2, cpus.max(2));
+    let mut k = (cpus * 2).div_ceil(workers.max(1)).clamp(2, cpus.max(2));
+    // The 32-bit 0.9 build sees at most 32 CPUs (WOW64), so the original never runs it past t32
+    // (about 15 MB of deflate state per thread in its 2 GB of address space).
+    if file_sha256(Path::new(&spec.argv[0])).as_deref() == Some(crate::xtsplit::OLD_XTOOL[2]) {
+        k = k.min(32);
+    }
     let mut base = spec.clone();
     base.argv[1] = crate::xtsplit::old_threads_arg(&spec.argv[1], k);
     base.label = format!("{} (split)", spec.label);
