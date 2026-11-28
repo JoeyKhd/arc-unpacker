@@ -53,6 +53,7 @@
 | Penguin Colony | 1.2 GB | 1 min 06 s | 30 s | **2.2×** | 0.1.0-beta.8 |
 | Shambles - Sons of Apocalypse | 1.2 GB | 36 s | 16 s | **2.2×** | 1.0.5 |
 | Splinter Cell - Blacklist | 13.5 GB | 7 min 43 s | 3 min 34 s | **2.2×** | 1.0.3-dev |
+| The Blood of Dawnwalker | 48.6 GB | 8 min 12 s | 3 min 39 s | **2.2×** | 1.0.6 |
 | BOXROOM | 1.3 GB | 1 min 01 s | 29 s | **2.1×** | 0.1.0-beta.8 |
 | Farming Simulator 22 | 20.7 GB | 8 min 40 s | 4 min 04 s | **2.1×** | 0.1.0-beta.11 |
 | Need for Speed - Payback [FitGirl HV Repack] | 14.3 GB | 2 min 33 s | 1 min 14 s | **2.1×** | 0.1.0-beta.12 |
@@ -116,7 +117,6 @@
 | Need for Speed Heat | 19.7 GB | 15 min 54 s | 14 min 15 s | **1.1×** | 0.1.0-beta.10 |
 | REANIMAL | 10.2 GB | 7 min 14 s | 6 min 27 s | **1.1×** | 0.1.0-beta.8 |
 | Saloon Simulator | 7.6 GB | 5 min 39 s | 5 min 12 s | **1.1×** | 0.1.0-beta.9 |
-| The Blood of Dawnwalker | 48.6 GB | – | 3 min 29 s | – | 1.0.6 |
 | Grand Theft Auto V / GTA 5 | 51.2 GB | – | – | – | |
 | Forza Horizon 6 | 81.6 GB | – | – | – | |
 | Call of Duty: Modern Warfare 4 | 56.7 GB | – | – | – | |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 114 measured** | | **619 min 35 s** | **354 min 59 s** | **1.7×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 38 s** | **1.8×** | |
