@@ -84,6 +84,8 @@ struct Job {
     extra: Option<PathBuf>,
     /// The original tool (Cricket's fgpack runs it on pieces of the input).
     original: PathBuf,
+    /// run.exe: the original's command line, with its worker count changed.
+    args: Vec<OsString>,
 }
 
 impl Job {
@@ -103,6 +105,11 @@ impl Job {
             }
             Role::FgpackSegLzma => tools::fgpack_parallel(&self.input, &self.output, &self.original, threads),
             Role::FreeArcUnarc => tools::freearc_extract(&self.input, &self.output, &self.original),
+            Role::RunExe => {
+                // (Its exit code is always 0; once it has started, its lines have run: no fallback.)
+                std::process::Command::new(&self.original).args(&self.args).status()?;
+                Ok(format!("its lines one per CPU instead of {}", self.key.len()))
+            }
         }
     }
 }
@@ -111,6 +118,33 @@ impl Job {
 /// that exists and an output that doesn't (the tools' own handling of other cases is theirs).
 fn understood(role: Role, args: &[OsString]) -> Option<Job> {
     let s: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
+    if role == Role::RunExe {
+        // run " " <url> <list> <N> [NAME=value ...]: only N below the CPU count, for a list whose
+        // lines touch disjoint files, changes (to 0 = one per CPU).
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(64);
+        let n: i64 = s.get(3)?.trim().parse().ok()?;
+        if !s[0].starts_with(' ') || n <= 0 || n as usize >= cpus {
+            return None;
+        }
+        let text: String = std::fs::read(s[2]).ok()?.iter().map(|&b| b as char).collect();
+        if !tools::run_list_lines_independent(&text) {
+            return None;
+        }
+        let mut wider = args.to_vec();
+        wider[3] = OsString::from("0");
+        // (`key` keeps the old count, for the log.)
+        return Some(Job {
+            role,
+            input: PathBuf::from(s[2]),
+            output: PathBuf::new(),
+            key: vec![0; n as usize],
+            output_arg: usize::MAX,
+            in_place: false,
+            extra: None,
+            original: PathBuf::new(),
+            args: wider,
+        });
+    }
     if role == Role::FreeArcUnarc {
         // FreeArc 0.67 unarc: `x -o+ [-dp<dir>] [--] <archive>`, nothing else (no file lists, no
         // other switches): extract everything into the current folder (or -dp), overwriting.
@@ -134,7 +168,7 @@ fn understood(role: Role, args: &[OsString]) -> Option<Job> {
             return None;
         }
         // (Not in place: when ours fails, the original's -o+ rewrites every file.)
-        return Some(Job { role, input: archive, output: out, key: Vec::new(), output_arg: usize::MAX, in_place: false, extra: None, original: PathBuf::new() });
+        return Some(Job { role, input: archive, output: out, key: Vec::new(), output_arg: usize::MAX, in_place: false, extra: None, original: PathBuf::new(), args: Vec::new() });
     }
     if let (Role::X2n, [t, d, m]) = (role, s.as_slice()) {
         // x2n <target> <data> <map>: all three exist, three different files.
@@ -145,7 +179,7 @@ fn understood(role: Role, args: &[OsString]) -> Option<Job> {
             return None;
         }
         let [target, data, map] = <[PathBuf; 3]>::try_from(paths).ok()?;
-        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map), original: PathBuf::new() });
+        return Some(Job { role, input: data, output: target, key: Vec::new(), output_arg: 0, in_place: true, extra: Some(map), original: PathBuf::new(), args: Vec::new() });
     }
     let (input, output, key, output_arg) = match (role, s.as_slice()) {
         (Role::Xor, [i, o, k]) => (*i, *o, tools::xor_key(k)?, 1),
@@ -161,7 +195,7 @@ fn understood(role: Role, args: &[OsString]) -> Option<Job> {
     if !input.is_file() || output.exists() || same(&input, &output) || output.parent().is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
         return None;
     }
-    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None, original: PathBuf::new() })
+    Some(Job { role, input, output, key, output_arg, in_place: false, extra: None, original: PathBuf::new(), args: Vec::new() })
 }
 
 /// Runs the original tool with this command line (or with argument `replace.0` replaced).

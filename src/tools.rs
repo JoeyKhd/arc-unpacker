@@ -27,6 +27,9 @@
 //!   Here: arc-unpack's own engine extracts it (all cores, every file CRC-checked), with the
 //!   codecs next to the tool; anything it can't do falls back to the original, which rewrites
 //!   every file anyway (-o+).
+//! - FitGirl's run.exe: `run " " <url> <list> <N>` runs the list's command lines N at a time
+//!   (0 = one per CPU). Farming Simulator 22 passes N=4 for 2,155 independent lines. When N is
+//!   below the CPU count and no two lines name the same file, the original runs with N=0.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::io::{Read, Write};
@@ -40,6 +43,7 @@ pub enum Role {
     X2n,
     FgpackSegLzma,
     FreeArcUnarc,
+    RunExe,
 }
 
 impl Role {
@@ -50,13 +54,15 @@ impl Role {
             Role::X2n => "x2n",
             Role::FgpackSegLzma => "fgpack-seg-lzma",
             Role::FreeArcUnarc => "freearc-unarc-0.67",
+            Role::RunExe => "fitgirl-run",
         }
     }
 
     /// The original must stay in its own folder (renamed): FreeArc's console unarc finds arc.ini
     /// and its cls-*.dll codecs next to itself.
     pub fn keeps_its_folder(self) -> bool {
-        matches!(self, Role::FreeArcUnarc)
+        // (FitGirl's run.exe checks "Made by FitGirl.txt" next to itself and runs its lines there.)
+        matches!(self, Role::FreeArcUnarc | Role::RunExe)
     }
 
     pub fn from_name(s: &str) -> Option<Role> {
@@ -71,6 +77,7 @@ const KNOWN: &[(u64, &str, Role)] = &[
     (7680, "62410f076016456299e3cb5b3311b8a8d66fecd299dde9e7b6815fd581036428", Role::X2n),
     (205312, "f6594b8f7773a9223bc7f1c5c3ecf9971c4988ee34db6321a13673511cdde665", Role::FgpackSegLzma),
     (333312, "09ea4478b379a1839e21896a8b3fd82b4adf81c1b2b387795abefe5df3e57549", Role::FreeArcUnarc),
+    (81920, "3243562d5d0685b57bc237b24f254d1d18d6abcb1f8ddac2698c2d9208c76247", Role::RunExe),
 ];
 
 /// Repack tools that touch only the files named on their command line: no fixed-name temp
@@ -826,9 +833,48 @@ pub fn freearc_extract(archive: &Path, out: &Path, original: &Path) -> Result<St
     Ok(format!("arc-unpack's engine: {last}"))
 }
 
+// ---------------------------------------------------------------------------------------------
+// FitGirl's run.exe (see the module doc).
+
+/// Whether the command lines of a run.exe list touch disjoint sets of files: every word that is
+/// not a program (`*.exe`), a switch or a cmd built-in counts as a file, quotes removed.
+pub fn run_list_lines_independent(list: &str) -> bool {
+    const SKIP: [&str; 12] = ["cmd", "/c", "del", "erase", "move", "copy", "ren", "rename", "rd", "rmdir", "md", "mkdir"];
+    let mut seen = std::collections::HashSet::new();
+    for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with(';')) {
+        let mut mine = std::collections::HashSet::new();
+        // (`copy /b a+b c`: '+' joins file names.)
+        for w in line.replace('"', " ").replace("&&", " ").replace('+', " ").split_whitespace() {
+            let w = w.to_ascii_lowercase();
+            if w.starts_with('-') || w.starts_with('/') || w.ends_with(".exe") || SKIP.contains(&w.as_str()) || w.contains(['>', '<', '|', '&', '%']) {
+                continue;
+            }
+            let name = w.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+            mine.insert(name);
+        }
+        if mine.iter().any(|n| seen.contains(n)) {
+            return false;
+        }
+        seen.extend(mine);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_lists_with_independent_lines() {
+        // Farming Simulator 22's fitgirl01.txt (after fart): each line has its own NNNN.* files.
+        let t = r"C:\run\tmp";
+        let line = |n: &str| format!("cmd /c \"\"{t}\\work\\fgpack.exe\" {n}.fgu {n}.fgr_&&del {n}.fgu&&\"{t}\\work\\x.exe\" -f -d -s {n}.fgr_ {n}.shapes.x {n}.shapes&&del {n}.fgr_ {n}.shapes.x\"\r\n");
+        let fs22: String = ["0001", "0002", "0003"].iter().map(|n| line(n)).collect();
+        assert!(run_list_lines_independent(&fs22));
+        // A line that works on another line's output must keep the list's own order and count.
+        let chained = format!("{}cmd /c copy /b 0001.shapes+0002.shapes all.shapes\r\n", fs22);
+        assert!(!run_list_lines_independent(&chained));
+    }
 
     #[test]
     fn fgpack_inputs_are_cut_at_segment_ends() {
