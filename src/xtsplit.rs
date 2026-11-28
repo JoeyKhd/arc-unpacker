@@ -13,6 +13,9 @@
 //! 18-byte stream headers (kind u8, old i32, new i32, resource i32, codec u8, option i32),
 //! `block` bytes of stream data (the sum of `new`), per stream a u32 gap length and the gap,
 //! then a trailing u32 gap length and gap. Its output is every gap and every stream's `old` bytes.
+//!
+//! The 2018 XTool builds (`OLD_XTOOL`, method `xt`) have another layout and the same per-record
+//! barrier: see `run_old`.
 
 use crate::stage::Stream;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -103,6 +106,105 @@ fn le_i32(b: &[u8]) -> i32 {
 
 fn le_i64(b: &[u8]) -> i64 {
     i64::from_le_bytes(b[..8].try_into().unwrap())
+}
+
+/// Block bytes of 2018-XTool records given to one process: whole records, at least one (their
+/// records are the encoder's 16 MB chunks, so one process each would mostly be start-up).
+const OLD_GROUP: u64 = 64 << 20;
+
+/// `xtool.exe d:precomp[:...] - -` of one of the 2018 builds (`OLD_XTOOL`), with no crilayla.dll
+/// next to it (with one, those builds copy it to fixed crilayla<N>.dll names in their folder).
+pub fn is_old_stream_decode(argv: &[String]) -> bool {
+    let exe = std::path::Path::new(argv.first().map(String::as_str).unwrap_or(""));
+    let name = exe.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    name.starts_with("xtool")
+        && name.ends_with(".exe")
+        && argv.len() >= 4
+        && argv[1].to_ascii_lowercase().starts_with("d:precomp")
+        && argv[argv.len() - 2] == "-"
+        && argv[argv.len() - 1] == "-"
+        && !exe.with_file_name("crilayla.dll").exists()
+        && crate::stage::file_sha256(exe).is_some_and(|h| OLD_XTOOL.contains(&h.as_str()))
+}
+
+/// The 2018 XTool's options with its thread count set to `k` (`d:precomp:t100p` -> `d:precomp:t4`,
+/// `d:precomp:c16mb,t100p` -> `d:precomp:c16mb,t4`, `d:precomp` -> `d:precomp:t4`). The count only
+/// decides how many identical per-thread contexts take streams.
+pub fn old_threads_arg(arg: &str, k: usize) -> String {
+    let mut fields: Vec<String> = arg.split(':').map(str::to_string).collect();
+    if fields.len() < 3 {
+        fields.push(format!("t{k}"));
+        return fields.join(":");
+    }
+    let mut opts: Vec<String> = fields[2].split(',').filter(|o| !o.is_empty()).map(str::to_string).collect();
+    match opts.iter_mut().find(|o| o.starts_with(['t', 'T'])) {
+        Some(t) => *t = format!("t{k}"),
+        None => opts.push(format!("t{k}")),
+    }
+    fields[2] = opts.join(",");
+    fields.join(":")
+}
+
+/// One 2018-XTool record's leading fields after its count (read into `buf`), and its block size.
+/// count > 0: count x {u8 codec, u8 param, i32 size} (negative: |size| bytes kept, nothing
+/// written), then i64 block = the sum of |size|.
+fn old_record_head(input: &mut Stream, buf: &mut Vec<u8>, count: i32) -> io::Result<std::result::Result<u64, String>> {
+    if !(1..=4_000_000).contains(&count) {
+        return Ok(Err(format!("implausible stream count {count}")));
+    }
+    let at = buf.len();
+    if !read_exact_into(input, buf, 6 * count as usize + 8)? {
+        return Ok(Err("the stream ends inside a record".into()));
+    }
+    let heads = &buf[at..at + 6 * count as usize];
+    let mut sum = 0u64;
+    for h in heads.chunks_exact(6) {
+        let size = le_i32(&h[2..]);
+        if size == i32::MIN {
+            return Ok(Err("a stream size out of range".into()));
+        }
+        sum += size.unsigned_abs() as u64;
+    }
+    let block = le_i64(&buf[at + 6 * count as usize..]);
+    if block < 0 || block as u64 != sum {
+        return Ok(Err(format!("a record block of {block} bytes for streams of {sum}")));
+    }
+    Ok(Ok(sum))
+}
+
+/// Reads a 2018-XTool stream's header (an i32 chunk size, no magic) and its first record, and
+/// decides whether to split.
+pub fn probe_old(mut input: Stream) -> Result<Plan> {
+    let mut got = Vec::new();
+    let ok = (|| -> io::Result<std::result::Result<(), String>> {
+        if !read_exact_into(&mut input, &mut got, 8)? {
+            return Ok(Err("too short for the 2018 XTool layout".into()));
+        }
+        let chunk = le_i32(&got);
+        if !(65_536..=1 << 30).contains(&chunk) {
+            return Ok(Err(format!("not the 2018 XTool layout (chunk size {chunk})")));
+        }
+        let count = le_i32(&got[4..]);
+        if count < -1 {
+            return Ok(Err(format!("not the 2018 XTool layout (count {count})")));
+        }
+        if count == 0 && !read_exact_into(&mut input, &mut got, 4)? {
+            return Ok(Err("the stream ends inside a record".into()));
+        }
+        if count > 0
+            && let Err(e) = old_record_head(&mut input, &mut got, count)?
+        {
+            return Ok(Err(e));
+        }
+        Ok(Ok(()))
+    })()?;
+    Ok(match ok {
+        Ok(()) => {
+            let rest = got.split_off(4);
+            Plan::Split { header: got, rest: Box::new(io::Cursor::new(rest).chain(input)) }
+        }
+        Err(reason) => Plan::Single { reason, replay: Box::new(io::Cursor::new(got).chain(input)) },
+    })
 }
 
 /// Reads the stream header and the first chunk's headers, and decides whether to split.
@@ -366,6 +468,182 @@ pub fn run(
     Ok(Box::new(Output { coord, cur: Vec::new(), off: 0, ended: false }))
 }
 
+/// A 2018-XTool stream (`header` = its chunk size, then `rest`) restored by one process per group
+/// of whole records, at most `max_workers` at a time. Its records don't refer to each other
+/// (every codec context is reset per stream, no deduplication; reverse-engineered), but the
+/// original reads nothing while a record's last streams restore, which stalls the stage before.
+/// Each process gets the header, its records and the end marker (-1); a raw record (count 0) is
+/// passed on as it is. This layout keeps no output sizes: the process's exit status and the
+/// FitGirl CRC of every file are the checks.
+pub fn run_old(
+    header: Vec<u8>,
+    rest: Stream,
+    max_workers: usize,
+    spawn: impl Fn(u64) -> Result<Worker> + Send + 'static,
+    abort: impl Fn() + Send + Sync + 'static,
+    run_thread: impl Fn(String, Box<dyn FnOnce() -> Result<()> + Send>),
+    label: &str,
+) -> Result<Stream> {
+    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new() });
+    let abort: Arc<dyn Fn() + Send + Sync> = Arc::new(abort);
+    let (coord2, abort2) = (coord.clone(), abort.clone());
+    let label2 = label.to_string();
+    let dispatcher = move || -> Result<()> {
+        let mut input = rest;
+        let r = (|| -> Result<()> {
+            let mut item = 0u64;
+            // The group being gathered: its process input and its output estimate.
+            let mut group: Vec<u8> = Vec::new();
+            let mut estimate = 0u64;
+            let flush = |group: &mut Vec<u8>, estimate: &mut u64, item: &mut u64| -> Result<()> {
+                if group.is_empty() {
+                    return Ok(());
+                }
+                let mut data = Vec::with_capacity(header.len() + group.len() + 4);
+                data.extend_from_slice(&header);
+                data.append(group);
+                data.extend_from_slice(&(-1i32).to_le_bytes());
+                let est = std::mem::take(estimate);
+                {
+                    let mut s = coord2.s.lock().unwrap();
+                    loop {
+                        if let Some(f) = &s.failed {
+                            bail!("{f}");
+                        }
+                        let room = s.pending + est <= OUTPUT_BUDGET || *item == s.next_out;
+                        if room && s.running < max_workers {
+                            s.running += 1;
+                            s.pending += est;
+                            break;
+                        }
+                        s = coord2.cv.wait(s).unwrap();
+                    }
+                }
+                let wk = spawn(*item)?;
+                let n = *item;
+                let (coord3, abort3, child, exit_error, keep) = (coord2.clone(), abort2.clone(), wk.child, wk.exit_error, wk.keep);
+                let mut stdout = wk.stdout;
+                std::thread::Builder::new()
+                    .name(format!("{label2} records {n}"))
+                    .spawn(move || {
+                        if let Err(e) = collect_old(&mut stdout, n, est, &child, &*exit_error, &coord3) {
+                            coord3.fail(format!("{e:#}"));
+                            abort3();
+                        }
+                        drop(keep);
+                    })
+                    .expect("spawn thread");
+                // Its input from its own thread, so the next group is gathered meanwhile.
+                let (coord3, abort3, mut stdin) = (coord2.clone(), abort2.clone(), wk.stdin);
+                std::thread::Builder::new()
+                    .name(format!("{label2} records {n} in"))
+                    .spawn(move || {
+                        if let Err(e) = stdin.write_all(&data) {
+                            coord3.fail(format!("writing to xtool: {e}"));
+                            abort3();
+                        }
+                    })
+                    .expect("spawn thread");
+                *item += 1;
+                Ok(())
+            };
+            let mut block_in_group = 0u64;
+            loop {
+                let mut head = Vec::with_capacity(16);
+                if !read_exact_into(&mut input, &mut head, 4)? {
+                    bail!("xtool stream ended without its end marker");
+                }
+                let count = le_i32(&head);
+                if count < 0 {
+                    break;
+                }
+                if count == 0 {
+                    // Raw bytes: the output as they are.
+                    ensure!(read_exact_into(&mut input, &mut head, 4)?, "xtool stream cut short");
+                    let len = le_i32(&head[4..]);
+                    let mut data = Vec::new();
+                    if len > 0 {
+                        ensure!(read_exact_into(&mut input, &mut data, len as usize)?, "xtool stream cut short");
+                    }
+                    flush(&mut group, &mut estimate, &mut item)?;
+                    block_in_group = 0;
+                    let mut s = coord2.s.lock().unwrap();
+                    while s.pending > 0 && s.pending + data.len() as u64 > OUTPUT_BUDGET && item != s.next_out && s.failed.is_none() {
+                        s = coord2.cv.wait(s).unwrap();
+                    }
+                    s.pending += data.len() as u64;
+                    s.done.insert(item, data);
+                    coord2.cv.notify_all();
+                    drop(s);
+                    item += 1;
+                    continue;
+                }
+                let block = match old_record_head(&mut input, &mut head, count)? {
+                    Ok(b) => b,
+                    Err(e) => {
+                        DISABLED.store(true, Ordering::Relaxed);
+                        bail!("can't split this xtool stream ({e}); the next attempt uses one xtool");
+                    }
+                };
+                group.extend_from_slice(&head);
+                copy_n(&mut input, &mut group, block).context("reading an xtool record")?;
+                let mut gaps = 0u64;
+                for _ in 0..=count {
+                    let at = group.len();
+                    ensure!(read_exact_into(&mut input, &mut group, 4)?, "xtool stream cut short");
+                    let len = le_i32(&group[at..]);
+                    if len > 0 {
+                        ensure!(read_exact_into(&mut input, &mut group, len as usize)?, "xtool stream cut short");
+                        gaps += len as u64;
+                    }
+                }
+                estimate += block + gaps;
+                block_in_group += block;
+                if block_in_group >= OLD_GROUP {
+                    flush(&mut group, &mut estimate, &mut item)?;
+                    block_in_group = 0;
+                }
+            }
+            flush(&mut group, &mut estimate, &mut item)?;
+            let mut s = coord2.s.lock().unwrap();
+            s.chunks = Some(item);
+            coord2.cv.notify_all();
+            Ok(())
+        })();
+        if let Err(e) = &r {
+            coord2.fail(format!("{e:#}"));
+            abort2();
+        }
+        r
+    };
+    run_thread(format!("{label} (split)"), Box::new(dispatcher));
+    Ok(Box::new(Output { coord, cur: Vec::new(), off: 0, ended: false }))
+}
+
+/// Reads one group's xtool output to the end and checks xtool's exit status; `estimate` (held
+/// in the output budget meanwhile) is replaced by the real size.
+fn collect_old(
+    stdout: &mut ChildStdout,
+    item: u64,
+    estimate: u64,
+    child: &Mutex<Child>,
+    exit_error: &(dyn Fn(std::process::ExitStatus) -> anyhow::Error + Send + Sync),
+    coord: &Coord,
+) -> Result<()> {
+    let mut out = Vec::new();
+    stdout.read_to_end(&mut out).context("reading xtool's output")?;
+    let status = child.lock().unwrap().wait()?;
+    if !status.success() {
+        return Err(exit_error(status));
+    }
+    let mut s = coord.s.lock().unwrap();
+    s.pending = s.pending - estimate + out.len() as u64;
+    s.running -= 1;
+    s.done.insert(item, out);
+    coord.cv.notify_all();
+    Ok(())
+}
+
 fn copy_n(input: &mut Stream, out: &mut impl Write, mut n: u64) -> io::Result<()> {
     let mut buf = vec![0u8; (1 << 20).min(n.max(1) as usize)];
     while n > 0 {
@@ -521,6 +799,64 @@ mod tests {
                 Plan::Split { .. } => panic!("should not split"),
             }
         }
+    }
+
+    /// A 2018-XTool stream: chunk-size header, then records (stream sizes, gaps) and -1.
+    fn old_stream(records: &[(&[i32], &[i32])]) -> Vec<u8> {
+        let mut s = (16i32 << 20).to_le_bytes().to_vec();
+        for (sizes, gaps) in records {
+            s.extend_from_slice(&(sizes.len() as i32).to_le_bytes());
+            if sizes.is_empty() {
+                s.extend_from_slice(&gaps[0].to_le_bytes());
+                s.extend(std::iter::repeat_n(9u8, gaps[0].max(0) as usize));
+                continue;
+            }
+            for &z in *sizes {
+                s.extend_from_slice(&[0, 96]);
+                s.extend_from_slice(&z.to_le_bytes());
+            }
+            let block: i64 = sizes.iter().map(|z| z.unsigned_abs() as i64).sum();
+            s.extend_from_slice(&block.to_le_bytes());
+            s.extend(std::iter::repeat_n(1u8, block as usize));
+            for &g in *gaps {
+                s.extend_from_slice(&g.to_le_bytes());
+                s.extend(std::iter::repeat_n(2u8, g.max(0) as usize));
+            }
+        }
+        s.extend_from_slice(&(-1i32).to_le_bytes());
+        s
+    }
+
+    #[test]
+    fn old_xtool_streams() {
+        // Records with a skipped stream (negative size), empty gaps (0, -3) and a raw record.
+        let data = old_stream(&[(&[5, -3], &[1, 0, -3]), (&[], &[4]), (&[7], &[2, 2])]);
+        match probe_old(Box::new(io::Cursor::new(data.clone()))).unwrap() {
+            Plan::Split { header, mut rest } => {
+                assert_eq!(header, (16i32 << 20).to_le_bytes());
+                let mut r = Vec::new();
+                rest.read_to_end(&mut r).unwrap();
+                assert_eq!([header, r].concat(), data);
+            }
+            Plan::Single { reason, .. } => panic!("{reason}"),
+        }
+        // A first record whose block doesn't add up, or an XTL0 stream: one xtool, every byte kept.
+        let mut bad = old_stream(&[(&[5, 3], &[1, 1, 1])]);
+        bad[4 + 4 + 12] = 9;
+        for s in [bad, b"XTL0 something".to_vec()] {
+            match probe_old(Box::new(io::Cursor::new(s.clone()))).unwrap() {
+                Plan::Single { mut replay, .. } => {
+                    let mut r = Vec::new();
+                    replay.read_to_end(&mut r).unwrap();
+                    assert_eq!(r, s);
+                }
+                Plan::Split { .. } => panic!("split"),
+            }
+        }
+        assert_eq!(old_threads_arg("d:precomp:t100p", 4), "d:precomp:t4");
+        assert_eq!(old_threads_arg("d:precomp:c16mb,t100p", 3), "d:precomp:c16mb,t3");
+        assert_eq!(old_threads_arg("d:precomp", 2), "d:precomp:t2");
+        assert_eq!(old_threads_arg("d:precomp:c16mb", 2), "d:precomp:c16mb,t2");
     }
 
     #[test]

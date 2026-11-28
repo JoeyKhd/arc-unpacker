@@ -617,6 +617,16 @@ fn external_untee(spec: ExtSpec, mut input: Stream, ctx: &Ctx) -> Result<Stream>
                 }
             }
         }
+        // The 2018 XTool: groups of whole records to several processes.
+        if workers > 1 && crate::xtsplit::is_old_stream_decode(&spec.argv) {
+            match crate::xtsplit::probe_old(input)? {
+                crate::xtsplit::Plan::Split { header, rest } => return xtool_split_old(spec, header, rest, workers, ctx),
+                crate::xtsplit::Plan::Single { reason, replay } => {
+                    eprintln!("note: {}: not split ({reason}); one xtool decodes it", spec.label);
+                    input = replay;
+                }
+            }
+        }
         // Fast path: stdin -> codec -> stdout, read directly by the next stage.
         let (ahead_in, ahead_out) = if ctx.readahead { barrier_codec(&spec) } else { (0, 0) };
         if ahead_in > 0 {
@@ -708,7 +718,7 @@ fn barrier_codec(spec: &ExtSpec) -> (usize, usize) {
 }
 
 /// A file's SHA-256 in hex, once per path and size.
-fn file_sha256(p: &Path) -> Option<String> {
+pub(crate) fn file_sha256(p: &Path) -> Option<String> {
     static SEEN: Mutex<Vec<(PathBuf, u64, Option<String>)>> = Mutex::new(Vec::new());
     let len = std::fs::metadata(p).ok()?.len();
     let mut seen = SEEN.lock().unwrap();
@@ -812,6 +822,37 @@ fn xtool_split(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx
     };
     let (reg, reg2) = (ctx.reg.clone(), ctx.reg.clone());
     crate::xtsplit::run(header, rest, workers, spawn, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
+}
+
+/// Decodes a 2018-XTool stream with up to `workers` processes (see `xtsplit::run_old`), each
+/// with twice its share of the CPUs as its thread count (at least 2, so it restores the way the
+/// original does with t100p): their threads wait at every record's end, and a short stream
+/// with few groups still gets most of the CPUs.
+fn xtool_split_old(spec: ExtSpec, header: Vec<u8>, rest: Stream, workers: usize, ctx: &Ctx) -> Result<Stream> {
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let k = (cpus * 2).div_ceil(workers.max(1)).clamp(2, cpus.max(2));
+    let mut base = spec.clone();
+    base.argv[1] = crate::xtsplit::old_threads_arg(&spec.argv[1], k);
+    base.label = format!("{} (split)", spec.label);
+    // Each its own folder, whatever a config says (0.9 works in its exe folder anyway).
+    base.workdir = None;
+    let ctx2 = ctx.clone();
+    let spawn = move |_item: u64| -> Result<crate::xtsplit::Worker> {
+        let own_dir = own_workdir(&base, &ctx2)?;
+        let mut cmd = command(&base, Path::new(""), Path::new(""), workdir_of(&base, &own_dir), ctx2.tune);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let sp = spawn_child(&base, cmd, &ctx2)?;
+        let (label, tail) = (base.label.clone(), sp.stderr_tail.clone());
+        Ok(crate::xtsplit::Worker {
+            stdin: sp.stdin.unwrap(),
+            stdout: sp.stdout.unwrap(),
+            child: sp.child,
+            exit_error: Box::new(move |status| exit_error(&label, status, &tail)),
+            keep: Box::new(own_dir),
+        })
+    };
+    let (reg, reg2) = (ctx.reg.clone(), ctx.reg.clone());
+    crate::xtsplit::run_old(header, rest, workers, spawn, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
 }
 
 /// The extension written right after a placeholder in a command ("{output}.mp3" -> ".mp3").
