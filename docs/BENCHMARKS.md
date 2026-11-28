@@ -72,7 +72,6 @@
 | Goat Simulator 3 | 5.5 GB | 3 min 18 s | 1 min 45 s | **1.9×** | 0.1.0-beta.8 |
 | Revenge of the Mage | 6.1 GB | 3 min 45 s | 2 min 00 s | **1.9×** | 0.1.0-beta.8 |
 | Serious Sam Fusion | 4.6 GB | 2 min 29 s | 1 min 20 s | **1.9×** | 0.1.0-beta.6 |
-| The Killing Stone | 4.4 GB | 1 min 58 s | 1 min 04 s | **1.9×** | 0.1.0-beta.6 |
 | Witch Cabin Cleanup | 2.4 GB | 39 s | 21 s | **1.9×** | 0.1.0-beta.10 |
 | Car Mechanic Simulator 2021 | 10.8 GB | 7 min 40 s | 4 min 11 s | **1.8×** | 1.0.5 |
 | Fran Bow | 0.9 GB | 1 min 59 s | 1 min 05 s | **1.8×** | 1.0.3-dev |
@@ -80,6 +79,7 @@
 | Frontier Tale | 0.6 GB | 50 s | 28 s | **1.8×** | 0.1.0-beta.9 |
 | Moadra | 3.3 GB | 50 s | 28 s | **1.8×** | 1.0.7 |
 | Need for Speed - Most Wanted | 3.6 GB | 2 min 49 s | 1 min 32 s | **1.8×** | 1.0.6 |
+| The Killing Stone | 4.4 GB | 1 min 58 s | 1 min 04 s | **1.8×** | 1.0.7 |
 | Batman - Arkham City | 13.5 GB | 12 min 27 s | 7 min 30 s | **1.7×** | 1.0.3-dev |
 | Hades | 9.2 GB | 6 min 00 s | 3 min 36 s | **1.7×** | 1.0.7 |
 | The Rogue Prince of Persia | 0.5 GB | 41 s | 25 s | **1.7×** | 0.1.0-beta.9 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 20 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 21 s** | **1.8×** | |
