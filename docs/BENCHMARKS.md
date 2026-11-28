@@ -7,12 +7,12 @@
 | Blitzkrieg 3 | 1.7 GB | 1 min 43 s | 26 s | **3.9×** | 0.1.0-beta.6 |
 | Hearts of Iron IV | 4.6 GB | 5 min 40 s | 1 min 27 s | **3.9×** | 0.1.0-beta.8 |
 | Hollow Knight - Silksong | 1.8 GB | 1 min 56 s | 30 s | **3.9×** | 0.1.0-beta.6 |
+| Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 36 s | **3.9×** | 1.0.7 |
 | Void Reaver | 2.1 GB | 1 min 18 s | 20 s | **3.9×** | 0.1.0-beta.8 |
 | SURI - The Seventh Note | 1.8 GB | 1 min 33 s | 25 s | **3.8×** | 0.1.0-beta.10 |
 | Chained Beasts | 0.5 GB | 30 s | 8 s | **3.7×** | 0.1.0-beta.9 |
 | Crusader Kings 3 | 6.0 GB | 6 min 16 s | 1 min 41 s | **3.7×** | 0.1.0-beta.7 |
 | Left 4 Dead 2 | 10.2 GB | 5 min 32 s | 1 min 36 s | **3.5×** | 1.0.2-dev |
-| Minecraft - Bedrock Edition | 0.7 GB | 2 min 22 s | 41 s | **3.5×** | 0.1.0-beta.6 |
 | The Witch's Bakery | 2.3 GB | 39 s | 11 s | **3.5×** | 0.1.0-beta.10 |
 | God of War III Remastered | 30.0 GB | 6 min 14 s | 1 min 49 s | **3.4×** | 0.1.0-beta.7 |
 | Assetto Corsa | 7.3 GB | 10 min 50 s | 3 min 23 s | **3.2×** | 1.0.7 |
@@ -210,4 +210,4 @@
 | Clair Obscur: Expedition 33 | 33.3 GB | – | – | – | |
 | TEKKEN 7 | 15.3 GB | – | – | – | |
 | REPLACED | 1.7 GB | – | – | – | |
-| **All 115 measured** | | **627 min 47 s** | **358 min 22 s** | **1.8×** | |
+| **All 115 measured** | | **627 min 47 s** | **358 min 17 s** | **1.8×** | |
