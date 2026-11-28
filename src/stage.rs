@@ -34,6 +34,8 @@ pub struct Registry {
     pub native: Arc<Mutex<Vec<(String, f64, f64)>>>,
     /// Set once the block is being torn down; later failures are consequences, not causes.
     pub aborted: Arc<std::sync::atomic::AtomicBool>,
+    /// Set (before `aborted`) when it is torn down because it made no progress.
+    pub stalled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Registry {
@@ -832,8 +834,8 @@ fn bink_split(spec: ExtSpec, input: Stream, ctx: &Ctx) -> Result<Stream> {
     let single: crate::bikzsplit::Single = Box::new(move |s: Stream| external_untee(one.clone(), s, &ctx3));
     let (reg, reg2) = (ctx.reg.clone(), ctx.reg.clone());
     let workers = crate::bikzsplit::workers();
-    let aborted = ctx.reg.aborted.clone();
-    crate::bikzsplit::run(input, workers, spawn, single, aborted, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
+    let stop = crate::bikzsplit::Stop { aborted: ctx.reg.aborted.clone(), stalled: ctx.reg.stalled.clone() };
+    crate::bikzsplit::run(input, workers, spawn, single, stop, move || reg.kill_all(), move |label, f| reg2.worker(label, f), &spec.label)
 }
 
 /// Decodes an xtool stream with up to `workers` xtool processes (see `xtsplit`).

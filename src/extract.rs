@@ -905,6 +905,7 @@ fn run_block(archive: &Archive, block: &DataBlock, cfg: &Config, opts: &Options,
                     since = Instant::now();
                 } else if limit.is_some_and(|l| since.elapsed() > l) {
                     stalled.store(true, Ordering::Relaxed);
+                    reg.stalled.store(true, Ordering::Relaxed);
                     reg.kill_all();
                     return;
                 }

@@ -30,7 +30,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 /// The cls-zstd.dll every known setup ships (UPX-packed, 32-bit, 2017).
 const CLS_ZSTD: (u64, &str) = (85_504, "fb0b85e32eac59200a807f1ff51b7f1a865faa65e9dfbe39c75a8dcaa5be3fd3");
@@ -337,9 +338,19 @@ struct Shared {
     failed: Option<String>,
 }
 
+/// The block's stop flags (the codec registry's).
+#[derive(Default, Clone)]
+pub struct Stop {
+    /// The block is being torn down (cancelled, stalled, or another stage failed).
+    pub aborted: Arc<AtomicBool>,
+    /// It was torn down because it made no progress.
+    pub stalled: Arc<AtomicBool>,
+}
+
 struct Coord {
     s: Mutex<Shared>,
     cv: Condvar,
+    stop: Stop,
 }
 
 impl Coord {
@@ -350,12 +361,28 @@ impl Coord {
         }
         self.cv.notify_all();
     }
+
+    /// A block being torn down stops the split too, so it starts no process after the others
+    /// were killed.
+    fn check(&self, s: &mut Shared) {
+        if self.stop.aborted.load(Ordering::Relaxed) && s.failed.is_none() {
+            s.failed = Some("stopped".into());
+            self.cv.notify_all();
+        }
+    }
+
+    /// Waits for a change, or 200 ms (the stop flag is only set, never signalled).
+    fn wait<'a>(&self, s: MutexGuard<'a, Shared>) -> MutexGuard<'a, Shared> {
+        let mut s = self.cv.wait_timeout(s, Duration::from_millis(200)).unwrap().0;
+        self.check(&mut s);
+        s
+    }
 }
 
 /// Decodes a cls-zstd stream with one process per group of whole coded blocks, at most
 /// `max_workers` at a time, started by `spawn`; stored blocks are passed on here, and from
 /// anything unexpected on (a stream of another kind: all of it) the rest goes to `single`.
-/// `abort` stops every process of the block (on any failure); `aborted` says it was stopped.
+/// `abort` stops every process of the block (on any failure); `stop` says it was stopped.
 /// The stream is read on its own thread only, so this returns at once.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -363,18 +390,18 @@ pub fn run(
     max_workers: usize,
     spawn: impl Fn(u64) -> Result<Worker> + Send + 'static,
     single: Single,
-    aborted: Arc<AtomicBool>,
+    stop: Stop,
     abort: impl Fn() + Send + Sync + 'static,
     run_thread: impl Fn(String, Box<dyn FnOnce() -> Result<()> + Send>),
     label: &str,
 ) -> Result<Stream> {
-    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new() });
+    let coord = Arc::new(Coord { s: Mutex::new(Shared::default()), cv: Condvar::new(), stop });
     let abort: Arc<dyn Fn() + Send + Sync> = Arc::new(abort);
     let (coord2, abort2, label2) = (coord.clone(), abort.clone(), label.to_string());
     let budget = budget();
     let dispatcher = move || -> Result<()> {
         let r = match probe(input) {
-            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, &spawn, &coord2, &aborted, &abort2, &label2),
+            Ok(Plan::Split { rest }) => dispatch(rest, max_workers, budget, &spawn, &coord2, &abort2, &label2),
             Ok(Plan::Single { reason, replay }) => {
                 eprintln!("note: {label2}: not split ({reason}); one cls-zstd decodes it");
                 let mut s = coord2.s.lock().unwrap();
@@ -395,14 +422,12 @@ pub fn run(
     Ok(Box::new(Output { coord, single, cur: None }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dispatch(
     mut input: Stream,
     max_workers: usize,
     budget: u64,
     spawn: &dyn Fn(u64) -> Result<Worker>,
     coord: &Arc<Coord>,
-    aborted: &Arc<AtomicBool>,
     abort: &Arc<dyn Fn() + Send + Sync>,
     label: &str,
 ) -> Result<()> {
@@ -423,6 +448,7 @@ fn dispatch(
         {
             let mut s = coord.s.lock().unwrap();
             loop {
+                coord.check(&mut s);
                 if let Some(f) = &s.failed {
                     bail!("{f}");
                 }
@@ -432,12 +458,12 @@ fn dispatch(
                     s.pending += inlen + est;
                     break;
                 }
-                s = coord.cv.wait(s).unwrap();
+                s = coord.wait(s);
             }
         }
         let wk = spawn(*item)?;
         let n = *item;
-        let (coord3, aborted3, abort3, mut output, wait) = (coord.clone(), aborted.clone(), abort.clone(), wk.output, wk.wait);
+        let (coord3, abort3, mut output, wait) = (coord.clone(), abort.clone(), wk.output, wk.wait);
         std::thread::Builder::new()
             .name(format!("{label} blocks {n}"))
             .spawn(move || {
@@ -458,8 +484,14 @@ fn dispatch(
                     }
                     // Killed with the rest of the block (stopped, or another stage failed): that
                     // says nothing about the split, whose own failure sets this before it stops
-                    // the block.
-                    Err(_) if aborted3.load(Ordering::Relaxed) => coord3.fail("stopped".into()),
+                    // the block. A copy that made no progress until the watchdog stopped the
+                    // block may be one this split fed wrongly: later streams go to one copy.
+                    Err(_) if coord3.stop.aborted.load(Ordering::Relaxed) => {
+                        if coord3.stop.stalled.load(Ordering::Relaxed) {
+                            DISABLED.store(true, Ordering::Relaxed);
+                        }
+                        coord3.fail("stopped".into());
+                    }
                     Err(e) => {
                         DISABLED.store(true, Ordering::Relaxed);
                         coord3.fail(format!("{e:#}"));
@@ -498,8 +530,9 @@ fn dispatch(
     // Passes output on as it is (stored blocks), after the group before it.
     let emit = |data: Vec<u8>, item: &mut u64| -> Result<()> {
         let mut s = coord.s.lock().unwrap();
+        coord.check(&mut s);
         while s.pending > 0 && s.pending + data.len() as u64 > budget && *item != s.next_out && s.failed.is_none() {
-            s = coord.cv.wait(s).unwrap();
+            s = coord.wait(s);
         }
         if let Some(f) = &s.failed {
             bail!("{f}");
@@ -536,6 +569,10 @@ fn dispatch(
                         blk.append(&mut head);
                         break Some((e, blk));
                     }
+                }
+                if group.len() == MAGIC.len() {
+                    // (Room for the whole group and its end byte at once.)
+                    group.reserve_exact(limit.max(blk.len()) + 1);
                 }
                 group.append(&mut blk);
                 if group.len() >= limit {
@@ -607,6 +644,7 @@ impl Read for Output {
             }
             let mut s = self.coord.s.lock().unwrap();
             loop {
+                self.coord.check(&mut s);
                 if let Some(f) = &s.failed {
                     return Err(io::Error::other(f.clone()));
                 }
@@ -628,7 +666,7 @@ impl Read for Output {
                     self.cur = Some(r);
                     break;
                 }
-                s = self.coord.cv.wait(s).unwrap();
+                s = self.coord.wait(s);
             }
         }
     }
@@ -882,6 +920,10 @@ mod tests {
     }
 
     fn split(data: &[u8], workers: usize) -> (Result<Vec<u8>>, u64) {
+        split_stop(data, workers, Stop::default())
+    }
+
+    fn split_stop(data: &[u8], workers: usize, stop: Stop) -> (Result<Vec<u8>>, u64) {
         let spawned = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let sp = spawned.clone();
         let spawn = move |_| -> Result<Worker> {
@@ -906,7 +948,7 @@ mod tests {
         let single: Single = Box::new(|s| Ok(Box::new(io::Cursor::new(fake_decode(s))) as Stream));
         let r = (|| {
             let input: Stream = Box::new(io::Cursor::new(data.to_vec()));
-            let mut out = run(input, workers, spawn, single, Default::default(), || {}, |_, f| {
+            let mut out = run(input, workers, spawn, single, stop, || {}, |_, f| {
                 std::thread::spawn(f);
             }, "test")?;
             let mut v = Vec::new();
@@ -1005,6 +1047,20 @@ mod tests {
             }
             Plan::Split { .. } => panic!("split"),
         }
+    }
+
+    #[test]
+    fn a_stopped_block_starts_nothing() {
+        let mut s = MAGIC.to_vec();
+        for i in 0..10u8 {
+            s.extend(coded(true, 1, &[vec![60_000, 70_000], vec![-1]], i));
+        }
+        s.push(END);
+        let stop = Stop::default();
+        stop.aborted.store(true, Ordering::Relaxed);
+        let (got, spawned) = split_stop(&s, 4, stop);
+        assert!(got.is_err(), "an error, never a short stream");
+        assert_eq!(spawned, 0);
     }
 
     /// A captured cls-zstd input (`ARC_UNPACK_TEE_DIR`) walked to its end marker:
